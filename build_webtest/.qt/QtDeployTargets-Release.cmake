@@ -1,0 +1,6 @@
+set(__QT_DEPLOY_TARGET_MalloyStudio_FILE E:/MalloyStudio/build_webtest/Release/MalloyStudio.exe)
+set(__QT_DEPLOY_TARGET_MalloyStudio_TYPE EXECUTABLE)
+set(__QT_DEPLOY_TARGET_MalloyStudio_RUNTIME_DLLS C:/msys64/mingw64/bin/Qt6Widgets.dll;C:/msys64/mingw64/bin/Qt6Gui.dll;C:/msys64/mingw64/bin/Qt6Core.dll)
+set(__QT_DEPLOY_TARGET_MalloyStudioTests_FILE E:/MalloyStudio/build_webtest/Release/MalloyStudioTests.exe)
+set(__QT_DEPLOY_TARGET_MalloyStudioTests_TYPE EXECUTABLE)
+set(__QT_DEPLOY_TARGET_MalloyStudioTests_RUNTIME_DLLS C:/msys64/mingw64/bin/Qt6Widgets.dll;C:/msys64/mingw64/bin/Qt6Test.dll;C:/msys64/mingw64/bin/Qt6Gui.dll;C:/msys64/mingw64/bin/Qt6Core.dll)

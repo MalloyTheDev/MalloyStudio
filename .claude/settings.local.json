@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(export PATH=\"/c/msys64/mingw64/bin:$PATH\")",
+      "Bash(./MalloyStudioTests.exe)",
+      "Bash(./MalloyStudioTests.exe -v2)",
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(./MalloyStudioTests.exe -v1)",
+      "Bash(cmd.exe //c \"MalloyStudioTests.exe -v1\")",
+      "Bash(cmd.exe //c \"cd /d E:\\\\\\\\MalloyStudio\\\\\\\\build && MalloyStudioTests.exe -v1\")",
+      "Bash(nm MalloyStudioTests.exe)"
+    ]
+  }
+}
