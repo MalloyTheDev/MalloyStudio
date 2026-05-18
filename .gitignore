@@ -10,3 +10,4 @@ compile_commands.json
 *.exe
 *.dll
 *.pdb
+.claude/
