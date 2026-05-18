@@ -37,6 +37,7 @@ private slots:
     void onMoveFilterDown();
     void onFilterSelectionChanged();
     void applyCurrentFilterProps();
+    void onFilterEnabledToggled(bool enabled);
 
 private:
     void setControlsEnabled(bool enabled);
@@ -84,8 +85,9 @@ private:
     QSpinBox*    m_browserRefreshHz   = nullptr;  // Browser: refresh rate spinbox
 
     // Filters section
-    QGroupBox*    m_filtersGroup = nullptr;
-    QListWidget*  m_filterList   = nullptr;
+    QGroupBox*    m_filtersGroup  = nullptr;
+    QListWidget*  m_filterList    = nullptr;
+    QCheckBox*    m_filterEnabled = nullptr;   // Tier 3: toggle the currently-selected filter on/off
     // Per-filter property pages (stacked widget)
     QStackedWidget* m_filterProps        = nullptr;
     int             m_filterPageEmpty    = 0;

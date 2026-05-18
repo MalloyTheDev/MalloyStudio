@@ -39,6 +39,14 @@ ControlsBar::ControlsBar(QWidget* parent) : QWidget(parent) {
     m_streamTimer->setStyleSheet(QStringLiteral("color: #e08030; font-weight: bold;"));
     layout->addWidget(m_streamTimer);
 
+    // Live ffmpeg progress shown next to the timer while streaming. Smaller +
+    // dimmer than the timer so it reads as supplementary detail, not status.
+    m_streamStats = new QLabel(QStringLiteral(""), this);
+    m_streamStats->setVisible(false);
+    m_streamStats->setStyleSheet(QStringLiteral(
+        "color: #b08060; font-size: 8pt; padding-left: 4px;"));
+    layout->addWidget(m_streamStats);
+
     m_streamBtn = new QPushButton(tr("⬛  Start Stream"), this);
     m_streamBtn->setMinimumWidth(130);
     layout->addWidget(m_streamBtn);
@@ -161,7 +169,19 @@ void ControlsBar::forceStopStreaming() {
         m_streamTicker = nullptr;
     }
     m_streamTimer->setVisible(false);
+    if (m_streamStats) {
+        m_streamStats->setVisible(false);
+        m_streamStats->clear();
+    }
     m_streamBtn->setText(tr("⬛  Start Stream"));
+}
+
+void ControlsBar::setStreamStats(int bitrateKbps, int droppedFrames) {
+    if (!m_streaming || !m_streamStats) return;
+    m_streamStats->setText(QStringLiteral("· %1 kbps · drops %2")
+                               .arg(bitrateKbps)
+                               .arg(droppedFrames));
+    m_streamStats->setVisible(true);
 }
 
 void ControlsBar::setStreamEnabled(bool enabled, const QString& disabledTooltip) {

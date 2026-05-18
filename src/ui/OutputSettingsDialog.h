@@ -55,4 +55,10 @@ private:
 
     // Replay buffer duration (0 = disabled)
     QSpinBox*  m_replayBuffer = nullptr;
+
+    // Tier 3: top-of-form quality preset combo. Applying a preset jams a
+    // {W, H, FPS, CRF, bitrate} bundle into the per-field widgets; subsequent
+    // manual edits to any of those widgets bumps the combo back to "Custom".
+    QComboBox* m_qualityPreset = nullptr;
+    bool       m_applyingPreset = false;
 };

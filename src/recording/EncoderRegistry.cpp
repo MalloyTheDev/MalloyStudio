@@ -83,20 +83,27 @@ QList<EncoderRegistry::Encoder> buildRegistry() {
     QList<EncoderRegistry::Encoder> list;
 
     // --- Software (always listed) ---
+    // libx264 / libx265 accept `-tune zerolatency` which disables look-ahead
+    // and B-frames — required for live RTMP delivery to Twitch/YouTube.
     list.push_back({
         QStringLiteral("libx264"),
         QStringLiteral("libx264 (H.264, software)"),
         false,
-        [](const OutputSettings& s) { return buildSoftwareArgs(s, QStringLiteral("libx264")); }
+        [](const OutputSettings& s) { return buildSoftwareArgs(s, QStringLiteral("libx264")); },
+        QStringLiteral("zerolatency")
     });
     list.push_back({
         QStringLiteral("libx265"),
         QStringLiteral("libx265 (H.265/HEVC, software)"),
         false,
-        [](const OutputSettings& s) { return buildSoftwareArgs(s, QStringLiteral("libx265")); }
+        [](const OutputSettings& s) { return buildSoftwareArgs(s, QStringLiteral("libx265")); },
+        QStringLiteral("zerolatency")
     });
 
     // --- NVIDIA NVENC ---
+    // NVENC's tune vocabulary is hq | ll | ull. "ull" (ultra-low-latency)
+    // disables look-ahead and B-frames — the streaming counterpart to
+    // libx264's `-tune zerolatency`. Requires ffmpeg 5.x+.
     if (available.contains(QStringLiteral("h264_nvenc"))) {
         list.push_back({
             QStringLiteral("h264_nvenc"),
@@ -105,7 +112,8 @@ QList<EncoderRegistry::Encoder> buildRegistry() {
             [](const OutputSettings& s) {
                 return buildHardwareArgs(s, QStringLiteral("h264_nvenc"),
                                          QStringLiteral("p4"), true);
-            }
+            },
+            QStringLiteral("ull")
         });
     }
     if (available.contains(QStringLiteral("hevc_nvenc"))) {
@@ -116,11 +124,14 @@ QList<EncoderRegistry::Encoder> buildRegistry() {
             [](const OutputSettings& s) {
                 return buildHardwareArgs(s, QStringLiteral("hevc_nvenc"),
                                          QStringLiteral("p4"), true);
-            }
+            },
+            QStringLiteral("ull")
         });
     }
 
     // --- Intel Quick Sync ---
+    // QSV does NOT accept `-tune`; passing it produces "Unknown option" and
+    // ffmpeg exits -22. Leave streamingTune empty so StreamingPipeline omits it.
     if (available.contains(QStringLiteral("h264_qsv"))) {
         list.push_back({
             QStringLiteral("h264_qsv"),
@@ -128,7 +139,8 @@ QList<EncoderRegistry::Encoder> buildRegistry() {
             true,
             [](const OutputSettings& s) {
                 return buildHardwareArgs(s, QStringLiteral("h264_qsv"), QString(), false);
-            }
+            },
+            QString()
         });
     }
     if (available.contains(QStringLiteral("hevc_qsv"))) {
@@ -138,11 +150,14 @@ QList<EncoderRegistry::Encoder> buildRegistry() {
             true,
             [](const OutputSettings& s) {
                 return buildHardwareArgs(s, QStringLiteral("hevc_qsv"), QString(), false);
-            }
+            },
+            QString()
         });
     }
 
     // --- AMD AMF ---
+    // AMF rejects -tune. Use -usage lowlatency separately if we ever need
+    // that knob; for v7 the CBR rate-control alone is enough.
     if (available.contains(QStringLiteral("h264_amf"))) {
         list.push_back({
             QStringLiteral("h264_amf"),
@@ -150,7 +165,8 @@ QList<EncoderRegistry::Encoder> buildRegistry() {
             true,
             [](const OutputSettings& s) {
                 return buildHardwareArgs(s, QStringLiteral("h264_amf"), QString(), false);
-            }
+            },
+            QString()
         });
     }
     if (available.contains(QStringLiteral("hevc_amf"))) {
@@ -160,7 +176,8 @@ QList<EncoderRegistry::Encoder> buildRegistry() {
             true,
             [](const OutputSettings& s) {
                 return buildHardwareArgs(s, QStringLiteral("hevc_amf"), QString(), false);
-            }
+            },
+            QString()
         });
     }
 

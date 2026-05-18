@@ -2,6 +2,7 @@
 #include "model/SceneCollection.h"
 #include "model/Scene.h"
 
+#include <QLabel>
 #include <QListWidget>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -14,6 +15,14 @@ ScenesPanel::ScenesPanel(SceneCollection* scenes, QWidget* parent)
 {
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(4, 4, 4, 4);
+
+    // Empty-state hint shown when the project has zero scenes (Tier 3 polish).
+    m_emptyLabel = new QLabel(tr("No scenes yet — click + to add one."), this);
+    m_emptyLabel->setAlignment(Qt::AlignCenter);
+    m_emptyLabel->setWordWrap(true);
+    m_emptyLabel->setStyleSheet(QStringLiteral("color: #888; padding: 24px;"));
+    m_emptyLabel->setVisible(false);
+    layout->addWidget(m_emptyLabel);
 
     m_list = new QListWidget(this);
     m_list->setEditTriggers(QAbstractItemView::DoubleClicked | QAbstractItemView::EditKeyPressed);
@@ -64,6 +73,11 @@ void ScenesPanel::rebuild() {
     if (cur >= 0 && cur < m_list->count()) {
         m_list->setCurrentRow(cur);
     }
+    // Empty-state visibility — show the helpful label only when there are no
+    // scenes; otherwise hide it and let the list take the panel.
+    const bool empty = m_list->count() == 0;
+    if (m_emptyLabel) m_emptyLabel->setVisible(empty);
+    m_list->setVisible(!empty);
     m_updating = false;
 }
 

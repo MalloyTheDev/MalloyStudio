@@ -11,6 +11,35 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
+// ---------------------------------------------------------------------------
+// Quality preset table — bundles {width, height, fps, crf, bitrateKbps} so
+// the user can pick a one-click "1080p60 High" instead of fiddling with five
+// separate fields. Adding/changing a preset only requires editing this table.
+//
+// crfHint targets software encoders (libx264/libx265). For hardware codecs the
+// dialog hides CRF and shows bitrate; preset still applies bitrate either way.
+// ---------------------------------------------------------------------------
+namespace {
+struct QualityPreset {
+    QString  label;
+    int      width;
+    int      height;
+    int      fps;
+    int      crf;
+    int      bitrateKbps;
+};
+
+QList<QualityPreset> kOutputPresets() {
+    return {
+        {QStringLiteral("1080p60 High Quality"), 1920, 1080, 60, 18,  9000},
+        {QStringLiteral("1080p30 Balanced"),     1920, 1080, 30, 23,  4500},
+        {QStringLiteral("720p60 Streaming"),     1280,  720, 60, 23,  4500},
+        {QStringLiteral("720p30 Fast"),          1280,  720, 30, 26,  2500},
+        {QStringLiteral("4K30 Cinematic"),       3840, 2160, 30, 20, 25000},
+    };
+}
+} // namespace
+
 OutputSettingsDialog::OutputSettingsDialog(const OutputSettings& s, QWidget* parent)
     : QDialog(parent)
 {
@@ -19,6 +48,17 @@ OutputSettingsDialog::OutputSettingsDialog(const OutputSettings& s, QWidget* par
 
     auto* form = new QFormLayout;
     form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+
+    // ── Quality preset (top of form) ────────────────────────────────────────
+    m_qualityPreset = new QComboBox(this);
+    m_qualityPreset->addItem(tr("Custom"), -1);
+    int presetIdx = 0;
+    for (const auto& p : kOutputPresets()) {
+        m_qualityPreset->addItem(p.label, presetIdx++);
+    }
+    m_qualityPreset->setCurrentIndex(0);   // Custom by default; user picks to apply
+    m_qualityPreset->setToolTip(tr("Apply a recommended {resolution, fps, quality, bitrate} bundle."));
+    form->addRow(tr("Quality preset"), m_qualityPreset);
 
     // ── Resolution ──────────────────────────────────────────────────────────
     m_width  = new QSpinBox(this);
@@ -158,6 +198,36 @@ OutputSettingsDialog::OutputSettingsDialog(const OutputSettings& s, QWidget* par
     connect(m_videoCodec, &QComboBox::currentIndexChanged,
             this, &OutputSettingsDialog::onCodecChanged);
     onCodecChanged(m_videoCodec->currentIndex());
+
+    // ── Quality preset application + dirty-detect ──────────────────────────
+    // Applying a preset writes through the per-field widgets in one batch.
+    // Any subsequent manual change flips the combo back to "Custom" so users
+    // see immediately that they've drifted off a recommendation.
+    connect(m_qualityPreset, &QComboBox::currentIndexChanged, this,
+            [this](int comboIdx) {
+        const int dataIdx = m_qualityPreset->itemData(comboIdx).toInt();
+        if (dataIdx < 0) return;   // "Custom" entry — leave fields alone
+        const auto presets = kOutputPresets();
+        if (dataIdx < 0 || dataIdx >= presets.size()) return;
+        const QualityPreset& p = presets.at(dataIdx);
+        m_applyingPreset = true;
+        m_width->setValue(p.width);
+        m_height->setValue(p.height);
+        m_fps->setValue(p.fps);
+        m_crf->setValue(p.crf);
+        m_bitrateKbps->setValue(p.bitrateKbps);
+        m_applyingPreset = false;
+    });
+    auto driftToCustom = [this] {
+        if (m_applyingPreset) return;
+        if (m_qualityPreset->currentIndex() != 0)
+            m_qualityPreset->setCurrentIndex(0);
+    };
+    connect(m_width,       QOverload<int>::of(&QSpinBox::valueChanged), this, [driftToCustom](int){ driftToCustom(); });
+    connect(m_height,      QOverload<int>::of(&QSpinBox::valueChanged), this, [driftToCustom](int){ driftToCustom(); });
+    connect(m_fps,         QOverload<int>::of(&QSpinBox::valueChanged), this, [driftToCustom](int){ driftToCustom(); });
+    connect(m_crf,         &QSlider::valueChanged,                       this, [driftToCustom](int){ driftToCustom(); });
+    connect(m_bitrateKbps, QOverload<int>::of(&QSpinBox::valueChanged), this, [driftToCustom](int){ driftToCustom(); });
 }
 
 void OutputSettingsDialog::onCodecChanged(int index) {

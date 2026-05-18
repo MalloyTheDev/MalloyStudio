@@ -86,10 +86,15 @@ bool MediaController::startStreaming(const StreamSettings& stream,
             [this](const QString&, qint64) { emit streamingFinished(); });
     connect(m_streamer, &EncoderPipeline::errorOccurred, this,
             [this](const QString& msg) { emit errorOccurred(QStringLiteral("streaming"), msg); });
+    connect(m_streamer, &EncoderPipeline::progress,
+            this, &MediaController::streamingProgress);
 
-    // Merge the stream-specific bitrate/fps into the OutputSettings the pipeline sees.
+    // Merge the stream-specific fields into the OutputSettings the pipeline sees.
+    // bitrateKbps was already plumbed in v6; keyframeSec is new in v7 (was being
+    // dropped, so StreamingPipeline always emitted a hardcoded 2s GOP).
     OutputSettings merged = output;
     merged.bitrateKbps = stream.bitrateKbps;
+    merged.keyframeSec = stream.keyframeSec;
 
     EncoderPipeline::Target target;
     target.kind        = EncoderPipeline::Target::Kind::Rtmp;

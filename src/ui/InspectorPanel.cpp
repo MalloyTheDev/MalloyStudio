@@ -180,6 +180,14 @@ InspectorPanel::InspectorPanel(SceneCollection* scenes,
     filterBtns->addWidget(downBtn);
     filtersRoot->addLayout(filterBtns);
 
+    // Tier 3: per-filter enable toggle. Disabled filters stay in the chain
+    // (and in the project JSON) but are skipped during compositing — a quick
+    // way to A/B test a filter without losing its settings.
+    m_filterEnabled = new QCheckBox(tr("Enabled"), m_filtersGroup);
+    m_filterEnabled->setToolTip(tr("Skip this filter during rendering. The filter's settings are preserved."));
+    m_filterEnabled->setEnabled(false);
+    filtersRoot->addWidget(m_filterEnabled);
+
     // Property pages stacked widget
     m_filterProps = new QStackedWidget(m_filtersGroup);
 
@@ -366,6 +374,8 @@ InspectorPanel::InspectorPanel(SceneCollection* scenes,
     connect(m_filterList, &QListWidget::currentRowChanged, this, [this](int) {
         onFilterSelectionChanged();
     });
+    connect(m_filterEnabled, &QCheckBox::toggled, this,
+            &InspectorPanel::onFilterEnabledToggled);
 
     // Crop spinboxes
     const auto cropSpin = qOverload<double>(&QDoubleSpinBox::valueChanged);
@@ -600,11 +610,19 @@ void InspectorPanel::onFilterSelectionChanged() {
     const int row = m_filterList->currentRow();
     if (!item || row < 0 || row >= item->filters().size()) {
         m_filterProps->setCurrentIndex(m_filterPageEmpty);
+        if (m_filterEnabled) {
+            m_filterEnabled->setEnabled(false);
+            m_filterEnabled->setChecked(true);
+        }
         return;
     }
 
     const FilterEffect* f = item->filters().at(row);
     m_updating = true;
+    if (m_filterEnabled) {
+        m_filterEnabled->setEnabled(true);
+        m_filterEnabled->setChecked(f->isEnabled());
+    }
     switch (f->type()) {
         case FilterEffect::Type::Crop: {
             const auto* cf = static_cast<const CropFilter*>(f);
@@ -710,6 +728,21 @@ void InspectorPanel::applyCurrentFilterProps() {
             break;
         }
     }
+}
+
+void InspectorPanel::onFilterEnabledToggled(bool enabled) {
+    if (m_updating) return;
+    SceneItem* item = m_scenes->currentItem();
+    const int row = m_filterList->currentRow();
+    if (!item || row < 0 || row >= item->filters().size()) return;
+
+    FilterEffect* f = item->filters().at(row);
+    if (f->isEnabled() == enabled) return;
+
+    // Snapshot-based undo (same pattern Add/Remove/Reorder Filter use).
+    const QJsonObject before = m_scenes->snapshot();
+    f->setEnabled(enabled);
+    m_scenes->pushSnapshotCommand(tr("Toggle Filter"), before, m_scenes->snapshot());
 }
 
 void InspectorPanel::onAddFilter() {

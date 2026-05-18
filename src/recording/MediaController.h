@@ -65,6 +65,10 @@ signals:
 
     void streamingStarted();
     void streamingFinished();
+    // v7 Tier 3: live bitrate + dropped-frame counter parsed from ffmpeg's
+    // ~1 Hz progress lines on the streaming pipeline. ControlsBar shows this
+    // next to the LIVE timer.
+    void streamingProgress(int bitrateKbps, int droppedFrames);
 
     void replaySaved(QString path);
 

@@ -395,17 +395,21 @@ void PreviewWidget::drawItem(QPainter& painter, SceneItem* item, Source* source,
         }
 
         // Apply non-opacity filters in order (modifies img in-place).
+        // v7 Tier 3: disabled filters are skipped — same effect as removing
+        // them temporarily, without losing their configuration.
         const qint64 nowUs = QDateTime::currentMSecsSinceEpoch() * 1000;
         for (FilterEffect* f : filters) {
+            if (!f->isEnabled()) continue;
             if (f->type() == FilterEffect::Type::Opacity) continue;
             if (f->type() == FilterEffect::Type::Scroll)
                 static_cast<const ScrollFilter*>(f)->advance(nowUs);
             f->apply(img);
         }
 
-        // Accumulate opacity from all OpacityFilters.
+        // Accumulate opacity from all enabled OpacityFilters.
         double opacity = 1.0;
         for (const FilterEffect* f : filters) {
+            if (!f->isEnabled()) continue;
             if (f->type() == FilterEffect::Type::Opacity)
                 opacity *= static_cast<const OpacityFilter*>(f)->opacity();
         }

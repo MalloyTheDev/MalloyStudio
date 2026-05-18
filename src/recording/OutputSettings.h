@@ -21,6 +21,11 @@ struct OutputSettings {
     int     bitrateKbps      = 4500;
     // Replay buffer duration in seconds (0 = disabled).
     int     replayBufferSeconds = 0;
+    // Keyframe interval in seconds. 0 = "auto" (StreamingPipeline defaults to 2s).
+    // MediaController plumbs StreamSettings.keyframeSec into this field before
+    // starting a stream. File recording currently ignores it (libx264 chooses
+    // its own GOP). Twitch/YouTube require ≤ 4s for stable playback.
+    int     keyframeSec      = 0;
 
     static OutputSettings load() {
         QSettings s;
@@ -36,6 +41,7 @@ struct OutputSettings {
         o.container        = s.value(QStringLiteral("output/container"),        o.container       ).toString();
         o.bitrateKbps         = s.value(QStringLiteral("output/bitrateKbps"),         o.bitrateKbps        ).toInt();
         o.replayBufferSeconds = s.value(QStringLiteral("output/replayBufferSeconds"), o.replayBufferSeconds).toInt();
+        o.keyframeSec         = s.value(QStringLiteral("output/keyframeSec"),         o.keyframeSec        ).toInt();
         return o;
     }
 
@@ -52,5 +58,6 @@ struct OutputSettings {
         s.setValue(QStringLiteral("output/container"),        container       );
         s.setValue(QStringLiteral("output/bitrateKbps"),         bitrateKbps        );
         s.setValue(QStringLiteral("output/replayBufferSeconds"), replayBufferSeconds);
+        s.setValue(QStringLiteral("output/keyframeSec"),         keyframeSec        );
     }
 };

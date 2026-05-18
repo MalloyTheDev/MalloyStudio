@@ -1,4 +1,5 @@
 #include "HotkeysDialog.h"
+#include "audio/AudioController.h"
 #include "input/HotkeyManager.h"
 
 #include <QDialogButtonBox>
@@ -56,7 +57,7 @@ private:
 
 // ── Static helpers ────────────────────────────────────────────────────────
 
-QString HotkeysDialog::displayName(const QString& actionId) {
+QString HotkeysDialog::displayName(const QString& actionId) const {
     if (actionId == QLatin1String(HotkeyManager::kRecordToggle))    return tr("Toggle Recording");
     if (actionId == QLatin1String(HotkeyManager::kStreamToggle))    return tr("Toggle Streaming");
     if (actionId == QLatin1String(HotkeyManager::kReplaySave))      return tr("Save Replay Buffer");
@@ -65,13 +66,24 @@ QString HotkeysDialog::displayName(const QString& actionId) {
         const int n = actionId.mid(13).toInt();
         return tr("Switch to Scene %1").arg(n);
     }
+    if (actionId.startsWith(QStringLiteral("audio.mute."))) {
+        // Resolve the human-friendly device name via AudioController if we
+        // have one; fall back to the raw input id for tests that pass nullptr.
+        const QString id = actionId.mid(11);
+        if (m_audio) {
+            for (const AudioInput& in : m_audio->inputs()) {
+                if (in.id == id) return tr("Mute: %1").arg(in.name);
+            }
+        }
+        return tr("Mute: %1").arg(id);
+    }
     return actionId;
 }
 
 // ── Dialog ────────────────────────────────────────────────────────────────
 
-HotkeysDialog::HotkeysDialog(HotkeyManager* manager, QWidget* parent)
-    : QDialog(parent), m_manager(manager)
+HotkeysDialog::HotkeysDialog(HotkeyManager* manager, AudioController* audio, QWidget* parent)
+    : QDialog(parent), m_manager(manager), m_audio(audio)
 {
     setWindowTitle(tr("Hotkeys"));
     setMinimumSize(480, 420);
@@ -111,6 +123,16 @@ void HotkeysDialog::buildTree() {
               << HotkeyManager::kStudioTransition;
     for (int i = 1; i <= 9; ++i)
         actionIds << HotkeyManager::sceneActionId(i);
+
+    // v7 Tier 4: per-source mute actions. We enumerate every AudioController
+    // input (loopback + per-source mics) and emit an `audio.mute.<id>` row.
+    // Action IDs are stable as long as the device GUID is, so bindings
+    // survive an unplug/replug of the device.
+    if (m_audio) {
+        for (const AudioInput& in : m_audio->inputs()) {
+            actionIds << QStringLiteral("audio.mute.") + in.id;
+        }
+    }
 
     // Append any extra ids already registered in the manager.
     for (const QString& id : m_manager->actionIds()) {

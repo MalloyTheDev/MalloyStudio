@@ -11,3 +11,12 @@ compile_commands.json
 *.dll
 *.pdb
 .claude/
+# OBS Studio source snapshot — included locally as read-only UX/UI reference
+# only. Not part of the MalloyStudio codebase and not redistributed.
+obs-studio-master/
+# Scratch files from Qt test runs
+result.txt
+tests-out.txt
+t.txt
+build.log
+tests.log

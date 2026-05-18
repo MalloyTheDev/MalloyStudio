@@ -28,6 +28,11 @@ public:
         // Builds the -c:v and related codec args for a given OutputSettings.
         // Does NOT include input args, scale filter, audio, or destination.
         std::function<QStringList(const OutputSettings&)> buildArgs;
+        // Streaming-only -tune flag value. "" means the encoder does NOT
+        // accept -tune; StreamingPipeline appends `-tune <streamingTune>`
+        // when non-empty. libx264/libx265 → "zerolatency", NVENC → "ull",
+        // QSV/AMF reject -tune entirely so left empty.
+        QString streamingTune;
     };
 
     // Returns the cached list of available encoders (lazy-initialised).

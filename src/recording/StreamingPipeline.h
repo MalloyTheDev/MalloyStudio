@@ -8,7 +8,7 @@
 // Stream-specific config (bitrate, keyframe interval) is carried in the
 // OutputSettings struct inside Target::output — MediaController fills them
 // in from StreamSettings before calling start().
-class StreamingPipeline final : public EncoderPipeline {
+class StreamingPipeline : public EncoderPipeline {
     Q_OBJECT
 public:
     explicit StreamingPipeline(QObject* parent = nullptr) : EncoderPipeline(parent) {}

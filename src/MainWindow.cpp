@@ -35,6 +35,8 @@
 #include <QUndoStack>
 #include <QVBoxLayout>
 
+#include <algorithm>
+
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     resize(1280, 720);
 
@@ -135,7 +137,9 @@ void MainWindow::setupUi() {
     m_scenesDock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
     addDockWidget(Qt::LeftDockWidgetArea, m_scenesDock);
 
-    m_sourcesPanel = new SourcesPanel(m_scenes, this);
+    // v7: SourcesPanel needs AudioController so the "Microphone" entry in the
+    // Add dialog can launch MicrophonePickerDialog with the live device list.
+    m_sourcesPanel = new SourcesPanel(m_scenes, m_audio, this);
     m_sourcesDock = new QDockWidget(tr("Sources"), this);
     m_sourcesDock->setObjectName("SourcesDock");
     m_sourcesDock->setWidget(m_sourcesPanel);
@@ -150,7 +154,9 @@ void MainWindow::setupUi() {
     addDockWidget(Qt::RightDockWidgetArea, m_inspectorDock);
     splitDockWidget(m_sourcesDock, m_inspectorDock, Qt::Vertical);
 
-    m_mixerPanel = new AudioMixerPanel(m_audio, this);
+    // v7: pass SceneCollection so the mixer's "+ Add Microphone" button can
+    // create a scene-level AudioInput source via addAudioInputToCurrent().
+    m_mixerPanel = new AudioMixerPanel(m_audio, m_scenes, this);
     m_mixerDock = new QDockWidget(tr("Audio Mixer"), this);
     m_mixerDock->setObjectName("AudioMixerDock");
     m_mixerDock->setWidget(m_mixerPanel);
@@ -225,7 +231,9 @@ void MainWindow::setupMenus() {
 
     auto* hotkeysAction = editMenu->addAction(tr("Hotkeys…"));
     connect(hotkeysAction, &QAction::triggered, this, [this] {
-        HotkeysDialog dlg(m_hotkeys, this);
+        // v7 Tier 4: pass AudioController so the dialog can enumerate audio
+        // inputs and offer per-source Mute bindings alongside the global hotkeys.
+        HotkeysDialog dlg(m_hotkeys, m_audio, this);
         dlg.exec();
     });
 
@@ -429,11 +437,32 @@ void MainWindow::connectModelSignals() {
         statusBar()->showMessage(tr("Stream ended."), 4000);
     });
 
+    // v7 Tier 3: live bitrate + dropped-frames updates from ffmpeg → mixer.
+    connect(m_media, &MediaController::streamingProgress,
+            m_controlsBar, &ControlsBar::setStreamStats);
+
     connect(m_media, &MediaController::errorOccurred,
             this, [this](const QString& origin, const QString& msg) {
         const QString title = (origin == QStringLiteral("recording"))
             ? tr("Recording Error") : tr("Streaming Error");
-        QMessageBox::warning(this, title, msg);
+        // EncoderPipeline appends "\n\nLast stderr:\n<tail>" when ffmpeg
+        // produced stderr output. Split that off into setDetailedText so the
+        // wall of ffmpeg output hides behind a "Show Details" button — the
+        // surface message stays short and readable.
+        QString summary = msg;
+        QString detail;
+        const int sep = msg.indexOf(QStringLiteral("\n\nLast stderr:\n"));
+        if (sep >= 0) {
+            summary = msg.left(sep);
+            detail  = msg.mid(sep + 2);   // include "Last stderr:" header in details
+        }
+        QMessageBox box(this);
+        box.setIcon(QMessageBox::Critical);
+        box.setWindowTitle(title);
+        box.setText(summary);
+        if (!detail.isEmpty()) box.setDetailedText(detail);
+        box.setStandardButtons(QMessageBox::Ok);
+        box.exec();
         if (origin == QStringLiteral("recording"))
             m_controlsBar->forceStopRecording();
         else
@@ -481,6 +510,16 @@ void MainWindow::connectModelSignals() {
             const int idx = actionId.mid(13).toInt() - 1;  // 0-based
             if (idx >= 0 && idx < m_scenes->sceneCount())
                 m_scenes->setCurrentIndex(idx);
+        } else if (actionId.startsWith(QStringLiteral("audio.mute."))) {
+            // v7 Tier 4: per-source mute. The action ID format is
+            // "audio.mute.<inputId>" where inputId matches AudioInput::id
+            // ("loopback:default" or "input:<guid>"). We look up the input and
+            // flip its mute flag — same code path the mixer's M button uses.
+            const QString audioId = actionId.mid(11);   // strip "audio.mute."
+            const auto& inputs = m_audio->inputs();
+            auto it = std::find_if(inputs.cbegin(), inputs.cend(),
+                [&](const AudioInput& in){ return in.id == audioId; });
+            if (it != inputs.cend()) m_audio->setMuted(audioId, !it->muted);
         }
     });
 

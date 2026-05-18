@@ -1,11 +1,16 @@
 #include "SourcesPanel.h"
+#include "MicrophonePickerDialog.h"
 #include "MonitorPickerDialog.h"
+#include "WindowPickerDialog.h"
+#include "audio/AudioController.h"
 #include "model/SceneCollection.h"
 #include "model/Scene.h"
 #include "model/SceneItem.h"
 #include "model/Source.h"
 
+#include <QAbstractItemModel>
 #include <QListWidget>
+#include <QShortcut>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QPushButton>
@@ -21,14 +26,28 @@
 #include <QColorDialog>
 #include <QFileDialog>
 
-SourcesPanel::SourcesPanel(SceneCollection* scenes, QWidget* parent)
-    : QWidget(parent), m_scenes(scenes)
+SourcesPanel::SourcesPanel(SceneCollection* scenes, AudioController* audio, QWidget* parent)
+    : QWidget(parent), m_scenes(scenes), m_audio(audio)
 {
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(4, 4, 4, 4);
 
+    // Empty-state placeholder (shown only when the current scene has zero
+    // layers). Tier 3 polish — hidden during normal operation.
+    m_emptyLabel = new QLabel(tr("No sources in this scene — click + to add one."), this);
+    m_emptyLabel->setAlignment(Qt::AlignCenter);
+    m_emptyLabel->setWordWrap(true);
+    m_emptyLabel->setStyleSheet(QStringLiteral("color: #888; padding: 24px;"));
+    m_emptyLabel->setVisible(false);
+    layout->addWidget(m_emptyLabel);
+
     m_list = new QListWidget(this);
     m_list->setSelectionMode(QAbstractItemView::SingleSelection);
+    // v7: drag-to-reorder. InternalMove uses the existing model for both
+    // source and destination so Qt handles the drag visuals; we listen for
+    // rowsMoved below and mirror the change in SceneCollection.
+    m_list->setDragDropMode(QAbstractItemView::InternalMove);
+    m_list->setDefaultDropAction(Qt::MoveAction);
     layout->addWidget(m_list, 1);
 
     auto* btnRow = new QHBoxLayout();
@@ -63,6 +82,34 @@ SourcesPanel::SourcesPanel(SceneCollection* scenes, QWidget* parent)
     connect(m_list, &QListWidget::itemSelectionChanged, this, &SourcesPanel::onSelectionChanged);
     connect(m_list, &QListWidget::itemDoubleClicked, this, &SourcesPanel::onItemDoubleClicked);
 
+    // F2: rename the currently selected layer (mirrors ScenesPanel's F2 behavior).
+    auto* f2 = new QShortcut(QKeySequence(Qt::Key_F2), this);
+    connect(f2, &QShortcut::activated, this, [this] {
+        if (auto* item = m_list->currentItem()) onItemDoubleClicked(item);
+    });
+
+    // Drag-to-reorder: Qt's InternalMove handles the visuals; we mirror the
+    // model change here. Updating during a model-side rebuild would recurse,
+    // so we guard with m_updating (same flag the rebuild path uses).
+    connect(m_list->model(), &QAbstractItemModel::rowsMoved, this,
+            [this](const QModelIndex&, int sourceStart, int /*sourceEnd*/,
+                   const QModelIndex&, int destinationRow) {
+        if (m_updating) return;
+        // Qt's rowsMoved destinationRow is the index where the row will land
+        // BEFORE the move is finalized. For an internal move toward a higher
+        // index, that means "destinationRow - 1" in our model's terms because
+        // the source row will have been removed from its original position.
+        int from = sourceStart;
+        int to   = destinationRow > sourceStart ? destinationRow - 1
+                                                 : destinationRow;
+        if (from != to)
+            m_scenes->moveCurrentItem(from, to);
+        // Always rebuild so the row widgets reattach correctly — Qt's
+        // internal-move detaches and reattaches itemWidget() pointers in
+        // ways that can leave stale layouts otherwise.
+        rebuild();
+    });
+
     connect(m_scenes, &SceneCollection::currentChanged,  this, [this](int){ rebuild(); });
     connect(m_scenes, &SceneCollection::itemsChanged,    this, &SourcesPanel::rebuild);
     connect(m_scenes, &SceneCollection::sourcesChanged,  this, &SourcesPanel::rebuild);
@@ -77,9 +124,15 @@ void SourcesPanel::rebuild() {
     m_list->clear();
     Scene* current = m_scenes->currentScene();
     if (!current) {
+        // No scene at all (truly fresh project). Both the list and the
+        // empty-state get hidden — ScenesPanel's empty-state handles this
+        // case at a higher level.
+        if (m_emptyLabel) m_emptyLabel->setVisible(false);
+        m_list->setVisible(false);
         m_updating = false;
         return;
     }
+    m_list->setVisible(true);
 
     for (int i = 0; i < current->itemCount(); ++i) {
         auto* listItem = new QListWidgetItem();
@@ -88,6 +141,12 @@ void SourcesPanel::rebuild() {
         m_list->addItem(listItem);
         m_list->setItemWidget(listItem, createLayerRow(i));
     }
+
+    // Empty-state polish: show the helpful label only when the current scene
+    // has zero items; otherwise hide it and let the list take the full panel.
+    const bool empty = current->itemCount() == 0;
+    if (m_emptyLabel) m_emptyLabel->setVisible(empty);
+    m_list->setVisible(!empty);
 
     const int selected = current->selectedIndex();
     if (selected >= 0 && selected < m_list->count()) {
@@ -171,10 +230,15 @@ void SourcesPanel::onAddClicked() {
 
     auto* typeCombo = new QComboBox(&dlg);
     typeCombo->addItem(tr("Display Capture"), static_cast<int>(Source::Type::DisplayCapture));
+    // v7: WindowCapture and Microphone (AudioInput) used to be missing from
+    // the Add dialog even though the model layer supported them. Users could
+    // only get them by hand-editing project JSON.
+    typeCombo->addItem(tr("Window Capture"),  static_cast<int>(Source::Type::WindowCapture));
     typeCombo->addItem(tr("Image"),           static_cast<int>(Source::Type::Image));
     typeCombo->addItem(tr("Text"),            static_cast<int>(Source::Type::Text));
     typeCombo->addItem(tr("Color Block"),     static_cast<int>(Source::Type::ColorBlock));
     typeCombo->addItem(tr("Browser"),         static_cast<int>(Source::Type::Browser));
+    typeCombo->addItem(tr("Microphone"),      static_cast<int>(Source::Type::AudioInput));
 
     auto* nameEdit = new QLineEdit(&dlg);
     auto updateDefaultName = [&] {
@@ -225,6 +289,23 @@ void SourcesPanel::onAddClicked() {
     QString name = nameEdit->text().trimmed();
     if (name.isEmpty()) name = Source::typeToString(t);
 
+    // ── AudioInput / "Microphone" branches off the generic addNewSourceToCurrent
+    // path because the model already has a dedicated helper that takes the
+    // WASAPI device GUID alongside the friendly name.
+    if (t == Source::Type::AudioInput) {
+        const auto pick = MicrophonePickerDialog::pick(m_audio, this);
+        if (pick.first.isEmpty()) return;   // user cancelled or no devices
+        // If the user kept the auto-generated default name ("Microphone 1"),
+        // promote the friendly device name. If they typed something custom,
+        // keep their choice.
+        QString resolved = name;
+        if (resolved.startsWith(tr("Microphone")) ||
+            resolved.startsWith(tr("Audio Input")))
+            resolved = pick.second;
+        m_scenes->addAudioInputToCurrent(resolved, pick.first);
+        return;
+    }
+
     QString textValue;
     QColor colorValue;
     int adapterIndex = -1;
@@ -256,11 +337,28 @@ void SourcesPanel::onAddClicked() {
         }
     }
 
+    // For WindowCapture we pop the picker before creating the source. If the
+    // user cancels the picker we don't create anything — same UX as the
+    // existing DisplayCapture path (where cancelling the monitor picker
+    // leaves adapterIndex = -1 and the source ends up unconfigured; for
+    // WindowCapture an unconfigured source has no useful behavior, so we
+    // require a picked window up-front).
+    std::optional<std::pair<quintptr, QString>> pickedWindow;
+    if (t == Source::Type::WindowCapture) {
+        pickedWindow = WindowPickerDialog::pickWindow(this);
+        if (!pickedWindow.has_value()) return;
+    }
+
     m_scenes->addNewSourceToCurrent(name, t, textValue, colorValue, adapterIndex, outputIndex);
 
     if (t == Source::Type::Image && !imagePathValue.isEmpty()) {
         const int idx = m_scenes->currentItemIndex();
         if (idx >= 0) m_scenes->setCurrentSourceImagePath(idx, imagePathValue);
+    }
+    if (t == Source::Type::WindowCapture && pickedWindow.has_value()) {
+        const int idx = m_scenes->currentItemIndex();
+        if (idx >= 0)
+            m_scenes->setCurrentSourceWindow(idx, pickedWindow->first, pickedWindow->second);
     }
 }
 

@@ -1,6 +1,7 @@
 #pragma once
 #include <QWidget>
 
+class QLabel;
 class QListWidget;
 class QListWidgetItem;
 class SceneCollection;
@@ -20,7 +21,8 @@ private slots:
     void rebuild();
 
 private:
-    SceneCollection* m_scenes;
-    QListWidget*     m_list;
-    bool             m_updating = false;
+    SceneCollection* m_scenes      = nullptr;
+    QListWidget*     m_list        = nullptr;
+    QLabel*          m_emptyLabel  = nullptr;   // shown when scene count is 0 (Tier 3)
+    bool             m_updating    = false;
 };

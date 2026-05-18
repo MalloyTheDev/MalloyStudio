@@ -4,7 +4,114 @@ All notable changes to MalloyStudio are documented here.
 
 ---
 
-## v5 (current)
+## v7 (current)
+
+### Streaming + ffmpeg bug fixes (Tier 1)
+
+- **`StreamingPipeline` now consults `EncoderRegistry`** for per-codec args. Pre-v7
+  it hardcoded libx264-only flags (`-preset <s.preset> -tune zerolatency`) so any
+  hardware encoder (NVENC / QSV / AMF) tripped EINVAL (-22) on Start Stream.
+  Same class of bug we fixed in `RecorderPipeline::buildOutputArgs` in v6, but in
+  the streaming path.
+- **Per-encoder `streamingTune` field** on `EncoderRegistry::Encoder` — libx264 →
+  `zerolatency`, NVENC → `ull` (ultra-low-latency), QSV/AMF → empty (don't
+  accept `-tune` at all).
+- **`StreamSettings::keyframeSec` plumbing**: was exposed in the UI but silently
+  dropped by `MediaController` and the streaming pipeline always emitted a
+  hardcoded 2 s GOP. Now properly forwarded via `OutputSettings.keyframeSec`.
+- **Forced GOP override** in streaming output args: software encoders' builders
+  don't emit `-g`; we always append `-g <fps × keyframeSec>` after the registry
+  args so Twitch/YouTube don't terminate streams for missing keyframes.
+- **ffmpeg stderr capture** (`EncoderPipeline.m_stderrTail`): the most recent
+  ~4 KB of ffmpeg stderr is now appended to `errorOccurred` messages. MainWindow
+  splits this into `QMessageBox::setDetailedText` so users see the actual ffmpeg
+  diagnostic behind a "Show Details" button instead of just an exit code.
+- New tests: `streamingPipelineUsesRegistryNotHardcodedX264`,
+  `streamingPipelineHonorsKeyframeSec`,
+  `streamingPipelineForcesGopWhenSoftwareEncoderOmitsIt`.
+
+### Microphone source + Window Capture in Add menu (Tier 2)
+
+- **`Microphone` is now in the Sources Add dialog** — picks a WASAPI capture
+  endpoint via new `MicrophonePickerDialog` (modelled on `MonitorPickerDialog`)
+  and creates a scene-scoped `AudioInput` source. The model layer always
+  supported this; the UI gateway was missing.
+- **`Window Capture` is also now in the Add dialog** — was missing pre-v7 too;
+  pops `WindowPickerDialog::pickWindow` and wires the picked HWND via
+  `SceneCollection::setCurrentSourceWindow`.
+- **`+ Add Microphone` button in `AudioMixerPanel`** — second entry point for
+  the same flow, so users don't have to leave the mixer to add a mic.
+- `SourcesPanel` constructor now takes `AudioController*`; `AudioMixerPanel`
+  takes `SceneCollection*` for the quick-add button.
+- New tests: `addAudioInputFromUiCreatesScopedSource`,
+  `addingAudioInputTriggersAudioInputsChanged`,
+  `togglingAudioInputVisibilityChangesGatherList`.
+
+### UI polish (Tier 3)
+
+- **Empty-state placeholders** in `ScenesPanel`, `SourcesPanel`, `AudioMixerPanel`
+  — friendly grey hint when the panel has nothing in it instead of a blank widget.
+- **Drag-to-reorder** in `SourcesPanel` via Qt's `InternalMove` mode, mirrored
+  back into `SceneCollection::moveCurrentItem`.
+- **F2 rename shortcut** in `SourcesPanel` (matches `ScenesPanel`'s F2).
+- **Quality presets in Output Settings** — "1080p60 High Quality", "1080p30
+  Balanced", "720p60 Streaming", "720p30 Fast", "4K30 Cinematic". Bundle
+  resolution + fps + CRF + bitrate; manually editing any of those fields
+  switches the combo back to "Custom".
+- **Quality presets in Stream Settings** — Twitch / YouTube / low-latency
+  combos for bitrate + keyframe interval; service-recommended bitrate hint
+  warns when the user's bitrate exceeds the platform's published cap.
+- **Per-filter enable toggle** on `FilterEffect` (new `enabled` field with
+  JSON round-trip). Inspector adds an "Enabled" checkbox above the per-filter
+  property page. `PreviewWidget::drawItem` skips disabled filters and excludes
+  them from the opacity accumulator. Legacy project files (no `enabled` key)
+  default to enabled.
+- **Live streaming stats in `ControlsBar`** — bitrate (kbps) + dropped frames
+  parsed from ffmpeg's ~1 Hz progress lines. Updates next to the `LIVE` timer
+  during streaming; hidden when idle.
+- New tests: `filterEnabledFlagRoundtripsJson`,
+  `streamProgressLineParsesBitrateAndDrops`.
+
+### Per-source mute hotkeys (Tier 4)
+
+- **`audio.mute.<inputId>` action IDs** — `HotkeyManager` already supported
+  arbitrary IDs; `MainWindow` now dispatches these to
+  `AudioController::setMuted`. Bindings persist in `QSettings`.
+- **`HotkeysDialog` lists per-source mute rows** — enumerates the current
+  `AudioController::inputs()` and shows one row per input under the
+  friendly device name. `loopback:default` shows as "Mute: Desktop Audio".
+- New test: `audioMuteActionIdTogglesInput`.
+
+### Behind the scenes
+
+- `StreamingPipeline` no longer `final` so the test suite can subclass it
+  through `ProbeStreamingPipeline` (mirrors v6's `ProbeEncoderPipeline`).
+- ffmpeg stderr is captured via `QProcess::SeparateChannels` + a
+  `readyReadStandardError` slot instead of forwarded straight to the parent
+  console.
+- `EncoderPipeline::tryParseProgressLine` is a public static helper so the
+  ffmpeg progress regex is unit-testable without instantiating a pipeline.
+
+### Out of scope / deferred
+
+- **Desktop Audio as a scene source** — design collision with the auto-loopback
+  worker; defer to v8 with a proper `Source::Type::DesktopAudio` enum and JSON v3
+  migration. The mixer already shows desktop audio.
+- **Pause / Resume during recording** — ffmpeg has no clean pause primitive.
+- **Push-to-talk** — requires low-level keyboard hook.
+- **SVG icon set / theme pass** — emoji glyphs (▶ ● ■ ⬛) still used in
+  `ControlsBar`; defer to a dedicated visual polish release.
+- **OBS reference directory** at `obs-studio-master/` is read-only and is
+  used purely as design reference, never copied from.
+
+### Test counts
+
+- Total: **33** (was 22 before v7).
+- New in v7: 10 across Tiers 1-4.
+
+---
+
+## v5
 
 ### Window Capture
 

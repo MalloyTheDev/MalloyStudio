@@ -361,3 +361,103 @@ don't change per-project. Storing them globally means the user configures once.
 Rather than AudioController watching SceneCollection directly, MainWindow wires
 `SceneCollection::audioInputsChanged → AudioController::reconcileInputs(gatherVisibleAudioIds())`.
 This keeps AudioController ignorant of the model layer and makes the data flow explicit.
+
+---
+
+## v6 + v7 additions
+
+### EncoderRegistry (v6) + per-encoder streaming tune (v7)
+
+`EncoderRegistry::available()` lazily probes `ffmpeg -encoders` once per process
+and returns a list of `Encoder` records: `{id, display, isHardware, buildArgs,
+streamingTune}`. Software encoders (libx264, libx265) are always listed even
+when ffmpeg isn't present, so the Output Settings dialog is never empty.
+
+Each `Encoder::buildArgs` is a `std::function<QStringList(const OutputSettings&)>`
+that emits the correct ffmpeg flags for that codec:
+
+- libx264/libx265 emit `-c:v <codec> -preset <s.preset> -crf <s.crf> -pix_fmt yuv420p`
+- NVENC emits `-c:v <codec> -preset p4 -rc cbr -b:v <bitrate>k -maxrate <bitrate>k -bufsize <2×bitrate>k -pix_fmt yuv420p`
+- QSV/AMF emit `-c:v <codec> -b:v <bitrate>k -maxrate <bitrate>k -bufsize <2×bitrate>k -pix_fmt yuv420p`
+
+`streamingTune` (v7) holds the per-encoder `-tune` value used **only** when
+streaming: libx264/libx265 → `zerolatency`, NVENC → `ull`, QSV/AMF → empty
+(those encoders reject `-tune` and would EINVAL).
+
+### MediaController (v6)
+
+Facade for recording, streaming, and replay save. Owns one
+`RecorderPipeline` and one `StreamingPipeline` (both inherit `EncoderPipeline`).
+Surfaces a single `errorOccurred(origin, message)` signal so MainWindow has one
+place to show user-facing diagnostics. v7 adds `streamingProgress(kbps, drops)`
+re-emitted from the streamer's `EncoderPipeline::progress` signal.
+
+### StreamingPipeline (v6, fixed in v7)
+
+Subclasses `EncoderPipeline::buildOutputArgs` to emit RTMP-flavored args:
+no `-shortest` (streams run forever), `-f flv` muxer, forced GOP for live
+delivery. v6 hardcoded libx264 flags here — v7 routes through
+`EncoderRegistry::find(s.videoCodec)->buildArgs(s)` then appends
+`-tune <streamingTune>` (if non-empty) and `-g <fps × keyframeSec>` last
+(ffmpeg's last `-g` wins).
+
+### ffmpeg stderr capture (v7)
+
+`EncoderPipeline` now runs ffmpeg in `QProcess::SeparateChannels` mode and
+binds `readyReadStandardError` to a ring-trimmed `m_stderrTail` member capped
+at ~4 KB. Each stderr line is also fed to
+`EncoderPipeline::tryParseProgressLine(line, &kbps, &drops)` which extracts
+bitrate and dropped-frame counts from ffmpeg's ~1 Hz progress lines.
+
+`onFfmpegError`, `onFfmpegFinished`, and `onPipeConnectFailed` append the
+tail to their `errorOccurred` messages. MainWindow splits the message at
+`\n\nLast stderr:\n` and pushes the detail through `QMessageBox::setDetailedText`.
+
+### MicrophonePickerDialog (v7)
+
+Reuses `AudioController::enumerateInputDevices()` (already used by Inspector
+combo). Mirrors `MonitorPickerDialog`'s shape. Two entry points open it:
+
+- SourcesPanel → `+` → "Microphone": creates a scene-scoped AudioInput source
+  via `SceneCollection::addAudioInputToCurrent(name, deviceId)`.
+- AudioMixerPanel → "+ Add Microphone": same action, shorter path.
+
+Both flows fire `SceneCollection::audioInputsChanged`, which MainWindow
+forwards to `AudioController::reconcileInputs(gatherVisibleAudioIds())` —
+the same reconcile loop v5 introduced. No extra wiring needed.
+
+### FilterEffect::enabled flag (v7)
+
+`FilterEffect` base class gained `bool m_enabled = true`. The base provides
+`writeBaseFields()` / `readBaseFields()` helpers so each concrete subclass's
+JSON I/O picks up the flag with a single line change. The flag is only
+serialized when **false** (keeps existing project files byte-identical until
+a user toggles a filter off).
+
+`PreviewWidget::drawItem` skips disabled filters in the chain and excludes
+them from the opacity accumulator. `InspectorPanel` adds an "Enabled" checkbox
+above the per-filter property page that toggles the flag via a snapshot-based
+undo command.
+
+### Per-source mute hotkeys (v7)
+
+`HotkeyManager` already supported arbitrary action IDs. v7 adds the
+`audio.mute.<inputId>` convention where `<inputId>` is the existing
+`AudioInput::id`. `MainWindow`'s hotkey dispatcher looks up the matching
+input and flips its `muted` flag. `HotkeysDialog` enumerates
+`AudioController::inputs()` and offers one Mute row per input.
+
+### Streaming progress + ControlsBar stats (v7)
+
+`EncoderPipeline::progress(kbps, drops)` is emitted on each parsed stderr
+progress line. `MediaController` re-emits as `streamingProgress` (file
+recording doesn't need this). `ControlsBar::setStreamStats` updates a small
+secondary label next to the orange `LIVE` timer; it hides cleanly on
+`forceStopStreaming`.
+
+### OBS source as read-only reference
+
+`obs-studio-master/` contains a snapshot of OBS Studio used **only** for UX
+pattern inspiration (the Add-Source flow, mixer strip layout, settings tree
+structure, etc.). No code is copied or linked. The build system never
+references that directory; the directory is filesystem-read-only.

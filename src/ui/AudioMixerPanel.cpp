@@ -1,22 +1,50 @@
 #include "AudioMixerPanel.h"
+#include "MicrophonePickerDialog.h"
 #include "VuMeter.h"
 #include "audio/AudioController.h"
+#include "model/SceneCollection.h"
 
 #include <QCheckBox>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QPushButton>
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QToolButton>
 #include <QVBoxLayout>
 
-AudioMixerPanel::AudioMixerPanel(AudioController* controller, QWidget* parent)
-    : QWidget(parent), m_controller(controller)
+AudioMixerPanel::AudioMixerPanel(AudioController* controller,
+                                 SceneCollection* scenes,
+                                 QWidget* parent)
+    : QWidget(parent), m_controller(controller), m_scenes(scenes)
 {
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(8, 6, 8, 6);
     root->setSpacing(4);
+
+    // ── Header bar with quick-add button ───────────────────────────────────
+    // Second entry point for "Add Microphone" — the user can also reach it
+    // via Sources → + → Microphone, but a button right above the strips makes
+    // the most common audio task discoverable without leaving the mixer.
+    auto* headerRow = new QHBoxLayout();
+    headerRow->setContentsMargins(0, 0, 0, 0);
+    auto* addMicBtn = new QPushButton(tr("+ Add Microphone"), this);
+    addMicBtn->setToolTip(tr("Add a microphone capture device to the current scene"));
+    if (!m_scenes) addMicBtn->setEnabled(false);   // tests pass nullptr
+    connect(addMicBtn, &QPushButton::clicked,
+            this,     &AudioMixerPanel::onAddMicrophoneClicked);
+    headerRow->addWidget(addMicBtn);
+    headerRow->addStretch();
+    root->addLayout(headerRow);
+
+    // Empty-state placeholder shown when no audio inputs exist at all
+    // (loopback:default is auto-created, so this is rare — but we cover it).
+    m_emptyLabel = new QLabel(tr("No audio inputs detected."), this);
+    m_emptyLabel->setAlignment(Qt::AlignCenter);
+    m_emptyLabel->setStyleSheet(QStringLiteral("color: #888; padding: 8px;"));
+    m_emptyLabel->setVisible(false);
+    root->addWidget(m_emptyLabel);
 
     m_lanes = new QVBoxLayout();
     m_lanes->setSpacing(6);
@@ -83,6 +111,19 @@ void AudioMixerPanel::rebuild() {
         m_strips.insert(in.id, s);
         s.meter->setEnabled(in.connected);
     }
+
+    if (m_emptyLabel) m_emptyLabel->setVisible(m_strips.isEmpty());
+}
+
+void AudioMixerPanel::onAddMicrophoneClicked() {
+    if (!m_scenes || !m_controller) return;
+    // Reuse the same MicrophonePickerDialog the Sources panel uses, so both
+    // entry points feel consistent — same device list, same selection UX.
+    const auto pick = MicrophonePickerDialog::pick(m_controller, this);
+    if (pick.first.isEmpty()) return;   // cancelled / no devices
+    // Use the friendly device name as the source name by default. Users can
+    // rename later via the Inspector or inline rename in the Sources panel.
+    m_scenes->addAudioInputToCurrent(pick.second, pick.first);
 }
 
 AudioMixerPanel::Strip AudioMixerPanel::makeStrip(const QString& id, const AudioInput& in) {

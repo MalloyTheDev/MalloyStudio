@@ -9,7 +9,9 @@
 #include <QImage>
 #include <QProcess>
 #include <QRandomGenerator>
+#include <QRegularExpression>
 #include <QStandardPaths>
+#include <QStringView>
 #include <QThread>
 #include <QTimer>
 
@@ -155,9 +157,21 @@ bool EncoderPipeline::start(const Target& target,
     QStringList args = buildInputArgs(m_target.output, m_audioPipeName);
     args << buildOutputArgs(m_target);
 
+    // Reset stderr-tail buffers each start (we reuse the same pipeline across
+    // start/stop cycles via MediaController, but we want a clean diagnostic
+    // window per session).
+    m_stderrTail.clear();
+    m_stderrPending.clear();
+
     m_ffmpeg = new QProcess(this);
-    m_ffmpeg->setProcessChannelMode(QProcess::ForwardedErrorChannel);
+    // SeparateChannels (not ForwardedErrorChannel) so we can read stderr in C++
+    // and surface it in errorOccurred messages + parse ffmpeg's ~1 Hz progress
+    // lines for the streaming status display. v6 forwarded stderr straight to
+    // the parent console, which meant the user only ever saw the exit code.
+    m_ffmpeg->setProcessChannelMode(QProcess::SeparateChannels);
     connect(m_ffmpeg, &QProcess::errorOccurred, this, &EncoderPipeline::onFfmpegError);
+    connect(m_ffmpeg, &QProcess::readyReadStandardError,
+            this,     &EncoderPipeline::onFfmpegStderrReady);
     connect(m_ffmpeg, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, [this](int code, QProcess::ExitStatus){ onFfmpegFinished(code); });
 
@@ -346,23 +360,112 @@ void EncoderPipeline::onPipeConnected() {
 
 void EncoderPipeline::onPipeConnectFailed() {
     if (!m_running) return;
-    emit errorOccurred(QStringLiteral("Audio pipe did not connect to ffmpeg"));
+    QString msg = QStringLiteral("Audio pipe did not connect to ffmpeg");
+    if (!m_stderrTail.isEmpty())
+        msg += QStringLiteral("\n\nLast stderr:\n") + m_stderrTail;
+    emit errorOccurred(msg);
     stop();
 }
 
 void EncoderPipeline::onFfmpegError() {
     if (!m_running) return;
-    const QString msg = m_ffmpeg ? m_ffmpeg->errorString() : QStringLiteral("ffmpeg error");
-    emit errorOccurred(QStringLiteral("ffmpeg: ") + msg);
+    const QString detail = m_ffmpeg ? m_ffmpeg->errorString() : QStringLiteral("ffmpeg error");
+    QString msg = QStringLiteral("ffmpeg: ") + detail;
+    if (!m_stderrTail.isEmpty())
+        msg += QStringLiteral("\n\nLast stderr:\n") + m_stderrTail;
+    emit errorOccurred(msg);
     stop();
 }
 
 void EncoderPipeline::onFfmpegFinished(int exitCode) {
     if (!m_running) return; // expected — our stop() triggered it
     if (exitCode != 0) {
-        emit errorOccurred(QStringLiteral("ffmpeg exited unexpectedly with code %1").arg(exitCode));
+        QString msg = QStringLiteral("ffmpeg exited unexpectedly with code %1").arg(exitCode);
+        if (!m_stderrTail.isEmpty())
+            msg += QStringLiteral("\n\nLast stderr:\n") + m_stderrTail;
+        emit errorOccurred(msg);
     }
     stop();
+}
+
+// ---------------------------------------------------------------------------
+// ffmpeg stderr handling
+// ---------------------------------------------------------------------------
+
+void EncoderPipeline::onFfmpegStderrReady() {
+    if (!m_ffmpeg) return;
+    const QByteArray raw = m_ffmpeg->readAllStandardError();
+    if (raw.isEmpty()) return;
+
+    const QString chunk = QString::fromLocal8Bit(raw);
+
+    // Append to the bounded tail (used in errorOccurred() messages).
+    appendStderrTail(chunk);
+
+    // Split into completed lines for progress parsing. ffmpeg emits its progress
+    // line with a trailing \r (in-place overwrite); separate ffmpeg messages
+    // arrive with \n. We treat both as line terminators.
+    m_stderrPending += chunk;
+    int searchFrom = 0;
+    for (int i = 0; i < m_stderrPending.size(); ++i) {
+        const QChar ch = m_stderrPending.at(i);
+        if (ch == QLatin1Char('\n') || ch == QLatin1Char('\r')) {
+            if (i > searchFrom) {
+                parseProgressLine(QStringView(m_stderrPending).mid(searchFrom, i - searchFrom));
+            }
+            searchFrom = i + 1;
+        }
+    }
+    if (searchFrom > 0) m_stderrPending.remove(0, searchFrom);
+    // Don't let pending grow unboundedly if ffmpeg ever stops emitting line
+    // terminators (shouldn't happen, but be defensive).
+    if (m_stderrPending.size() > 8192)
+        m_stderrPending.remove(0, m_stderrPending.size() - 4096);
+}
+
+void EncoderPipeline::appendStderrTail(const QString& chunk) {
+    constexpr int kTailCap = 4096;
+    m_stderrTail += chunk;
+    if (m_stderrTail.size() > kTailCap) {
+        // Trim to the most recent kTailCap chars; align to a newline so the
+        // surfaced tail starts on a clean line where possible.
+        m_stderrTail.remove(0, m_stderrTail.size() - kTailCap);
+        const int nl = m_stderrTail.indexOf(QLatin1Char('\n'));
+        if (nl > 0 && nl < 256) m_stderrTail.remove(0, nl + 1);
+    }
+}
+
+bool EncoderPipeline::tryParseProgressLine(QStringView line,
+                                            int* bitrateKbps,
+                                            int* droppedFrames) {
+    // ffmpeg progress line format (one example):
+    //   frame= 1234 fps= 60 q=23.0 size=  4096kB time=00:00:20.00 bitrate=1700.6kbits/s drop=0 speed=1.0x
+    //
+    // Match `bitrate=...kbits/s` and (optionally) `drop=...` independently —
+    // some ffmpeg builds emit `dup=` ahead of `drop=`, others omit `drop=`
+    // entirely during the first second. Bitrate is the must-have anchor.
+    static const QRegularExpression kBitrateRe(
+        QStringLiteral(R"(bitrate=\s*([\d.]+)kbits/s)"));
+    static const QRegularExpression kDropRe(
+        QStringLiteral(R"(drop=\s*(\d+))"));
+
+    const QString text = line.toString();
+    const auto bitMatch = kBitrateRe.match(text);
+    if (!bitMatch.hasMatch()) return false;
+
+    if (bitrateKbps)
+        *bitrateKbps = static_cast<int>(bitMatch.captured(1).toDouble() + 0.5);
+    int drops = 0;
+    const auto dropMatch = kDropRe.match(text);
+    if (dropMatch.hasMatch()) drops = dropMatch.captured(1).toInt();
+    if (droppedFrames) *droppedFrames = drops;
+    return true;
+}
+
+void EncoderPipeline::parseProgressLine(QStringView line) {
+    int kbps = 0, drops = 0;
+    if (tryParseProgressLine(line, &kbps, &drops))
+        emit progress(kbps, drops);
 }
 
 // PipeAcceptThread is a QObject defined in this .cpp file; AUTOMOC generates

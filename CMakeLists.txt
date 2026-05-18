@@ -94,6 +94,8 @@ set(MALLOY_UI_SOURCES
     src/ui/MonitorPickerDialog.h
     src/ui/WindowPickerDialog.cpp
     src/ui/WindowPickerDialog.h
+    src/ui/MicrophonePickerDialog.cpp
+    src/ui/MicrophonePickerDialog.h
 )
 
 qt_add_executable(MalloyStudio WIN32

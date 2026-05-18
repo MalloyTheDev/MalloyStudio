@@ -11,6 +11,7 @@ class QLabel;
 class QSlider;
 class QToolButton;
 class QVBoxLayout;
+class SceneCollection;
 class VuMeter;
 
 // Mixer dock content. Hosts one channel strip per AudioController input.
@@ -22,12 +23,18 @@ class VuMeter;
 class AudioMixerPanel : public QWidget {
     Q_OBJECT
 public:
-    explicit AudioMixerPanel(AudioController* controller, QWidget* parent = nullptr);
+    // SceneCollection is needed so the "+ Add Microphone" button at the top
+    // of the mixer can call addAudioInputToCurrent() on the current scene.
+    // Passing nullptr disables that button (used only by tests).
+    explicit AudioMixerPanel(AudioController* controller,
+                             SceneCollection* scenes,
+                             QWidget* parent = nullptr);
 
 private slots:
     void rebuild();
     void onLevels(const QString& id, float peakL, float peakR);
     void onConnectionChanged(const QString& id, bool connected);
+    void onAddMicrophoneClicked();
 
 private:
     struct Strip {
@@ -42,8 +49,10 @@ private:
     Strip makeStrip(const QString& id, const AudioInput& in);
 
     AudioController*      m_controller  = nullptr;
+    SceneCollection*      m_scenes      = nullptr;
     QVBoxLayout*          m_lanes       = nullptr;
     QHash<QString, Strip> m_strips;
+    QLabel*               m_emptyLabel  = nullptr;  // shown when no mixer strips exist (Tier 3)
 
     // Master bus limiter controls (pinned to panel footer).
     QCheckBox* m_limiterToggle    = nullptr;

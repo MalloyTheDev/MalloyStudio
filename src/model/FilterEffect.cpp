@@ -7,50 +7,71 @@
 #include <vector>
 
 // ---------------------------------------------------------------------------
+// FilterEffect — base helpers
+// ---------------------------------------------------------------------------
+
+void FilterEffect::setEnabled(bool e) {
+    if (m_enabled == e) return;
+    m_enabled = e;
+    emit changed();
+}
+
+QJsonObject FilterEffect::writeBaseFields(QJsonObject obj) const {
+    // Only emit `enabled: false` when the filter is disabled — keeps the
+    // common case (everything enabled) out of project JSON so existing files
+    // round-trip byte-for-byte until a user toggles a filter off.
+    if (!m_enabled) obj.insert(QStringLiteral("enabled"), false);
+    return obj;
+}
+
+void FilterEffect::readBaseFields(const QJsonObject& obj) {
+    // Default true preserves backward compat: project files saved before v7
+    // simply don't have the "enabled" key, and they all start enabled.
+    m_enabled = obj.value(QStringLiteral("enabled")).toBool(true);
+}
+
+// ---------------------------------------------------------------------------
 // FilterEffect — factory
 // ---------------------------------------------------------------------------
 
 FilterEffect* FilterEffect::fromJson(const QJsonObject& obj, QObject* parent) {
     const QString typeStr = obj.value(QStringLiteral("type")).toString();
+    FilterEffect* f = nullptr;
     if (typeStr == QStringLiteral("crop")) {
-        auto* f = new CropFilter(parent);
-        f->setTop(static_cast<float>(obj.value(QStringLiteral("top")).toDouble(0.0)));
-        f->setLeft(static_cast<float>(obj.value(QStringLiteral("left")).toDouble(0.0)));
-        f->setBottom(static_cast<float>(obj.value(QStringLiteral("bottom")).toDouble(0.0)));
-        f->setRight(static_cast<float>(obj.value(QStringLiteral("right")).toDouble(0.0)));
-        return f;
+        auto* c = new CropFilter(parent);
+        c->setTop(static_cast<float>(obj.value(QStringLiteral("top")).toDouble(0.0)));
+        c->setLeft(static_cast<float>(obj.value(QStringLiteral("left")).toDouble(0.0)));
+        c->setBottom(static_cast<float>(obj.value(QStringLiteral("bottom")).toDouble(0.0)));
+        c->setRight(static_cast<float>(obj.value(QStringLiteral("right")).toDouble(0.0)));
+        f = c;
+    } else if (typeStr == QStringLiteral("opacity")) {
+        auto* o = new OpacityFilter(parent);
+        o->setOpacity(static_cast<float>(obj.value(QStringLiteral("opacity")).toDouble(1.0)));
+        f = o;
+    } else if (typeStr == QStringLiteral("color_correction")) {
+        auto* c = new ColorCorrectionFilter(parent);
+        c->setBrightness(static_cast<float>(obj.value(QStringLiteral("brightness")).toDouble(1.0)));
+        c->setContrast(static_cast<float>(obj.value(QStringLiteral("contrast")).toDouble(1.0)));
+        c->setSaturation(static_cast<float>(obj.value(QStringLiteral("saturation")).toDouble(1.0)));
+        f = c;
+    } else if (typeStr == QStringLiteral("chroma_key")) {
+        auto* k = new ChromaKeyFilter(parent);
+        k->setKey(QColor(obj.value(QStringLiteral("key")).toString(QStringLiteral("#00ff00"))));
+        k->setTolerance(static_cast<float>(obj.value(QStringLiteral("tolerance")).toDouble(0.20)));
+        k->setSmoothness(static_cast<float>(obj.value(QStringLiteral("smoothness")).toDouble(0.10)));
+        f = k;
+    } else if (typeStr == QStringLiteral("blur")) {
+        auto* b = new BlurFilter(parent);
+        b->setRadius(obj.value(QStringLiteral("radius")).toInt(4));
+        f = b;
+    } else if (typeStr == QStringLiteral("scroll")) {
+        auto* s = new ScrollFilter(parent);
+        s->setSpeedX(static_cast<float>(obj.value(QStringLiteral("speedX")).toDouble(0.0)));
+        s->setSpeedY(static_cast<float>(obj.value(QStringLiteral("speedY")).toDouble(0.0)));
+        f = s;
     }
-    if (typeStr == QStringLiteral("opacity")) {
-        auto* f = new OpacityFilter(parent);
-        f->setOpacity(static_cast<float>(obj.value(QStringLiteral("opacity")).toDouble(1.0)));
-        return f;
-    }
-    if (typeStr == QStringLiteral("color_correction")) {
-        auto* f = new ColorCorrectionFilter(parent);
-        f->setBrightness(static_cast<float>(obj.value(QStringLiteral("brightness")).toDouble(1.0)));
-        f->setContrast(static_cast<float>(obj.value(QStringLiteral("contrast")).toDouble(1.0)));
-        f->setSaturation(static_cast<float>(obj.value(QStringLiteral("saturation")).toDouble(1.0)));
-        return f;
-    }
-    if (typeStr == QStringLiteral("chroma_key")) {
-        auto* f = new ChromaKeyFilter(parent);
-        f->setKey(QColor(obj.value(QStringLiteral("key")).toString(QStringLiteral("#00ff00"))));
-        f->setTolerance(static_cast<float>(obj.value(QStringLiteral("tolerance")).toDouble(0.20)));
-        f->setSmoothness(static_cast<float>(obj.value(QStringLiteral("smoothness")).toDouble(0.10)));
-        return f;
-    }
-    if (typeStr == QStringLiteral("blur")) {
-        auto* f = new BlurFilter(parent);
-        f->setRadius(obj.value(QStringLiteral("radius")).toInt(4));
-        return f;
-    }
-    if (typeStr == QStringLiteral("scroll")) {
-        auto* f = new ScrollFilter(parent);
-        f->setSpeedX(static_cast<float>(obj.value(QStringLiteral("speedX")).toDouble(0.0)));
-        f->setSpeedY(static_cast<float>(obj.value(QStringLiteral("speedY")).toDouble(0.0)));
-        return f;
-    }
-    return nullptr;
+    if (f) f->readBaseFields(obj);
+    return f;
 }
 
 // ---------------------------------------------------------------------------
@@ -81,13 +102,13 @@ void CropFilter::apply(QImage& img) const {
 }
 
 QJsonObject CropFilter::toJson() const {
-    return {
+    return writeBaseFields({
         {QStringLiteral("type"),   QStringLiteral("crop")},
         {QStringLiteral("top"),    static_cast<double>(m_top)},
         {QStringLiteral("left"),   static_cast<double>(m_left)},
         {QStringLiteral("bottom"), static_cast<double>(m_bottom)},
         {QStringLiteral("right"),  static_cast<double>(m_right)},
-    };
+    });
 }
 
 FilterEffect* CropFilter::clone(QObject* parent) const {
@@ -96,6 +117,7 @@ FilterEffect* CropFilter::clone(QObject* parent) const {
     f->m_left   = m_left;
     f->m_bottom = m_bottom;
     f->m_right  = m_right;
+    f->setEnabled(isEnabled());
     return f;
 }
 
@@ -113,15 +135,16 @@ void OpacityFilter::setOpacity(float v) {
 }
 
 QJsonObject OpacityFilter::toJson() const {
-    return {
+    return writeBaseFields({
         {QStringLiteral("type"),    QStringLiteral("opacity")},
         {QStringLiteral("opacity"), static_cast<double>(m_opacity)},
-    };
+    });
 }
 
 FilterEffect* OpacityFilter::clone(QObject* parent) const {
     auto* f = new OpacityFilter(parent);
     f->m_opacity = m_opacity;
+    f->setEnabled(isEnabled());
     return f;
 }
 
@@ -186,12 +209,12 @@ void ColorCorrectionFilter::apply(QImage& img) const {
 }
 
 QJsonObject ColorCorrectionFilter::toJson() const {
-    return {
+    return writeBaseFields({
         {QStringLiteral("type"),       QStringLiteral("color_correction")},
         {QStringLiteral("brightness"), static_cast<double>(m_brightness)},
         {QStringLiteral("contrast"),   static_cast<double>(m_contrast)},
         {QStringLiteral("saturation"), static_cast<double>(m_saturation)},
-    };
+    });
 }
 
 FilterEffect* ColorCorrectionFilter::clone(QObject* parent) const {
@@ -199,6 +222,7 @@ FilterEffect* ColorCorrectionFilter::clone(QObject* parent) const {
     f->m_brightness = m_brightness;
     f->m_contrast   = m_contrast;
     f->m_saturation = m_saturation;
+    f->setEnabled(isEnabled());
     return f;
 }
 
@@ -249,12 +273,12 @@ void ChromaKeyFilter::apply(QImage& img) const {
 }
 
 QJsonObject ChromaKeyFilter::toJson() const {
-    return {
+    return writeBaseFields({
         {QStringLiteral("type"),       QStringLiteral("chroma_key")},
         {QStringLiteral("key"),        m_key.name()},
         {QStringLiteral("tolerance"),  static_cast<double>(m_tolerance)},
         {QStringLiteral("smoothness"), static_cast<double>(m_smoothness)},
-    };
+    });
 }
 
 FilterEffect* ChromaKeyFilter::clone(QObject* parent) const {
@@ -262,6 +286,7 @@ FilterEffect* ChromaKeyFilter::clone(QObject* parent) const {
     f->m_key        = m_key;
     f->m_tolerance  = m_tolerance;
     f->m_smoothness = m_smoothness;
+    f->setEnabled(isEnabled());
     return f;
 }
 
@@ -346,15 +371,16 @@ void BlurFilter::apply(QImage& img) const {
 }
 
 QJsonObject BlurFilter::toJson() const {
-    return {
+    return writeBaseFields({
         {QStringLiteral("type"),   QStringLiteral("blur")},
         {QStringLiteral("radius"), m_radius},
-    };
+    });
 }
 
 FilterEffect* BlurFilter::clone(QObject* parent) const {
     auto* f = new BlurFilter(parent);
     f->m_radius = m_radius;
+    f->setEnabled(isEnabled());
     return f;
 }
 
@@ -397,17 +423,18 @@ void ScrollFilter::apply(QImage& img) const {
 }
 
 QJsonObject ScrollFilter::toJson() const {
-    return {
+    return writeBaseFields({
         {QStringLiteral("type"),   QStringLiteral("scroll")},
         {QStringLiteral("speedX"), static_cast<double>(m_speedX)},
         {QStringLiteral("speedY"), static_cast<double>(m_speedY)},
-    };
+    });
 }
 
 FilterEffect* ScrollFilter::clone(QObject* parent) const {
     auto* f = new ScrollFilter(parent);
     f->m_speedX = m_speedX;
     f->m_speedY = m_speedY;
+    f->setEnabled(isEnabled());
     // Intentionally do NOT copy runtime state (offset, lastTickUs).
     return f;
 }

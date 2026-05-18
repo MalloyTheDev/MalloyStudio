@@ -19,10 +19,20 @@ and records to MP4/MKV via **ffmpeg**.
 | Image, Text, Color Block, Browser sources | v3 |
 | WASAPI desktop-audio capture & Audio Mixer | v4 |
 | Real MP4 recording (ffmpeg stdin + named-pipe audio) | v4 |
-| **Window Capture** (PrintWindow / BitBlt per HWND) | **v5** |
-| **Source Filters** (Crop, Opacity, Color Correction) | **v5** |
-| **Per-source microphone input** | **v5** |
-| **Encoder / output settings dialog** | **v5** |
+| Window Capture (PrintWindow / BitBlt per HWND) | v5 |
+| Source Filters (Crop, Opacity, Color Correction) | v5 |
+| Per-source microphone input (model layer) | v5 |
+| Encoder / output settings dialog | v5 |
+| Hardware encoders (NVENC / QSV / AMF via EncoderRegistry) | v6 |
+| RTMP streaming (Twitch / YouTube / Custom) | v6 |
+| Replay buffer (in-memory ring + save-on-demand) | v6 |
+| **Microphone & Window Capture in the Add menu** | **v7** |
+| **`+ Add Microphone` button in the Audio Mixer** | **v7** |
+| **Quality presets in Output & Stream Settings** | **v7** |
+| **Live bitrate + dropped-frames during streaming** | **v7** |
+| **Per-filter enable toggle (Enabled checkbox)** | **v7** |
+| **Per-source mute hotkeys** | **v7** |
+| **ffmpeg stderr in error dialogs** | **v7** |
 
 ---
 
@@ -156,14 +166,14 @@ The suite mocks `CaptureSession` to avoid needing real hardware and verifies:
 
 ---
 
-## Known limitations (v5)
+## Known limitations (v7)
 
 - **Window capture** captures the client area only; title bar chrome is excluded.
 - **DRM-protected windows** (Netflix, Prime Video in browsers) capture as a black frame — Windows OS limitation, same as OBS.
-- **No hardware encoders** — libx264/libx265 only; NVENC/QuickSync deferred to v6.
-- **No pause/resume** during recording.
-- **Browser source** is a placeholder (renders a grey box); WebEngineView integration is v6.
-- Per-source audio mixes globally; per-scene routing is a v6 item.
+- **No pause/resume** during recording — ffmpeg has no clean pause primitive. Use the Replay Buffer to snapshot a recent slice without stopping.
+- **Browser source** is a placeholder (renders a grey box); WebEngineView integration is still deferred.
+- **Desktop Audio as a scene source** is not yet available — `AudioController` auto-creates a `loopback:default` mixer strip so desktop audio always reaches recordings, but adding it as a scene-level source needs a JSON schema bump (deferred to v8).
+- **Push-to-talk** for microphones requires a low-level keyboard hook (out of scope).
 - Audio sample-rate conversion is not implemented — devices that deliver at rates other than 48 kHz will produce a one-time warning and may drift.
 
 ---

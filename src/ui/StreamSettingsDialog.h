@@ -35,4 +35,7 @@ private:
     QLineEdit* m_keyEdit         = nullptr;
     QSpinBox*  m_bitrateSpinBox  = nullptr;
     QSpinBox*  m_keyframeSpinBox = nullptr;
+    QComboBox* m_qualityPreset   = nullptr;   // Tier 3: bundles bitrate+keyframe presets
+    QLabel*    m_bitrateHint     = nullptr;   // service-recommended bitrate hint
+    bool       m_applyingPreset  = false;
 };

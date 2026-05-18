@@ -35,8 +35,26 @@ public:
     // Factory: creates the right concrete type from a JSON object.
     static FilterEffect* fromJson(const QJsonObject& obj, QObject* parent = nullptr);
 
+    // v7 Tier 3: per-filter enable flag. PreviewWidget::drawItem() skips
+    // disabled filters in the chain (and OpacityFilter's accumulator excludes
+    // disabled instances). JSON round-trips via `"enabled": <bool>`; missing
+    // key defaults to true so older project files load with everything on.
+    bool isEnabled() const { return m_enabled; }
+    void setEnabled(bool e);
+
 signals:
     void changed();
+
+protected:
+    // Concrete subclasses' toJson() should call writeBaseFields() to emit
+    // `enabled` alongside their type-specific keys, keeping the schema uniform.
+    QJsonObject writeBaseFields(QJsonObject obj) const;
+    // Mirror of writeBaseFields for the factory side — fromJson() reads
+    // shared keys back into the freshly-constructed filter.
+    void readBaseFields(const QJsonObject& obj);
+
+private:
+    bool m_enabled = true;
 };
 
 // ---------------------------------------------------------------------------

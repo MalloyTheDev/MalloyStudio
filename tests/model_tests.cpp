@@ -85,6 +85,31 @@ private slots:
     // `-preset <s.preset> -crf` instead of consulting EncoderRegistry for the
     // selected codec's per-encoder builder.
     void encoderPipelineRespectsRegistryPerCodecArgs();
+    // v7 Tier 1 regression tests: the same -22 class of bug existed in the
+    // streaming path (StreamingPipeline never consulted EncoderRegistry), and
+    // StreamSettings.keyframeSec was being silently dropped instead of plumbed
+    // through to ffmpeg.
+    void streamingPipelineUsesRegistryNotHardcodedX264();
+    void streamingPipelineHonorsKeyframeSec();
+    void streamingPipelineForcesGopWhenSoftwareEncoderOmitsIt();
+    // v7 Tier 2: prove that the UI-added Microphone flow does the right thing
+    // at the model level — adds an AudioInput source with the given device id,
+    // fires audioInputsChanged so reconcileInputs starts a worker, and
+    // contributes to gatherVisibleAudioIds() the way MainWindow expects.
+    void addAudioInputFromUiCreatesScopedSource();
+    void addingAudioInputTriggersAudioInputsChanged();
+    void togglingAudioInputVisibilityChangesGatherList();
+    // v7 Tier 3: per-filter visibility toggle and the ffmpeg progress parser.
+    // The filter-enabled flag is a small surface but easy to regress on
+    // JSON round-trip, so we lock the schema with a test. The progress-line
+    // parser anchors the streaming stats display.
+    void filterEnabledFlagRoundtripsJson();
+    void streamProgressLineParsesBitrateAndDrops();
+    // v7 Tier 4: the audio.mute.<id> action dispatch toggles the matching
+    // AudioController input's mute flag. Tests the contract MainWindow's
+    // hotkey dispatcher relies on without spinning up the global hotkey
+    // RegisterHotKey machinery (which needs a real Win32 message pump).
+    void audioMuteActionIdTogglesInput();
 };
 
 void MalloyModelTests::initTestCase() {
@@ -847,6 +872,371 @@ void MalloyModelTests::encoderPipelineRespectsRegistryPerCodecArgs() {
     const int idxCodec = args.indexOf(QStringLiteral("-c:v"));
     QVERIFY(idxCodec >= 0);
     QCOMPARE(args.at(idxCodec + 1), QStringLiteral("not_a_real_codec"));
+}
+
+// StreamingPipeline counterpart of ProbeEncoderPipeline — gives tests direct
+// access to the protected buildOutputArgs() override that emits the RTMP
+// argument vector. StreamingPipeline was originally marked `final`; v7
+// removed that so this helper could inherit it (only RecorderPipeline is
+// still final).
+class ProbeStreamingPipeline final : public StreamingPipeline {
+public:
+    QStringList probe(const Target& t) const { return buildOutputArgs(t); }
+};
+
+void MalloyModelTests::streamingPipelineUsesRegistryNotHardcodedX264() {
+    // Reproduces the streaming-side -22 bug: StreamingPipeline used to emit
+    // `-c:v <codec> -preset <s.preset> -tune zerolatency -b:v ...` regardless
+    // of which encoder the user picked. For hevc_nvenc that pushed a libx264
+    // preset name into ffmpeg and tripped EINVAL on Start Stream.
+
+    ProbeStreamingPipeline p;
+    EncoderPipeline::Target t;
+    t.kind        = EncoderPipeline::Target::Kind::Rtmp;
+    t.destination = QStringLiteral("rtmp://example.com/live/key");
+
+    // (1) libx264: registry returns CRF-style args; streaming layer must add
+    //     `-tune zerolatency` (libx264's streaming tune). The libx264 preset
+    //     name should pass through unchanged.
+    t.output            = OutputSettings{};
+    t.output.videoCodec = QStringLiteral("libx264");
+    t.output.preset     = QStringLiteral("veryfast");
+    t.output.fps        = 30;
+    {
+        const QStringList args = p.probe(t);
+        const int idxCodec = args.indexOf(QStringLiteral("-c:v"));
+        QVERIFY(idxCodec >= 0);
+        QCOMPARE(args.at(idxCodec + 1), QStringLiteral("libx264"));
+        const int idxTune = args.indexOf(QStringLiteral("-tune"));
+        QVERIFY(idxTune >= 0);
+        QCOMPARE(args.at(idxTune + 1), QStringLiteral("zerolatency"));
+        // GOP must be forced (override): with fps=30, default keyframeSec=2 → -g 60.
+        const int idxG = args.indexOf(QStringLiteral("-g"));
+        QVERIFY(idxG >= 0);
+        QCOMPARE(args.at(idxG + 1), QStringLiteral("60"));
+    }
+
+    // (2) hevc_nvenc (only if available on this machine): registry returns
+    //     CBR-style args with -preset p4; streaming layer adds `-tune ull`
+    //     (NVENC's ultra-low-latency tune). The libx264 preset name "faster"
+    //     must NOT leak through, and "zerolatency" must NOT appear (that's
+    //     a libx264-only token).
+    if (EncoderRegistry::find(QStringLiteral("hevc_nvenc"))) {
+        t.output.videoCodec  = QStringLiteral("hevc_nvenc");
+        t.output.preset      = QStringLiteral("faster");   // libx264 vocab — must be ignored
+        t.output.bitrateKbps = 8000;
+        const QStringList args = p.probe(t);
+        const int idxCodec = args.indexOf(QStringLiteral("-c:v"));
+        QVERIFY(idxCodec >= 0);
+        QCOMPARE(args.at(idxCodec + 1), QStringLiteral("hevc_nvenc"));
+        QVERIFY2(!args.contains(QStringLiteral("faster")),
+                 qPrintable(QStringLiteral("libx264 preset leaked into NVENC stream args: %1")
+                               .arg(args.join(QLatin1Char(' ')))));
+        QVERIFY(!args.contains(QStringLiteral("zerolatency")));   // libx264-only tune
+        const int idxTune = args.indexOf(QStringLiteral("-tune"));
+        QVERIFY(idxTune >= 0);
+        QCOMPARE(args.at(idxTune + 1), QStringLiteral("ull"));
+        QVERIFY(args.contains(QStringLiteral("-rc")));
+        QVERIFY(args.contains(QStringLiteral("cbr")));
+    }
+
+    // (3) h264_qsv (only if available): QSV does NOT accept `-tune`. The
+    //     streaming pipeline must omit it entirely.
+    if (EncoderRegistry::find(QStringLiteral("h264_qsv"))) {
+        t.output.videoCodec  = QStringLiteral("h264_qsv");
+        t.output.bitrateKbps = 6000;
+        const QStringList args = p.probe(t);
+        QVERIFY(!args.contains(QStringLiteral("-tune")));
+    }
+}
+
+void MalloyModelTests::streamingPipelineHonorsKeyframeSec() {
+    // Bug 9 regression: StreamSettings.keyframeSec was being silently dropped
+    // by MediaController, so the streaming pipeline always emitted a hardcoded
+    // 2-second GOP. The plumbing now carries the field through OutputSettings.
+
+    ProbeStreamingPipeline p;
+    EncoderPipeline::Target t;
+    t.kind        = EncoderPipeline::Target::Kind::Rtmp;
+    t.destination = QStringLiteral("rtmp://example.com/live/key");
+
+    t.output            = OutputSettings{};
+    t.output.videoCodec = QStringLiteral("libx264");
+    t.output.fps        = 30;
+
+    // (1) Explicit 4-second keyframe → -g 120 (30 fps × 4 s).
+    t.output.keyframeSec = 4;
+    {
+        const QStringList args = p.probe(t);
+        const int idxG = args.indexOf(QStringLiteral("-g"));
+        QVERIFY(idxG >= 0);
+        QCOMPARE(args.at(idxG + 1), QStringLiteral("120"));
+    }
+
+    // (2) keyframeSec == 0 means "auto", which the pipeline maps to the
+    //     2-second default → -g 60.
+    t.output.keyframeSec = 0;
+    {
+        const QStringList args = p.probe(t);
+        const int idxG = args.indexOf(QStringLiteral("-g"));
+        QVERIFY(idxG >= 0);
+        QCOMPARE(args.at(idxG + 1), QStringLiteral("60"));
+    }
+
+    // (3) 60 fps with keyframeSec=1 → -g 60 (one keyframe per second).
+    t.output.fps         = 60;
+    t.output.keyframeSec = 1;
+    {
+        const QStringList args = p.probe(t);
+        const int idxG = args.indexOf(QStringLiteral("-g"));
+        QVERIFY(idxG >= 0);
+        QCOMPARE(args.at(idxG + 1), QStringLiteral("60"));
+    }
+}
+
+void MalloyModelTests::streamingPipelineForcesGopWhenSoftwareEncoderOmitsIt() {
+    // The libx264 EncoderRegistry builder emits -preset/-crf only; -g is
+    // appended exclusively by StreamingPipeline. This test guards against a
+    // regression where someone might move the -g into the registry builder
+    // and then break streaming GOP for hardware encoders (or vice versa).
+
+    ProbeStreamingPipeline p;
+    EncoderPipeline::Target t;
+    t.kind        = EncoderPipeline::Target::Kind::Rtmp;
+    t.destination = QStringLiteral("rtmp://example.com/live/key");
+    t.output            = OutputSettings{};
+    t.output.videoCodec = QStringLiteral("libx264");
+    t.output.fps        = 30;
+    t.output.keyframeSec = 2;
+
+    const QStringList args = p.probe(t);
+    int gopCount = 0;
+    for (const QString& a : args) if (a == QStringLiteral("-g")) ++gopCount;
+    QCOMPARE(gopCount, 1);
+}
+
+// ---------------------------------------------------------------------------
+// v7 Tier 2 — Microphone source via SourcesPanel / AudioMixerPanel quick-add
+// ---------------------------------------------------------------------------
+
+void MalloyModelTests::addAudioInputFromUiCreatesScopedSource() {
+    // Simulates what the new SourcesPanel → Microphone flow does at the model
+    // level: pick a device, call addAudioInputToCurrent(name, deviceId). The
+    // resulting source must carry the correct type + device id and be
+    // immediately visible in the current scene so reconcileInputs picks it up.
+
+    SceneCollection scenes;
+    QUndoStack undo;
+    scenes.setUndoStack(&undo);
+    scenes.addScene(QStringLiteral("Scene"));
+
+    const QString fakeId = QStringLiteral("{aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee}");
+    SceneItem* item = scenes.addAudioInputToCurrent(QStringLiteral("USB Mic"), fakeId);
+    QVERIFY(item != nullptr);
+
+    QCOMPARE(scenes.sourceCount(), 1);
+    Source* src = scenes.sourceById(item->sourceId());
+    QVERIFY(src != nullptr);
+    QCOMPARE(src->type(), Source::Type::AudioInput);
+    QCOMPARE(src->name(),           QStringLiteral("USB Mic"));
+    QCOMPARE(src->audioDeviceId(),  fakeId);
+
+    QVERIFY(item->isVisible());
+    QCOMPARE(scenes.currentScene()->itemCount(), 1);
+
+    // Undo must remove the source cleanly (no dangling item references).
+    undo.undo();
+    QCOMPARE(scenes.sourceCount(), 0);
+    QCOMPARE(scenes.currentScene()->itemCount(), 0);
+    undo.redo();
+    QCOMPARE(scenes.sourceCount(), 1);
+}
+
+void MalloyModelTests::addingAudioInputTriggersAudioInputsChanged() {
+    // MainWindow listens to audioInputsChanged and forwards to
+    // AudioController::reconcileInputs(gatherVisibleAudioIds()). If the UI
+    // path forgets to emit the signal, microphones added via the new flow
+    // would never start capturing.
+
+    SceneCollection scenes;
+    scenes.addScene(QStringLiteral("Scene"));
+
+    QSignalSpy spy(&scenes, &SceneCollection::audioInputsChanged);
+    QVERIFY(spy.isValid());
+
+    scenes.addAudioInputToCurrent(QStringLiteral("Mic"),
+                                  QStringLiteral("{fake-guid}"));
+    QVERIFY2(spy.count() >= 1,
+             qPrintable(QStringLiteral("audioInputsChanged was not emitted")));
+}
+
+// ---------------------------------------------------------------------------
+// v7 Tier 3 — Per-filter enable flag + ffmpeg progress-line parser
+// ---------------------------------------------------------------------------
+
+void MalloyModelTests::filterEnabledFlagRoundtripsJson() {
+    // The new `enabled` flag must round-trip through toJson()/fromJson() AND
+    // legacy project files (no `enabled` key) must load with `enabled = true`.
+
+    // (1) Default-constructed filter is enabled.
+    {
+        CropFilter f;
+        QVERIFY(f.isEnabled());
+        const QJsonObject obj = f.toJson();
+        // Default-true state is NOT serialized (keeps existing files byte-identical).
+        QVERIFY(!obj.contains(QStringLiteral("enabled")));
+    }
+
+    // (2) Disabled filter serializes the flag.
+    {
+        OpacityFilter f;
+        f.setOpacity(0.5f);
+        f.setEnabled(false);
+        const QJsonObject obj = f.toJson();
+        QVERIFY(obj.contains(QStringLiteral("enabled")));
+        QCOMPARE(obj.value(QStringLiteral("enabled")).toBool(), false);
+
+        // Re-hydrate and confirm the flag survives.
+        FilterEffect* loaded = FilterEffect::fromJson(obj);
+        QVERIFY(loaded != nullptr);
+        QVERIFY(!loaded->isEnabled());
+        QCOMPARE(loaded->type(), FilterEffect::Type::Opacity);
+        delete loaded;
+    }
+
+    // (3) Legacy JSON without the `enabled` key still loads as enabled=true.
+    {
+        QJsonObject legacy{
+            {QStringLiteral("type"), QStringLiteral("color_correction")},
+            {QStringLiteral("brightness"), 1.2},
+            {QStringLiteral("contrast"),   1.0},
+            {QStringLiteral("saturation"), 1.0},
+        };
+        FilterEffect* loaded = FilterEffect::fromJson(legacy);
+        QVERIFY(loaded != nullptr);
+        QVERIFY2(loaded->isEnabled(),
+                 "Legacy project files (no 'enabled' key) must default to enabled=true");
+        delete loaded;
+    }
+
+    // (4) clone() preserves the enabled flag.
+    {
+        BlurFilter b;
+        b.setRadius(8);
+        b.setEnabled(false);
+        std::unique_ptr<FilterEffect> c(b.clone());
+        QVERIFY(c != nullptr);
+        QVERIFY(!c->isEnabled());
+    }
+}
+
+void MalloyModelTests::streamProgressLineParsesBitrateAndDrops() {
+    int kbps = -1, drops = -1;
+
+    // Canonical line: bitrate + drop together.
+    {
+        const QString line = QStringLiteral(
+            "frame= 1234 fps= 60 q=23.0 size= 4096kB time=00:00:20.00 "
+            "bitrate=1700.6kbits/s drop=3 speed=1.0x");
+        QVERIFY(EncoderPipeline::tryParseProgressLine(line, &kbps, &drops));
+        QCOMPARE(kbps, 1701);
+        QCOMPARE(drops, 3);
+    }
+
+    // Line without `drop=` (first second of a stream): drops defaults to 0.
+    {
+        kbps = drops = -1;
+        const QString line = QStringLiteral(
+            "frame= 30 fps=30.0 q=18.0 size= 128kB time=00:00:01.00 "
+            "bitrate=1024.0kbits/s speed=1.0x");
+        QVERIFY(EncoderPipeline::tryParseProgressLine(line, &kbps, &drops));
+        QCOMPARE(kbps, 1024);
+        QCOMPARE(drops, 0);
+    }
+
+    // Line with no `bitrate=` token (compile/info noise): parser must reject.
+    {
+        kbps = 99; drops = 99;
+        const QString line = QStringLiteral("hevc_nvenc: GPU encoding session opened");
+        QVERIFY(!EncoderPipeline::tryParseProgressLine(line, &kbps, &drops));
+        // Out-params unchanged on failure.
+        QCOMPARE(kbps, 99);
+        QCOMPARE(drops, 99);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// v7 Tier 4 — Per-source mute hotkeys
+// ---------------------------------------------------------------------------
+
+void MalloyModelTests::audioMuteActionIdTogglesInput() {
+    // Mirrors what MainWindow's hotkey dispatcher does on receiving
+    // `triggered("audio.mute.loopback:default")`: look up the matching
+    // AudioController input by id, flip its `muted` flag. This is the
+    // contract per-source Mute hotkeys depend on.
+
+    AudioController c;
+    QCOMPARE(c.inputs().size(), 1);                       // loopback:default
+    QCOMPARE(c.inputs().first().id, QStringLiteral("loopback:default"));
+    QCOMPARE(c.inputs().first().muted, false);
+
+    auto dispatchMute = [&c](const QString& actionId) {
+        if (!actionId.startsWith(QStringLiteral("audio.mute."))) return;
+        const QString audioId = actionId.mid(11);
+        const auto& inputs = c.inputs();
+        auto it = std::find_if(inputs.cbegin(), inputs.cend(),
+            [&](const AudioInput& in){ return in.id == audioId; });
+        if (it != inputs.cend()) c.setMuted(audioId, !it->muted);
+    };
+
+    // First press: unmuted → muted.
+    dispatchMute(QStringLiteral("audio.mute.loopback:default"));
+    QCOMPARE(c.inputs().first().muted, true);
+
+    // Second press: muted → unmuted.
+    dispatchMute(QStringLiteral("audio.mute.loopback:default"));
+    QCOMPARE(c.inputs().first().muted, false);
+
+    // Unknown input id is a no-op (no crash, no state change).
+    dispatchMute(QStringLiteral("audio.mute.does-not-exist"));
+    QCOMPARE(c.inputs().first().muted, false);
+}
+
+void MalloyModelTests::togglingAudioInputVisibilityChangesGatherList() {
+    // Hidden AudioInput items must be excluded from gatherVisibleAudioIds()
+    // so reconcileInputs() can tear down their workers — matching how
+    // DisplayCapture / WindowCapture sessions are scoped to visibility.
+
+    SceneCollection scenes;
+    QUndoStack undo;
+    scenes.setUndoStack(&undo);
+    scenes.addScene(QStringLiteral("Scene"));
+
+    const QString fakeId = QStringLiteral("{11111111-2222-3333-4444-555555555555}");
+    SceneItem* item = scenes.addAudioInputToCurrent(QStringLiteral("Mic"), fakeId);
+    QVERIFY(item != nullptr);
+
+    // Default state: item visible → gather returns the device.
+    {
+        const QStringList ids = scenes.gatherVisibleAudioIds();
+        QVERIFY2(ids.contains(fakeId),
+                 qPrintable(QStringLiteral("Expected gather to include %1, got: [%2]")
+                               .arg(fakeId, ids.join(QLatin1Char(',')))));
+    }
+
+    // Hide it → gather must drop it.
+    scenes.setCurrentItemVisible(0, false);
+    {
+        const QStringList ids = scenes.gatherVisibleAudioIds();
+        QVERIFY(!ids.contains(fakeId));
+    }
+
+    // Show it again → back in the list.
+    scenes.setCurrentItemVisible(0, true);
+    {
+        const QStringList ids = scenes.gatherVisibleAudioIds();
+        QVERIFY(ids.contains(fakeId));
+    }
 }
 
 QTEST_MAIN(MalloyModelTests)

@@ -26,6 +26,11 @@ public:
     void setRecordEnabled(bool enabled, const QString& disabledTooltip = QString());
     void setStreamEnabled(bool enabled, const QString& disabledTooltip = QString());
 
+    // v7 Tier 3: live ffmpeg progress for the streaming pipeline (bitrate in
+    // kbps, dropped frames). Updates the stream stats label next to the LIVE
+    // timer. Hidden when not streaming.
+    void setStreamStats(int bitrateKbps, int droppedFrames);
+
 signals:
     void transitionTypeChanged(TransitionType type);
     void transitionDurationChanged(int ms);
@@ -55,6 +60,7 @@ private:
     // Streaming
     QPushButton*    m_streamBtn      = nullptr;
     QLabel*         m_streamTimer    = nullptr;
+    QLabel*         m_streamStats    = nullptr;   // Tier 3: "4500 kbps · drops 0" (hidden when idle)
     QTimer*         m_streamTicker   = nullptr;
     QElapsedTimer   m_streamElapsed;
     bool            m_streaming      = false;
