@@ -1,0 +1,63 @@
+/* MalloyStudio dark theme (v8)
+ *
+ * Migrated from inline setStyleSheet() calls scattered across the UI. Selectors
+ * use objectName so each widget opts in by setting setObjectName("X") rather
+ * than a class-wide stylesheet. Keeps the dynamic styling (e.g. color picker
+ * swatches whose background-color reflects user choice) safely inline.
+ */
+
+/* Empty-state panel placeholders */
+QLabel#emptyState {
+    color: #888;
+    padding: 24px;
+}
+
+QLabel#emptyStateCompact {
+    color: #888;
+    padding: 8px;
+}
+
+/* Inspector / form hint text under inputs */
+QLabel#hintText {
+    color: #888;
+    font-size: 9pt;
+}
+
+/* ControlsBar: orange LIVE timer + dimmer stats label */
+QLabel#streamTimer {
+    color: #e08030;
+    font-weight: bold;
+}
+
+QLabel#streamStats {
+    color: #b08060;
+    font-size: 8pt;
+    padding-left: 4px;
+}
+
+/* ControlsBar: red recording timer */
+QLabel#recordTimer {
+    color: #e05050;
+    font-weight: bold;
+}
+
+/* Source-type annotation next to layer names */
+QLabel#typeAnnotation {
+    color: #9a9a9a;
+}
+
+/* Inspector header subtitle */
+QLabel#sourceTypeSubtitle {
+    color: #a0a0a0;
+}
+
+/* Inspector "selected source has no properties" page */
+QLabel#filterEmptyPage {
+    color: #808080;
+}
+
+/* StreamSettingsDialog: URL preview line under the service combo */
+QLabel#urlPreview {
+    color: gray;
+    font-size: 10px;
+}

@@ -98,10 +98,18 @@ set(MALLOY_UI_SOURCES
     src/ui/MicrophonePickerDialog.h
 )
 
+# v8: bundled SVG icon set + dark.qss stylesheet. CMAKE_AUTORCC is ON (line 10)
+# so listing the .qrc is enough — the auto-generated qrc_malloy.cpp gets compiled
+# into the executable automatically.
+set(MALLOY_RESOURCES
+    src/resources/malloy.qrc
+)
+
 qt_add_executable(MalloyStudio WIN32
     src/main.cpp
     ${MALLOY_UI_SOURCES}
     ${MALLOY_CORE_SOURCES}
+    ${MALLOY_RESOURCES}
 )
 
 target_include_directories(MalloyStudio PRIVATE src)

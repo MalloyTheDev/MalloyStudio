@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" stroke="none">
+  <!-- Dark rounded card backdrop -->
+  <rect x="2" y="2" width="60" height="60" rx="10" fill="#2d2d30"/>
+  <!-- Stylized capital M in MalloyStudio blue -->
+  <path d="M14 16 L14 48 L20 48 L20 26 L30 42 L34 42 L44 26 L44 48 L50 48 L50 16 L43 16 L32 34 L21 16 Z" fill="#2a82da"/>
+  <!-- Red record dot in the lower right — nods to the recording app's purpose -->
+  <circle cx="50" cy="50" r="5" fill="#e05050"/>
+</svg>

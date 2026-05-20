@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" stroke="none">
+  <!-- Four-square color swatch -->
+  <rect x="3"  y="3"  width="8" height="8" rx="1" fill="#e05050"/>
+  <rect x="13" y="3"  width="8" height="8" rx="1" fill="#e0a040"/>
+  <rect x="3"  y="13" width="8" height="8" rx="1" fill="#40a0e0"/>
+  <rect x="13" y="13" width="8" height="8" rx="1" fill="#40c060"/>
+</svg>

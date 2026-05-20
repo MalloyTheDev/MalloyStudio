@@ -1,7 +1,9 @@
 #include "MainWindow.h"
 #include <QApplication>
-#include <QStyleFactory>
+#include <QFile>
+#include <QIcon>
 #include <QPalette>
+#include <QStyleFactory>
 
 static void applyDarkPalette(QApplication& app) {
     app.setStyle(QStyleFactory::create("Fusion"));

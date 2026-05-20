@@ -1,0 +1,18 @@
+<RCC>
+    <qresource prefix="/">
+        <file>icons/controls/record-start.svg</file>
+        <file>icons/controls/record-stop.svg</file>
+        <file>icons/controls/stream-start.svg</file>
+        <file>icons/controls/stream-stop.svg</file>
+        <file>icons/sources/display.svg</file>
+        <file>icons/sources/window.svg</file>
+        <file>icons/sources/image.svg</file>
+        <file>icons/sources/text.svg</file>
+        <file>icons/sources/color.svg</file>
+        <file>icons/sources/browser.svg</file>
+        <file>icons/sources/audio.svg</file>
+        <file>icons/sources/webcam.svg</file>
+        <file>icons/app/malloy.svg</file>
+        <file>styles/dark.qss</file>
+    </qresource>
+</RCC>
