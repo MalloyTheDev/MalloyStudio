@@ -11,6 +11,8 @@
 #include "ui/shell/AppShell.h"
 #include "ui/shell/WorkspaceHeader.h"
 #include "ui/shell/StudioStatusBar.h"
+#include "ui/shell/NavModel.h"
+#include "ui/CommandPalette.h"
 #include "ui/workspaces/RecordingWorkspace.h"
 #include "ui/workspaces/StreamingWorkspace.h"
 #include "ui/workspaces/SettingsWorkspace.h"
@@ -39,6 +41,7 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSettings>
+#include <QShortcut>
 #include <QStandardPaths>
 #include <QUndoStack>
 #include <QVBoxLayout>
@@ -177,12 +180,41 @@ void MainWindow::setupUi() {
 
     connect(m_shell->header(), &WorkspaceHeader::projectPillClicked,
             this, &MainWindow::openProject);
-    connect(m_shell->header(), &WorkspaceHeader::commandPaletteRequested, this, [this] {
-        flash(tr("Command palette — coming soon"), 2500);
-    });
     connect(m_shell, &AppShell::workspaceChanged, this, [this](const QString& id) {
         if (id == QLatin1String("record")) updateStatusBar();
     });
+
+    // Command palette (Ctrl+K) overlaying the shell.
+    m_palette = new CommandPalette(m_shell);
+    {
+        QVector<CommandPalette::Command> cmds;
+        for (const NavItem& n : navItems()) {
+            const QString id = n.id;
+            cmds.push_back({QStringLiteral("go.") + id, tr("Go to %1").arg(n.label),
+                            tr("Workspace"), n.icon,
+                            [this, id] { m_shell->setCurrentWorkspace(id); }});
+        }
+        cmds.push_back({QStringLiteral("rec.toggle"), tr("Start / Stop Recording"),
+                        tr("Capture · F9"), QStringLiteral("record"),
+                        [this] { m_controlsBar->toggleRecord(); }});
+        cmds.push_back({QStringLiteral("stream.toggle"), tr("Go Live / End Stream"),
+                        tr("Capture · F8"), QStringLiteral("stream"),
+                        [this] { m_controlsBar->toggleStream(); }});
+        cmds.push_back({QStringLiteral("proj.new"), tr("New Project"),
+                        tr("Project · Ctrl+N"), QStringLiteral("plus"),
+                        [this] { newProject(); }});
+        cmds.push_back({QStringLiteral("proj.open"), tr("Open Project…"),
+                        tr("Project · Ctrl+O"), QStringLiteral("folder"),
+                        [this] { openProject(); }});
+        cmds.push_back({QStringLiteral("proj.save"), tr("Save Project"),
+                        tr("Project · Ctrl+S"), QStringLiteral("download"),
+                        [this] { saveProject(); }});
+        m_palette->setCommands(cmds);
+    }
+    connect(m_shell->header(), &WorkspaceHeader::commandPaletteRequested,
+            this, [this] { m_palette->openPalette(); });
+    auto* paletteSc = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_K), this);
+    connect(paletteSc, &QShortcut::activated, this, [this] { m_palette->openPalette(); });
 }
 
 void MainWindow::setupMenus() {

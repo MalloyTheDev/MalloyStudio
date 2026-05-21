@@ -20,6 +20,7 @@ class CaptureController;
 class AppShell;
 class Dashboard;
 class StreamingWorkspace;
+class CommandPalette;
 class QAction;
 class QPushButton;
 class QUndoStack;
@@ -59,6 +60,7 @@ private:
     AppShell*          m_shell             = nullptr;  // icon rail + workspaces + status bar
     Dashboard*         m_dashboard         = nullptr;
     StreamingWorkspace* m_streamStudio     = nullptr;
+    CommandPalette*    m_palette           = nullptr;
     PreviewWidget*     m_preview           = nullptr;  // Program (TimedFrameSource)
     PreviewWidget*     m_stagePreview      = nullptr;  // Staged (studio mode only)
     QPushButton*       m_transitionBtn     = nullptr;  // between staged and program

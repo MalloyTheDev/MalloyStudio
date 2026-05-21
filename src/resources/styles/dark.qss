@@ -329,6 +329,17 @@ QPushButton#actionButton:hover { background-color: #232427; border-color: #41444
 QFrame#iconChip { background-color: #232427; border: 1px solid #2d2f33; border-radius: 6px; }
 QFrame#statusItem { background-color: #1b1c1f; border: 1px solid #2d2f33; border-radius: 6px; }
 
+/* Command palette */
+QFrame#paletteCard { background-color: #141518; border: 1px solid #414449; border-radius: 14px; }
+QLineEdit#paletteSearch {
+    background: transparent; border: none; border-radius: 0;
+    padding: 14px 16px; font-size: 16px; color: #f7f7f7;
+}
+QLineEdit#paletteSearch:focus { border: none; }
+QListWidget#paletteList { background: transparent; border: none; padding: 6px; }
+QListWidget#paletteList::item { padding: 6px 10px; border-radius: 6px; color: #aeb1b8; }
+QListWidget#paletteList::item:selected { background: rgba(87,155,255,18%); color: #f7f7f7; }
+
 /* Hero / placeholder helpers */
 QLabel#heroTitle { font-size: 28px; font-weight: 600; color: #f7f7f7; }
 QFrame#placeholder {
