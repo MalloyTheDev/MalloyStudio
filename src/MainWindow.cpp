@@ -177,7 +177,15 @@ void MainWindow::setupUi() {
     m_shell->addWorkspace(QStringLiteral("projects"), new ProjectsWorkspace(this));
     m_shell->addWorkspace(QStringLiteral("render"), new RenderWorkspace(this));
     m_shell->addWorkspace(QStringLiteral("ai"), new AILabWorkspace(this));
-    m_shell->addWorkspace(QStringLiteral("settings"), new SettingsWorkspace(this));
+    m_settings = new SettingsWorkspace(this);
+    connect(m_settings, &SettingsWorkspace::recordingSettingsApplied, this, [this] {
+        m_outputSettings = OutputSettings::load();
+        const int secs = m_outputSettings.replayBufferSeconds;
+        m_preview->setReplayBufferSeconds(secs);
+        m_audio->setReplayBufferSeconds(secs);
+        flash(tr("Recording settings applied"), 2500);
+    });
+    m_shell->addWorkspace(QStringLiteral("settings"), m_settings);
 
     setCentralWidget(m_shell);
     m_shell->setCurrentWorkspace(QStringLiteral("dashboard"));

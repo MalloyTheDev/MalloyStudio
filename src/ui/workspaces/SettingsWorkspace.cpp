@@ -1,6 +1,7 @@
 #include "ui/workspaces/SettingsWorkspace.h"
 #include "ui/IconFactory.h"
 #include "ui/Theme.h"
+#include "recording/OutputSettings.h"
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -137,21 +138,26 @@ QWidget* SettingsWorkspace::buildRecordingPage() {
     auto* sub = lbl(tr("Encoder, container, quality, and where files are saved."), QStringLiteral("mute"), 13);
     col->addWidget(sub);
 
+    // Controls bound to the real OutputSettings (encoder/codec is left to the
+    // proven Edit ▸ Output Settings dialog to avoid touching the ffmpeg call).
+    m_crfEdit = line(QStringLiteral("20"), 100);
+    m_containerCombo = combo({tr("MKV (Matroska) · recommended"), tr("MP4"), tr("MOV")});
+    m_resCombo = combo({QStringLiteral("1920 × 1080"), QStringLiteral("2560 × 1440"), QStringLiteral("3840 × 2160")});
+    m_fpsCombo = combo({QStringLiteral("60"), QStringLiteral("30"), QStringLiteral("24")});
+    m_replayCheck = check(true);
+
     col->addWidget(settingsBlock(tr("Encoder"), {
-        {tr("Hardware encoder"), tr("Detected: NVENC AV1, H.264. Falls back to x264."),
+        {tr("Hardware encoder"), tr("Detected: NVENC AV1, H.264. Falls back to x264. Edit via Edit ▸ Output Settings."),
          combo({tr("NVENC H.264 (recommended)"), tr("NVENC AV1"), tr("QuickSync H.264"), tr("x264 (CPU)")})},
         {tr("Rate control"), tr("CBR for streams, CRF for archival recordings."),
          combo({tr("CRF (quality-based)"), tr("CBR (constant bitrate)")})},
-        {tr("CRF"), tr("Lower = higher quality. 18–23 is typical."), line(QStringLiteral("20"), 100)},
-        {tr("Container"), tr("MKV survives crashes; MP4 is more compatible."),
-         combo({tr("MKV (Matroska) · recommended"), tr("MP4"), tr("MOV")})},
+        {tr("CRF"), tr("Lower = higher quality. 18–23 is typical."), m_crfEdit},
+        {tr("Container"), tr("MKV survives crashes; MP4 is more compatible."), m_containerCombo},
     }));
 
     col->addWidget(settingsBlock(tr("Resolution & Framerate"), {
-        {tr("Canvas resolution"), tr("Your scene composes to this size."),
-         combo({QStringLiteral("1920 × 1080"), QStringLiteral("2560 × 1440"), QStringLiteral("3840 × 2160")})},
-        {tr("Recording FPS"), tr("Matched by all capture sources where possible."),
-         combo({QStringLiteral("60"), QStringLiteral("30"), QStringLiteral("24")})},
+        {tr("Canvas resolution"), tr("Your scene composes to this size."), m_resCombo},
+        {tr("Recording FPS"), tr("Matched by all capture sources where possible."), m_fpsCombo},
     }));
 
     col->addWidget(settingsBlock(tr("Storage"), {
@@ -159,7 +165,7 @@ QWidget* SettingsWorkspace::buildRecordingPage() {
          line(QStringLiteral("D:\\Renders\\Sessions"), 320)},
         {tr("Filename pattern"), tr("Tokens: {project} {scene} {date} {time} {n}."),
          line(QStringLiteral("{project} — {date} {time}"), 320)},
-        {tr("Replay buffer"), tr("In-RAM ring of the last 30 seconds."), check(true)},
+        {tr("Replay buffer"), tr("In-RAM ring of the last 30 seconds."), m_replayCheck},
     }));
 
     col->addWidget(settingsBlock(tr("Auto-actions"), {
@@ -167,6 +173,16 @@ QWidget* SettingsWorkspace::buildRecordingPage() {
         {tr("Auto-stop on inactivity"), tr("Helpful for unattended capture."), check(true)},
         {tr("Save clip on hotkey"), tr("Auto-name with timestamp."), check(true)},
     }));
+
+    loadRecordingSettings();
+
+    auto* applyRow = new QHBoxLayout;
+    applyRow->addStretch();
+    auto* apply = new QPushButton(tr("Apply"));
+    Theme::setVariant(apply, QStringLiteral("primary"));
+    connect(apply, &QPushButton::clicked, this, &SettingsWorkspace::applyRecordingSettings);
+    applyRow->addWidget(apply);
+    col->addLayout(applyRow);
     col->addStretch();
 
     outer->addWidget(content, 1);
@@ -194,4 +210,40 @@ QWidget* SettingsWorkspace::buildGenericPage(const QString& title) {
     col->addStretch();
     outer->addWidget(content, 1);
     return page;
+}
+
+void SettingsWorkspace::loadRecordingSettings() {
+    const OutputSettings o = OutputSettings::load();
+    if (m_resCombo)
+        m_resCombo->setCurrentIndex(o.width >= 3840 ? 2 : o.width >= 2560 ? 1 : 0);
+    if (m_fpsCombo) {
+        const int fi = m_fpsCombo->findText(QString::number(o.fps));
+        m_fpsCombo->setCurrentIndex(fi >= 0 ? fi : 0);
+    }
+    if (m_containerCombo)
+        m_containerCombo->setCurrentIndex(
+            o.container == QLatin1String("mov") ? 2 : o.container == QLatin1String("mp4") ? 1 : 0);
+    if (m_crfEdit) m_crfEdit->setText(QString::number(o.crf));
+    if (m_replayCheck) m_replayCheck->setChecked(o.replayBufferSeconds > 0);
+}
+
+void SettingsWorkspace::applyRecordingSettings() {
+    OutputSettings o = OutputSettings::load();  // preserve encoder/codec/etc.
+    static const int dims[3][2] = {{1920, 1080}, {2560, 1440}, {3840, 2160}};
+    const int ri = m_resCombo ? qBound(0, m_resCombo->currentIndex(), 2) : 0;
+    o.width = dims[ri][0];
+    o.height = dims[ri][1];
+    if (m_fpsCombo) o.fps = m_fpsCombo->currentText().toInt();
+    if (m_containerCombo) {
+        const int ci = m_containerCombo->currentIndex();
+        o.container = ci == 2 ? QStringLiteral("mov") : ci == 1 ? QStringLiteral("mp4") : QStringLiteral("mkv");
+    }
+    if (m_crfEdit) {
+        bool ok = false;
+        const int c = m_crfEdit->text().toInt(&ok);
+        if (ok) o.crf = qBound(0, c, 51);
+    }
+    if (m_replayCheck) o.replayBufferSeconds = m_replayCheck->isChecked() ? 30 : 0;
+    o.save();
+    emit recordingSettingsApplied();
 }

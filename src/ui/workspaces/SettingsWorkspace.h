@@ -2,6 +2,9 @@
 
 #include <QWidget>
 
+class QCheckBox;
+class QComboBox;
+class QLineEdit;
 class QStackedWidget;
 
 // Settings workspace (secondary.jsx SettingsScreen): a two-pane screen with a
@@ -13,9 +16,21 @@ class SettingsWorkspace : public QWidget {
 public:
     explicit SettingsWorkspace(QWidget* parent = nullptr);
 
+signals:
+    // Emitted when the user applies Recording settings (persisted to
+    // OutputSettings); MainWindow reloads and re-applies live state.
+    void recordingSettingsApplied();
+
 private:
     QWidget* buildRecordingPage();
     QWidget* buildGenericPage(const QString& title);
+    void loadRecordingSettings();
+    void applyRecordingSettings();
 
     QStackedWidget* m_stack = nullptr;
+    QComboBox* m_resCombo = nullptr;
+    QComboBox* m_fpsCombo = nullptr;
+    QComboBox* m_containerCombo = nullptr;
+    QLineEdit* m_crfEdit = nullptr;
+    QCheckBox* m_replayCheck = nullptr;
 };

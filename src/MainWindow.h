@@ -20,6 +20,7 @@ class CaptureController;
 class AppShell;
 class Dashboard;
 class StreamingWorkspace;
+class SettingsWorkspace;
 class CommandPalette;
 class OnboardingOverlay;
 class QAction;
@@ -61,6 +62,7 @@ private:
     AppShell*          m_shell             = nullptr;  // icon rail + workspaces + status bar
     Dashboard*         m_dashboard         = nullptr;
     StreamingWorkspace* m_streamStudio     = nullptr;
+    SettingsWorkspace* m_settings          = nullptr;
     CommandPalette*    m_palette           = nullptr;
     OnboardingOverlay* m_onboarding        = nullptr;
     PreviewWidget*     m_preview           = nullptr;  // Program (TimedFrameSource)
