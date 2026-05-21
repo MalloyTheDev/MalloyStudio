@@ -17,6 +17,7 @@ class AudioMixerPanel;
 class AudioController;
 class MediaController;
 class CaptureController;
+class ClipsRegistry;
 class AppShell;
 class Dashboard;
 class StreamingWorkspace;
@@ -59,6 +60,7 @@ private:
     AudioController*   m_audio             = nullptr;
     MediaController*   m_media             = nullptr;
     HotkeyManager*     m_hotkeys           = nullptr;
+    ClipsRegistry*     m_clipsRegistry     = nullptr;
     AppShell*          m_shell             = nullptr;  // icon rail + workspaces + status bar
     Dashboard*         m_dashboard         = nullptr;
     StreamingWorkspace* m_streamStudio     = nullptr;

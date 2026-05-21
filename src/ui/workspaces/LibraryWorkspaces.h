@@ -3,13 +3,24 @@
 #include <QWidget>
 
 // The four "library" workspaces, which share a left-filter / content pattern
-// (libraries.jsx + secondary.jsx RenderQueue). Demo content only — the backing
-// registries (clips, media index, project index, render queue) come later.
+// (libraries.jsx + secondary.jsx RenderQueue). Clips is backed by ClipsRegistry;
+// the others still use demo content pending their registries.
+
+class ClipsRegistry;
+class QLabel;
+class QScrollArea;
 
 class ClipsWorkspace : public QWidget {
     Q_OBJECT
 public:
-    explicit ClipsWorkspace(QWidget* parent = nullptr);
+    explicit ClipsWorkspace(ClipsRegistry* registry, QWidget* parent = nullptr);
+
+private:
+    void rebuild();
+
+    ClipsRegistry* m_registry = nullptr;
+    QScrollArea* m_scroll = nullptr;
+    QLabel* m_countLabel = nullptr;
 };
 
 class MediaWorkspace : public QWidget {

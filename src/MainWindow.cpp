@@ -29,6 +29,7 @@
 #include "model/Scene.h"
 #include "capture/CaptureController.h"
 #include "project/ProjectDocument.h"
+#include "project/ClipsRegistry.h"
 
 #include <QAction>
 #include <QCloseEvent>
@@ -58,6 +59,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     m_scenes->setUndoStack(m_undoStack);
     m_captureController = new CaptureController(m_scenes, this);
     m_audio             = new AudioController(this);
+    m_clipsRegistry     = new ClipsRegistry(this);
     m_outputSettings    = OutputSettings::load();
     m_streamSettings    = StreamSettings::load();
     m_captureStatus     = m_captureController->statusSummary();
@@ -172,7 +174,7 @@ void MainWindow::setupUi() {
             this, [this] { m_controlsBar->toggleStream(); });
     m_shell->addWorkspace(QStringLiteral("stream"), m_streamStudio);
     m_shell->addWorkspace(QStringLiteral("editor"), new EditorWorkspace(this));
-    m_shell->addWorkspace(QStringLiteral("clips"), new ClipsWorkspace(this));
+    m_shell->addWorkspace(QStringLiteral("clips"), new ClipsWorkspace(m_clipsRegistry, this));
     m_shell->addWorkspace(QStringLiteral("media"), new MediaWorkspace(this));
     m_shell->addWorkspace(QStringLiteral("projects"), new ProjectsWorkspace(this));
     m_shell->addWorkspace(QStringLiteral("render"), new RenderWorkspace(this));
@@ -604,6 +606,9 @@ void MainWindow::connectModelSignals() {
     // Replay saved notification
     connect(m_media, &MediaController::replaySaved, this,
             [this](const QString& path) {
+        const QString project = m_projectPath.isEmpty()
+            ? QString() : QFileInfo(m_projectPath).completeBaseName();
+        m_clipsRegistry->registerFile(path, project, m_outputSettings.replayBufferSeconds);
         flash(tr("Replay saved: %1").arg(QFileInfo(path).fileName()), 5000);
     });
 }

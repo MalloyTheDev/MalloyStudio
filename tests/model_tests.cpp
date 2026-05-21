@@ -8,6 +8,7 @@
 #include "model/SceneItem.h"
 #include "model/Source.h"
 #include "project/ProjectDocument.h"
+#include "project/ClipsRegistry.h"
 #include "recording/OutputSettings.h"
 #include "recording/EncoderPipeline.h"
 #include "recording/RingTimedPcmSource.h"
@@ -110,6 +111,9 @@ private slots:
     // hotkey dispatcher relies on without spinning up the global hotkey
     // RegisterHotKey machinery (which needs a real Win32 message pump).
     void audioMuteActionIdTogglesInput();
+    // Clips registry: metadata persists to JSON and survives a reload, and
+    // favorites toggle. Backs the Clips workspace.
+    void clipsRegistryRoundTrips();
 };
 
 void MalloyModelTests::initTestCase() {
@@ -1237,6 +1241,54 @@ void MalloyModelTests::togglingAudioInputVisibilityChangesGatherList() {
         const QStringList ids = scenes.gatherVisibleAudioIds();
         QVERIFY(ids.contains(fakeId));
     }
+}
+
+void MalloyModelTests::clipsRegistryRoundTrips() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString store = dir.filePath(QStringLiteral("clips.json"));
+
+    {
+        ClipsRegistry reg;
+        reg.setStorePath(store);
+        QCOMPARE(reg.count(), 0);
+
+        ClipInfo a;
+        a.filePath = QStringLiteral("C:/clips/a.mp4");
+        a.name = QStringLiteral("First clip");
+        a.sourceProject = QStringLiteral("Spire");
+        a.recordedAt = QDateTime(QDate(2026, 5, 21), QTime(12, 0));
+        a.sizeBytes = 5 * 1024 * 1024;
+        a.durationSecs = 30;
+        a.tags = {QStringLiteral("highlight")};
+        reg.addClip(a);
+
+        ClipInfo b;
+        b.name = QStringLiteral("Second clip");
+        reg.addClip(b);
+
+        // Newest first (prepend).
+        QCOMPARE(reg.count(), 2);
+        QCOMPARE(reg.clips().at(0).name, QStringLiteral("Second clip"));
+        QCOMPARE(reg.clips().at(1).name, QStringLiteral("First clip"));
+
+        // Favorite the first-added clip by id.
+        reg.setFavorite(reg.clips().at(1).id, true);
+        QVERIFY(reg.clips().at(1).favorite);
+    }
+
+    // Reload into a fresh registry: state must persist.
+    ClipsRegistry reg2;
+    reg2.setStorePath(store);
+    QCOMPARE(reg2.count(), 2);
+    const ClipInfo& first = reg2.clips().at(1);
+    QCOMPARE(first.name, QStringLiteral("First clip"));
+    QCOMPARE(first.sourceProject, QStringLiteral("Spire"));
+    QCOMPARE(first.durationSecs, 30);
+    QCOMPARE(first.sizeBytes, qint64(5 * 1024 * 1024));
+    QVERIFY(first.favorite);
+    QCOMPARE(first.tags, QStringList{QStringLiteral("highlight")});
+    QCOMPARE(first.durationText(), QStringLiteral("0:30"));
 }
 
 QTEST_MAIN(MalloyModelTests)

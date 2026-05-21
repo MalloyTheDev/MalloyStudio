@@ -54,6 +54,8 @@ set(MALLOY_CORE_SOURCES
     src/input/HotkeyManager.h
     src/project/ProjectDocument.cpp
     src/project/ProjectDocument.h
+    src/project/ClipsRegistry.cpp
+    src/project/ClipsRegistry.h
     src/model/Canvas.h
     src/model/FilterEffect.cpp
     src/model/FilterEffect.h

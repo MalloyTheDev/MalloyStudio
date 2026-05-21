@@ -3,6 +3,7 @@
 #include "ui/components/Placeholder.h"
 #include "ui/IconFactory.h"
 #include "ui/Theme.h"
+#include "project/ClipsRegistry.h"
 
 #include <QComboBox>
 #include <QFrame>
@@ -68,10 +69,15 @@ QPushButton* ghost(const QString& text, const QString& icon = QString()) {
 } // namespace
 
 // ───────────────────────────── Clips ──────────────────────────────────────
-ClipsWorkspace::ClipsWorkspace(QWidget* parent) : QWidget(parent) {
+ClipsWorkspace::ClipsWorkspace(ClipsRegistry* registry, QWidget* parent)
+    : QWidget(parent), m_registry(registry) {
     auto* row = new QHBoxLayout(this);
     row->setContentsMargins(0, 0, 0, 0);
     row->setSpacing(0);
+
+    int total = registry ? registry->count() : 0;
+    int favCount = 0;
+    if (registry) for (const ClipInfo& c : registry->clips()) if (c.favorite) ++favCount;
 
     // Left filters
     auto* aside = new QWidget(this);
@@ -81,14 +87,9 @@ ClipsWorkspace::ClipsWorkspace(QWidget* parent) : QWidget(parent) {
     av->setContentsMargins(6, 8, 6, 8);
     av->setSpacing(2);
     av->addWidget(Theme::makeSectionHeader(tr("Smart filters")));
-    av->addWidget(filterRow(QStringLiteral("clips"), tr("All clips"), 42, true));
-    av->addWidget(filterRow(QStringLiteral("star"), tr("Favorites"), 7));
-    av->addWidget(filterRow(QStringLiteral("clips"), tr("Last session"), 12));
-    av->addWidget(filterRow(QStringLiteral("folder"), tr("Archived"), 18));
-    av->addWidget(Theme::makeSectionHeader(tr("Source")));
-    av->addWidget(filterRow(QStringLiteral("folder"), tr("Spire of the Hollow Sun"), 18));
-    av->addWidget(filterRow(QStringLiteral("folder"), tr("Coding Sessions"), 9));
-    av->addWidget(filterRow(QStringLiteral("folder"), tr("Tuesday Vlog"), 7));
+    av->addWidget(filterRow(QStringLiteral("clips"), tr("All clips"), total, true));
+    av->addWidget(filterRow(QStringLiteral("star"), tr("Favorites"), favCount));
+    av->addWidget(filterRow(QStringLiteral("folder"), tr("Archived"), 0));
     av->addWidget(Theme::makeSectionHeader(tr("Tags")));
     auto* tagWrap = new QWidget;
     auto* tg = new QHBoxLayout(tagWrap);
@@ -114,7 +115,8 @@ ClipsWorkspace::ClipsWorkspace(QWidget* parent) : QWidget(parent) {
     auto* sort = new QComboBox; sort->addItems({tr("Newest first"), tr("Oldest first"), tr("Longest")});
     sort->setFixedWidth(140);
     tb->addWidget(sort);
-    tb->addWidget(lbl(tr("42 clips · 3.2 GB"), QStringLiteral("mute"), 11, false, true));
+    m_countLabel = lbl(QString(), QStringLiteral("mute"), 11, false, true);
+    tb->addWidget(m_countLabel);
     tb->addStretch();
     auto* exp = new QPushButton(Icons::icon(QStringLiteral("upload"), Theme::Text, 12), tr(" Export selected"));
     tb->addWidget(exp);
@@ -122,40 +124,83 @@ ClipsWorkspace::ClipsWorkspace(QWidget* parent) : QWidget(parent) {
     auto* div = new QFrame; div->setObjectName(QStringLiteral("divider")); div->setFixedHeight(1);
     mv->addWidget(div);
 
-    auto* grid = new QWidget;
-    grid->setObjectName(QStringLiteral("workspaceBody"));
-    auto* gl = new QGridLayout(grid);
-    gl->setContentsMargins(16, 16, 16, 16);
-    gl->setSpacing(14);
-    struct C { QString title, src, when; bool fav; };
-    const QVector<C> clips = {
-        {tr("No-hit boss phase 3"), tr("Spire"), tr("Today, 1h ago"), true},
-        {tr("Dodge into riposte"), tr("Spire"), tr("Today, 1h ago"), false},
-        {tr("Boss death animation"), tr("Spire"), tr("Today, 2h ago"), true},
-        {tr("Bit about coffee"), tr("Vlog"), tr("Yesterday"), false},
-        {tr("Refactor reveal"), tr("Coding"), tr("Yesterday"), false},
-        {tr("Death — corrupted run"), tr("Spire"), tr("2 days"), false},
-        {tr("Reaction — first boss"), tr("Spire"), tr("3 days"), true},
-        {tr("Tutorial — vim binding"), tr("Coding"), tr("1 week"), true},
-    };
-    int i = 0;
-    for (const C& c : clips) {
-        auto* cell = new QWidget;
-        auto* cv = new QVBoxLayout(cell);
-        cv->setContentsMargins(0, 0, 0, 0); cv->setSpacing(6);
-        cv->addWidget(new Placeholder(c.title, 16, 9));
-        cv->addWidget(lbl(c.title, QString(), 12, true));
-        auto* meta = new QHBoxLayout; meta->setSpacing(6);
-        meta->addWidget(lbl(QStringLiteral("%1 · %2").arg(c.src, c.when), QStringLiteral("mute"), 10, false, true));
-        meta->addStretch();
-        if (c.fav) { auto* s = new QLabel; s->setPixmap(Icons::pixmap(QStringLiteral("star"), Theme::Warn, 12)); meta->addWidget(s); }
-        cv->addLayout(meta);
-        gl->addWidget(cell, i / 4, i % 4);
-        ++i;
-    }
-    gl->setRowStretch((i + 3) / 4, 1);
-    mv->addWidget(scrollArea(grid), 1);
+    m_scroll = new QScrollArea(main);
+    m_scroll->setWidgetResizable(true);
+    m_scroll->setFrameShape(QFrame::NoFrame);
+    mv->addWidget(m_scroll, 1);
     row->addWidget(main, 1);
+
+    if (m_registry)
+        connect(m_registry, &ClipsRegistry::changed, this, &ClipsWorkspace::rebuild);
+    rebuild();
+}
+
+void ClipsWorkspace::rebuild() {
+    const QVector<ClipInfo> clips = m_registry ? m_registry->clips() : QVector<ClipInfo>{};
+    qint64 totalBytes = 0;
+    for (const ClipInfo& c : clips) totalBytes += c.sizeBytes;
+    if (m_countLabel) {
+        const double mb = totalBytes / (1024.0 * 1024.0);
+        const QString sz = mb >= 1024.0 ? QStringLiteral("%1 GB").arg(mb / 1024.0, 0, 'f', 1)
+                                        : QStringLiteral("%1 MB").arg(mb, 0, 'f', 1);
+        m_countLabel->setText(tr("%1 clips · %2").arg(clips.size()).arg(sz));
+    }
+
+    auto* content = new QWidget;
+    content->setObjectName(QStringLiteral("workspaceBody"));
+
+    if (clips.isEmpty()) {
+        auto* v = new QVBoxLayout(content);
+        v->setAlignment(Qt::AlignCenter);
+        v->setSpacing(8);
+        auto* icon = new QLabel;
+        icon->setPixmap(Icons::pixmap(QStringLiteral("clips"), Theme::TextFaint, 40));
+        icon->setAlignment(Qt::AlignCenter);
+        v->addWidget(icon, 0, Qt::AlignHCenter);
+        auto* t = lbl(tr("No clips yet"), QString(), 16, true);
+        t->setAlignment(Qt::AlignCenter);
+        v->addWidget(t, 0, Qt::AlignHCenter);
+        auto* s = lbl(tr("Save the last 30 seconds with the replay hotkey.\n"
+                         "Enable the replay buffer in Settings ▸ Recording first."),
+                      QStringLiteral("mute"), 12);
+        s->setAlignment(Qt::AlignCenter);
+        v->addWidget(s, 0, Qt::AlignHCenter);
+    } else {
+        auto* gl = new QGridLayout(content);
+        gl->setContentsMargins(16, 16, 16, 16);
+        gl->setSpacing(14);
+        int i = 0;
+        for (const ClipInfo& c : clips) {
+            auto* cell = new QWidget;
+            auto* cv = new QVBoxLayout(cell);
+            cv->setContentsMargins(0, 0, 0, 0); cv->setSpacing(6);
+            cv->addWidget(new Placeholder(c.name, 16, 9));
+            cv->addWidget(lbl(c.name, QString(), 12, true));
+            auto* meta = new QHBoxLayout; meta->setSpacing(6);
+            const QString when = c.recordedAt.isValid()
+                ? c.recordedAt.toString(QStringLiteral("MMM d · h:mm AP")) : QString();
+            const QString src = c.sourceProject.isEmpty() ? tr("Unsorted") : c.sourceProject;
+            meta->addWidget(lbl(QStringLiteral("%1 · %2 · %3").arg(src, when, c.durationText()),
+                                QStringLiteral("mute"), 10, false, true));
+            meta->addStretch();
+            auto* fav = new QPushButton(Icons::icon(QStringLiteral("star"),
+                                        c.favorite ? Theme::Warn : Theme::TextFaint, 12), QString());
+            Theme::setVariant(fav, QStringLiteral("ghost"));
+            fav->setFixedWidth(24);
+            fav->setCursor(Qt::PointingHandCursor);
+            const QString id = c.id; const bool cur = c.favorite;
+            connect(fav, &QPushButton::clicked, this, [this, id, cur] {
+                if (m_registry) m_registry->setFavorite(id, !cur);
+            });
+            meta->addWidget(fav);
+            cv->addLayout(meta);
+            gl->addWidget(cell, i / 4, i % 4);
+            ++i;
+        }
+        gl->setRowStretch((i + 3) / 4, 1);
+        gl->setColumnStretch(4, 0);
+    }
+    m_scroll->setWidget(content);
 }
 
 // ───────────────────────────── Media ──────────────────────────────────────
