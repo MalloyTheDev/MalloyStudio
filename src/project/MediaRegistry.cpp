@@ -2,9 +2,14 @@
 
 #include <QDir>
 #include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QProcess>
 #include <QSet>
 #include <QSettings>
 #include <QStandardPaths>
+#include <QTimer>
 
 #include <algorithm>
 
@@ -53,6 +58,21 @@ QString MediaInfo::iconName() const {
     }
 }
 
+QString MediaInfo::durationText() const {
+    if (durationSecs <= 0) return QStringLiteral("—");
+    const int h = durationSecs / 3600, m = (durationSecs % 3600) / 60, s = durationSecs % 60;
+    if (h > 0) return QStringLiteral("%1:%2:%3").arg(h).arg(m, 2, 10, QChar('0')).arg(s, 2, 10, QChar('0'));
+    return QStringLiteral("%1:%2").arg(m).arg(s, 2, 10, QChar('0'));
+}
+
+QString MediaInfo::propsText() const {
+    QStringList parts;
+    if (!resolution.isEmpty()) parts << resolution;
+    if (durationSecs > 0)      parts << durationText();
+    if (parts.isEmpty())       return QStringLiteral("%1 · %2").arg(kindText(), ext.toUpper());
+    return parts.join(QStringLiteral(" · "));
+}
+
 MediaInfo::Kind MediaInfo::kindForExt(const QString& lowerExt) {
     if (videoExts().contains(lowerExt)) return Video;
     if (audioExts().contains(lowerExt)) return Audio;
@@ -61,6 +81,12 @@ MediaInfo::Kind MediaInfo::kindForExt(const QString& lowerExt) {
 }
 
 MediaRegistry::MediaRegistry(QObject* parent) : QObject(parent) {
+    m_ffprobe = !QStandardPaths::findExecutable(QStringLiteral("ffprobe")).isEmpty();
+    m_coalesce = new QTimer(this);
+    m_coalesce->setSingleShot(true);
+    m_coalesce->setInterval(250);
+    connect(m_coalesce, &QTimer::timeout, this, &MediaRegistry::changed);
+
     loadDirs();
     for (auto loc : {QStandardPaths::MoviesLocation, QStandardPaths::PicturesLocation,
                      QStandardPaths::MusicLocation}) {
@@ -68,6 +94,10 @@ MediaRegistry::MediaRegistry(QObject* parent) : QObject(parent) {
         if (!d.isEmpty() && !m_dirs.contains(d)) m_dirs << d;
     }
     rescan();
+}
+
+void MediaRegistry::emitChangedCoalesced() {
+    if (m_coalesce && !m_coalesce->isActive()) m_coalesce->start();
 }
 
 void MediaRegistry::setSearchDirs(const QStringList& dirs) {
@@ -128,4 +158,51 @@ void MediaRegistry::rescan() {
     std::sort(m_media.begin(), m_media.end(),
               [](const MediaInfo& a, const MediaInfo& b) { return a.modified > b.modified; });
     emit changed();
+
+    // Kick off async metadata probing for this scan generation.
+    ++m_probeGen;
+    m_probeIndex = 0;
+    probeNext(m_probeGen);
+}
+
+void MediaRegistry::probeNext(int generation) {
+    if (!m_ffprobe || generation != m_probeGen) return;
+    while (m_probeIndex < m_media.size() && m_media[m_probeIndex].probed)
+        ++m_probeIndex;
+    // Cap probing so a huge media folder can't spawn an unbounded ffprobe chain.
+    if (m_probeIndex >= m_media.size() || m_probeIndex >= 200) return;
+
+    const int idx = m_probeIndex;
+    const QString path = m_media[idx].filePath;
+    auto* proc = new QProcess(this);
+    connect(proc, &QProcess::finished, this,
+            [this, proc, generation, idx](int code, QProcess::ExitStatus status) {
+        const QByteArray out = proc->readAllStandardOutput();
+        proc->deleteLater();
+        if (generation != m_probeGen) return;        // a newer rescan superseded us
+        if (status == QProcess::NormalExit && code == 0 && idx < m_media.size()) {
+            const QJsonObject root = QJsonDocument::fromJson(out).object();
+            MediaInfo& m = m_media[idx];
+            const double dur = root.value(QStringLiteral("format")).toObject()
+                                   .value(QStringLiteral("duration")).toString().toDouble();
+            if (dur > 0) m.durationSecs = int(dur + 0.5);
+            for (const QJsonValue& sv : root.value(QStringLiteral("streams")).toArray()) {
+                const QJsonObject s = sv.toObject();
+                if (s.value(QStringLiteral("codec_type")).toString() == QLatin1String("video")) {
+                    const int w = s.value(QStringLiteral("width")).toInt();
+                    const int h = s.value(QStringLiteral("height")).toInt();
+                    if (w > 0 && h > 0) m.resolution = QStringLiteral("%1×%2").arg(w).arg(h);
+                    break;
+                }
+            }
+        }
+        if (idx < m_media.size()) m_media[idx].probed = true;  // even on failure: don't retry
+        emitChangedCoalesced();
+        ++m_probeIndex;
+        probeNext(generation);
+    });
+    proc->start(QStringLiteral("ffprobe"),
+                {QStringLiteral("-v"), QStringLiteral("quiet"),
+                 QStringLiteral("-print_format"), QStringLiteral("json"),
+                 QStringLiteral("-show_format"), QStringLiteral("-show_streams"), path});
 }

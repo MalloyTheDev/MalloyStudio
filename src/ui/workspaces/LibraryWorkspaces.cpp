@@ -315,7 +315,7 @@ void MediaWorkspace::rebuild() {
         auto* divr = new QFrame; divr->setObjectName(QStringLiteral("divider")); divr->setFixedHeight(1);
         cv->addWidget(divr);
         cv->addWidget(rowWidget(m.name,
-                                QStringLiteral("%1 · %2").arg(m.kindText(), m.ext.toUpper()),
+                                m.propsText(),
                                 m.sizeText(),
                                 m.modified.toString(QStringLiteral("MMM d, yyyy")), false));
     }
