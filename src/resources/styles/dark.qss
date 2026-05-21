@@ -78,6 +78,7 @@ QPushButton[variant="ghost"] {
     background-color: transparent; border-color: transparent; color: #aeb1b8;
 }
 QPushButton[variant="ghost"]:hover { background-color: #1b1c1f; color: #f7f7f7; }
+QPushButton[variant="ghost"]:checked { background-color: #232427; color: #f7f7f7; }
 
 /* variant=outline-rec (end-stream style) */
 QPushButton[variant="outlineRec"] {

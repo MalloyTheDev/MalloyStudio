@@ -4,6 +4,7 @@
 #include "ui/IconFactory.h"
 #include "ui/Theme.h"
 
+#include <QButtonGroup>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMouseEvent>
@@ -24,6 +25,7 @@ constexpr int kRulerH = 26;
 constexpr int kTrackH = 44;
 constexpr int kHeaderW = 200;
 constexpr int kTimelineLen = 360;  // seconds
+constexpr int kEdgePx = 6;         // clip trim grip width
 
 struct Track { QString id; QString name; bool audio; };
 const QVector<Track>& tracks() {
@@ -82,9 +84,17 @@ class TimelineCanvas : public QWidget {
 public:
     explicit TimelineCanvas(QWidget* parent = nullptr) : QWidget(parent) {
         setMouseTracking(true);
+        m_clips = clips();   // mutable working copy of the seed timeline
         updateSize();
     }
     void setZoom(double z) { m_zoom = z; updateSize(); update(); }
+
+    enum class Tool { Select, Razor, Slip, Hand };
+    void setTool(Tool t) {
+        m_tool = t;
+        setCursor(t == Tool::Razor ? Qt::SplitHCursor : Qt::ArrowCursor);
+    }
+    void setSnap(bool on) { m_snap = on; }
 
 protected:
     QSize sizeHint() const override { return minimumSize(); }
@@ -112,7 +122,7 @@ protected:
         }
 
         // Clips
-        const auto& cs = clips();
+        const auto& cs = m_clips;
         for (int i = 0; i < cs.size(); ++i) {
             const Clip& c = cs[i];
             const QRectF r(c.start * m_zoom + 1, kRulerH + c.track * kTrackH + 3,
@@ -182,35 +192,147 @@ protected:
     }
 
     void mousePressEvent(QMouseEvent* e) override {
-        if (e->position().y() < kRulerH) {
+        const QPointF pos = e->position();
+        if (pos.y() < kRulerH) {                    // ruler → scrub playhead
             m_scrubbing = true;
-            m_playhead = qBound(0.0, e->position().x() / m_zoom, double(kTimelineLen));
-        } else {
-            const int ti = (int(e->position().y()) - kRulerH) / kTrackH;
-            const double t = e->position().x() / m_zoom;
-            m_selected = -1;
-            const auto& cs = clips();
-            for (int i = 0; i < cs.size(); ++i)
-                if (cs[i].track == ti && t >= cs[i].start && t <= cs[i].start + cs[i].dur) { m_selected = i; break; }
+            m_playhead = qBound(0.0, pos.x() / m_zoom, double(kTimelineLen));
+            update();
+            return;
+        }
+        Zone zone = Zone::None;
+        const int i = clipAt(pos, &zone);
+        if (m_tool == Tool::Razor) {                // razor → split at click
+            if (i >= 0) splitClip(i, pos.x() / m_zoom);
+            update();
+            return;
+        }
+        m_selected = i;
+        if (i >= 0) {                               // select → begin move/trim
+            m_drag = i;
+            m_dragZone = zone;
+            m_origStart = m_clips[i].start;
+            m_origDur = m_clips[i].dur;
+            m_grabOffset = pos.x() / m_zoom - m_clips[i].start;
         }
         update();
     }
+
     void mouseMoveEvent(QMouseEvent* e) override {
+        const QPointF pos = e->position();
         if (m_scrubbing) {
-            m_playhead = qBound(0.0, e->position().x() / m_zoom, double(kTimelineLen));
+            m_playhead = qBound(0.0, pos.x() / m_zoom, double(kTimelineLen));
             update();
+            return;
         }
+        if (m_drag >= 0 && (e->buttons() & Qt::LeftButton)) {
+            Clip& c = m_clips[m_drag];
+            const double t = pos.x() / m_zoom;
+            const double origEnd = m_origStart + m_origDur;
+            constexpr double minDur = 0.25;
+            if (m_dragZone == Zone::Body) {
+                c.start = qBound(0.0, snapTime(t - m_grabOffset, m_drag),
+                                 double(kTimelineLen) - c.dur);
+            } else if (m_dragZone == Zone::LeftEdge) {
+                const double ns = qBound(0.0, snapTime(t, m_drag), origEnd - minDur);
+                c.start = ns;
+                c.dur = origEnd - ns;
+            } else if (m_dragZone == Zone::RightEdge) {
+                const double ne = qBound(c.start + minDur, snapTime(t, m_drag),
+                                         double(kTimelineLen));
+                c.dur = ne - c.start;
+            }
+            update();
+            return;
+        }
+        if (e->buttons() == Qt::NoButton) updateHoverCursor(pos);
     }
-    void mouseReleaseEvent(QMouseEvent*) override { m_scrubbing = false; }
+
+    void mouseReleaseEvent(QMouseEvent*) override { m_scrubbing = false; m_drag = -1; }
 
 private:
+    enum class Zone { None, Body, LeftEdge, RightEdge };
+
     void updateSize() {
         setMinimumSize(int(kTimelineLen * m_zoom), kRulerH + tracks().size() * kTrackH);
     }
+
+    int clipAt(const QPointF& pos, Zone* zone) const {
+        if (zone) *zone = Zone::None;
+        if (pos.y() < kRulerH) return -1;
+        const int ti = (int(pos.y()) - kRulerH) / kTrackH;
+        const double t = pos.x() / m_zoom;
+        for (int i = 0; i < m_clips.size(); ++i) {
+            const Clip& c = m_clips[i];
+            if (c.track != ti) continue;
+            if (t >= c.start && t <= c.start + c.dur) {
+                if (zone) {
+                    const double edge = kEdgePx / m_zoom;
+                    if (t - c.start <= edge)              *zone = Zone::LeftEdge;
+                    else if (c.start + c.dur - t <= edge) *zone = Zone::RightEdge;
+                    else                                  *zone = Zone::Body;
+                }
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    void updateHoverCursor(const QPointF& pos) {
+        if (pos.y() < kRulerH) { setCursor(Qt::SizeHorCursor); return; }
+        if (m_tool == Tool::Razor) { setCursor(Qt::SplitHCursor); return; }
+        Zone z = Zone::None;
+        const int i = clipAt(pos, &z);
+        if (i < 0) { setCursor(Qt::ArrowCursor); return; }
+        setCursor(z == Zone::LeftEdge || z == Zone::RightEdge ? Qt::SizeHorCursor
+                                                              : Qt::OpenHandCursor);
+    }
+
+    // Snap a time to the 1-second grid, the playhead, or any other clip's edge,
+    // whichever is within ~8px. ignoreClip excludes the clip being edited.
+    double snapTime(double t, int ignoreClip) const {
+        if (!m_snap) return t;
+        const double threshold = 8.0 / m_zoom;
+        double best = t, bestDist = threshold;
+        auto consider = [&](double cand) {
+            const double d = std::abs(cand - t);
+            if (d < bestDist) { bestDist = d; best = cand; }
+        };
+        consider(qRound(t));
+        consider(m_playhead);
+        for (int i = 0; i < m_clips.size(); ++i) {
+            if (i == ignoreClip) continue;
+            consider(m_clips[i].start);
+            consider(m_clips[i].start + m_clips[i].dur);
+        }
+        return best;
+    }
+
+    void splitClip(int i, double t) {
+        if (i < 0 || i >= m_clips.size()) return;
+        Clip a = m_clips[i];
+        const double cut = snapTime(t, i);
+        if (cut <= a.start + 0.1 || cut >= a.start + a.dur - 0.1) return;
+        const double origEnd = a.start + a.dur;
+        Clip b = a;
+        a.dur = cut - a.start;
+        b.start = cut;
+        b.dur = origEnd - cut;
+        m_clips[i] = a;
+        m_clips.insert(i + 1, b);
+        m_selected = i + 1;
+    }
+
     double m_zoom = 60.0;     // px/sec
     double m_playhead = 34.0; // sec
     int m_selected = 6;       // Spire phase 1 selected by default
     bool m_scrubbing = false;
+
+    QVector<Clip> m_clips;
+    Tool m_tool = Tool::Select;
+    bool m_snap = true;
+    int m_drag = -1;
+    Zone m_dragZone = Zone::None;
+    double m_origStart = 0, m_origDur = 0, m_grabOffset = 0;
 };
 
 QFrame* iconChip(const QString& name, const QColor& color, int chip, int ic) {
@@ -350,12 +472,32 @@ EditorWorkspace::EditorWorkspace(QWidget* parent) : QWidget(parent) {
     toolbar->setFixedHeight(38);
     auto* tb = new QHBoxLayout(toolbar);
     tb->setContentsMargins(12, 0, 12, 0); tb->setSpacing(6);
-    for (const auto& tool : {QStringLiteral("drag"), QStringLiteral("scissors"),
-                             QStringLiteral("refresh"), QStringLiteral("layers")}) {
-        auto* b = new QPushButton(Icons::icon(tool, Theme::TextDim, 13), QString());
-        Theme::setVariant(b, QStringLiteral("ghost")); b->setFixedWidth(28);
+    auto* toolGroup = new QButtonGroup(this);
+    toolGroup->setExclusive(true);
+    const struct { QString icon; QString tip; } toolDefs[] = {
+        {QStringLiteral("drag"),     tr("Select")},
+        {QStringLiteral("scissors"), tr("Razor — click a clip to split")},
+        {QStringLiteral("refresh"),  tr("Slip")},
+        {QStringLiteral("layers"),   tr("Hand")},
+    };
+    QVector<QPushButton*> toolBtns;
+    for (const auto& td : toolDefs) {
+        auto* b = new QPushButton(Icons::icon(td.icon, Theme::TextDim, 13), QString());
+        Theme::setVariant(b, QStringLiteral("ghost"));
+        b->setFixedWidth(28);
+        b->setCheckable(true);
+        b->setToolTip(td.tip);
+        toolGroup->addButton(b);
         tb->addWidget(b);
+        toolBtns << b;
     }
+    toolBtns[0]->setChecked(true);
+    auto* snapBtn = new QPushButton(Icons::icon(QStringLiteral("check"), Theme::AccentHi, 12), tr(" Snap"));
+    Theme::setVariant(snapBtn, QStringLiteral("ghost"));
+    snapBtn->setCheckable(true);
+    snapBtn->setChecked(true);
+    snapBtn->setToolTip(tr("Snap to clip edges, playhead, and the second grid"));
+    tb->addWidget(snapBtn);
     tb->addStretch();
     tb->addWidget(lbl(tr("ZOOM"), QStringLiteral("mute"), 11));
     auto* zoom = new QSlider(Qt::Horizontal); zoom->setRange(10, 200); zoom->setValue(60);
@@ -418,6 +560,12 @@ EditorWorkspace::EditorWorkspace(QWidget* parent) : QWidget(parent) {
         canvas->setZoom(double(v));
         zoomVal->setText(QStringLiteral("%1px/s").arg(v));
     });
+
+    connect(toolBtns[0], &QPushButton::clicked, canvas, [canvas] { canvas->setTool(TimelineCanvas::Tool::Select); });
+    connect(toolBtns[1], &QPushButton::clicked, canvas, [canvas] { canvas->setTool(TimelineCanvas::Tool::Razor); });
+    connect(toolBtns[2], &QPushButton::clicked, canvas, [canvas] { canvas->setTool(TimelineCanvas::Tool::Slip); });
+    connect(toolBtns[3], &QPushButton::clicked, canvas, [canvas] { canvas->setTool(TimelineCanvas::Tool::Hand); });
+    connect(snapBtn, &QPushButton::toggled, canvas, [canvas](bool on) { canvas->setSnap(on); });
 
     col->addWidget(bottom, 45);
 }
