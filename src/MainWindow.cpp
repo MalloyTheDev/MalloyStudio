@@ -8,6 +8,12 @@
 #include "ui/OutputSettingsDialog.h"
 #include "ui/StreamSettingsDialog.h"
 #include "ui/HotkeysDialog.h"
+#include "ui/shell/AppShell.h"
+#include "ui/shell/WorkspaceHeader.h"
+#include "ui/shell/StudioStatusBar.h"
+#include "ui/workspaces/RecordingWorkspace.h"
+#include "ui/workspaces/PlaceholderWorkspace.h"
+#include "ui/dashboard/Dashboard.h"
 #include "audio/AudioController.h"
 #include "input/HotkeyManager.h"
 #include "recording/MediaController.h"
@@ -20,7 +26,6 @@
 #include <QCloseEvent>
 #include <QDateTime>
 #include <QDir>
-#include <QDockWidget>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QHBoxLayout>
@@ -30,8 +35,6 @@
 #include <QPushButton>
 #include <QSettings>
 #include <QStandardPaths>
-#include <QStatusBar>
-#include <QToolBar>
 #include <QUndoStack>
 #include <QVBoxLayout>
 
@@ -121,8 +124,6 @@ void MainWindow::setupUi() {
     m_preview = new PreviewWidget(m_scenes, PreviewWidget::Role::Program, m_studioContainer);
     studioLayout->addWidget(m_preview, 1);
 
-    setCentralWidget(m_studioContainer);
-
     // Wire transition column visibility to studioMode toggle
     connect(m_scenes, &SceneCollection::studioModeChanged, this,
             [this, transCol](bool on) {
@@ -130,46 +131,66 @@ void MainWindow::setupUi() {
         transCol->setVisible(on);
     });
 
+    // Capture panels (formerly dockable; now arranged as fixed columns inside
+    // the Recording workspace).
     m_scenesPanel = new ScenesPanel(m_scenes, this);
-    m_scenesDock = new QDockWidget(tr("Scenes"), this);
-    m_scenesDock->setObjectName("ScenesDock");
-    m_scenesDock->setWidget(m_scenesPanel);
-    m_scenesDock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
-    addDockWidget(Qt::LeftDockWidgetArea, m_scenesDock);
-
     // v7: SourcesPanel needs AudioController so the "Microphone" entry in the
     // Add dialog can launch MicrophonePickerDialog with the live device list.
     m_sourcesPanel = new SourcesPanel(m_scenes, m_audio, this);
-    m_sourcesDock = new QDockWidget(tr("Sources"), this);
-    m_sourcesDock->setObjectName("SourcesDock");
-    m_sourcesDock->setWidget(m_sourcesPanel);
-    m_sourcesDock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
-    addDockWidget(Qt::RightDockWidgetArea, m_sourcesDock);
-
     m_inspectorPanel = new InspectorPanel(m_scenes, m_captureController, m_audio, this);
-    m_inspectorDock = new QDockWidget(tr("Inspector"), this);
-    m_inspectorDock->setObjectName("InspectorDock");
-    m_inspectorDock->setWidget(m_inspectorPanel);
-    m_inspectorDock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
-    addDockWidget(Qt::RightDockWidgetArea, m_inspectorDock);
-    splitDockWidget(m_sourcesDock, m_inspectorDock, Qt::Vertical);
-
     // v7: pass SceneCollection so the mixer's "+ Add Microphone" button can
     // create a scene-level AudioInput source via addAudioInputToCurrent().
     m_mixerPanel = new AudioMixerPanel(m_audio, m_scenes, this);
-    m_mixerDock = new QDockWidget(tr("Audio Mixer"), this);
-    m_mixerDock->setObjectName("AudioMixerDock");
-    m_mixerDock->setWidget(m_mixerPanel);
-    m_mixerDock->setAllowedAreas(Qt::AllDockWidgetAreas);
-    addDockWidget(Qt::BottomDockWidgetArea, m_mixerDock);
-
     m_controlsBar = new ControlsBar(this);
-    auto* bar = addToolBar(tr("Controls"));
-    bar->setObjectName(QStringLiteral("ControlsToolBar"));
-    bar->setMovable(false);
-    bar->setFloatable(false);
-    bar->addWidget(m_controlsBar);
-    addToolBar(Qt::BottomToolBarArea, bar);
+
+    // ── App shell: icon rail + workspace stack + status bar ────────────────
+    m_shell = new AppShell(this);
+
+    auto* recording = new RecordingWorkspace(
+        m_scenesPanel, m_sourcesPanel, m_studioContainer, m_controlsBar,
+        m_mixerPanel, m_inspectorPanel);
+
+    m_dashboard = new Dashboard(this);
+    connect(m_dashboard, &Dashboard::navigateTo, this,
+            [this](const QString& id) { m_shell->setCurrentWorkspace(id); });
+    m_shell->addWorkspace(QStringLiteral("dashboard"), m_dashboard);
+    m_shell->addWorkspace(QStringLiteral("record"), recording);
+    m_shell->addWorkspace(QStringLiteral("stream"),
+        new PlaceholderWorkspace(QStringLiteral("stream"), tr("Streaming"),
+            tr("Go live, stream health, chat and alerts."), this));
+    m_shell->addWorkspace(QStringLiteral("editor"),
+        new PlaceholderWorkspace(QStringLiteral("editor"), tr("Editor"),
+            tr("Multi-track timeline editing arrives in a later phase."), this));
+    m_shell->addWorkspace(QStringLiteral("clips"),
+        new PlaceholderWorkspace(QStringLiteral("clips"), tr("Clips"),
+            tr("Your replay-buffer captures, tagged and searchable."), this));
+    m_shell->addWorkspace(QStringLiteral("media"),
+        new PlaceholderWorkspace(QStringLiteral("media"), tr("Media"),
+            tr("Project media library with import and relink."), this));
+    m_shell->addWorkspace(QStringLiteral("projects"),
+        new PlaceholderWorkspace(QStringLiteral("projects"), tr("Projects"),
+            tr("All your MalloyStudio projects in one place."), this));
+    m_shell->addWorkspace(QStringLiteral("render"),
+        new PlaceholderWorkspace(QStringLiteral("render"), tr("Render Queue"),
+            tr("Background renders with progress and retries."), this));
+    m_shell->addWorkspace(QStringLiteral("ai"),
+        new PlaceholderWorkspace(QStringLiteral("ai"), tr("AI Lab"),
+            tr("Clip detection, subtitles, and editing assists — planned."), this));
+    m_shell->addWorkspace(QStringLiteral("settings"),
+        new PlaceholderWorkspace(QStringLiteral("settings"), tr("Settings"),
+            tr("Encoder, devices, hotkeys, storage and appearance."), this));
+
+    setCentralWidget(m_shell);
+    m_shell->setCurrentWorkspace(QStringLiteral("dashboard"));
+
+    connect(m_shell->header(), &WorkspaceHeader::projectPillClicked,
+            this, &MainWindow::openProject);
+    connect(m_shell->header(), &WorkspaceHeader::commandPaletteRequested, this, [this] {
+        flash(tr("Command palette — coming soon"), 2500);
+    });
+    connect(m_shell, &AppShell::workspaceChanged, this, [this](const QString& id) {
+        if (id == QLatin1String("record")) updateStatusBar();
+    });
 }
 
 void MainWindow::setupMenus() {
@@ -238,10 +259,12 @@ void MainWindow::setupMenus() {
     });
 
     auto* viewMenu = menuBar()->addMenu(tr("&View"));
-    viewMenu->addAction(m_scenesDock->toggleViewAction());
-    viewMenu->addAction(m_sourcesDock->toggleViewAction());
-    viewMenu->addAction(m_inspectorDock->toggleViewAction());
-    viewMenu->addAction(m_mixerDock->toggleViewAction());
+
+    // Workspace switching from the menu (mirrors the icon rail).
+    auto* gotoMenu = viewMenu->addMenu(tr("&Go to"));
+    gotoMenu->addAction(tr("Dashboard"), this, [this] { m_shell->setCurrentWorkspace(QStringLiteral("dashboard")); });
+    gotoMenu->addAction(tr("Recording"), this, [this] { m_shell->setCurrentWorkspace(QStringLiteral("record")); });
+    gotoMenu->addAction(tr("Streaming"), this, [this] { m_shell->setCurrentWorkspace(QStringLiteral("stream")); });
 
     viewMenu->addSeparator();
 
@@ -385,18 +408,20 @@ void MainWindow::connectModelSignals() {
             m_controlsBar->forceStopRecording();
             return;
         }
-        statusBar()->showMessage(tr("Recording to %1").arg(QFileInfo(path).fileName()));
+        flash(tr("Recording to %1").arg(QFileInfo(path).fileName()));
+        updateShellMode();
     });
 
     connect(m_controlsBar, &ControlsBar::recordingStopped, this, [this] {
         m_media->stopRecording();
+        updateShellMode();
     });
 
     connect(m_media, &MediaController::recordingFinished,
             this, [this](const QString& path, qint64 bytes) {
         m_controlsBar->forceStopRecording();
-        statusBar()->showMessage(
-            tr("Saved %1 (%2 KB)").arg(QFileInfo(path).fileName()).arg(bytes / 1024), 5000);
+        updateShellMode();
+        flash(tr("Saved %1 (%2 KB)").arg(QFileInfo(path).fileName()).arg(bytes / 1024), 5000);
     });
 
     // ControlsBar → MediaController (streaming)
@@ -424,17 +449,20 @@ void MainWindow::connectModelSignals() {
             m_controlsBar->forceStopStreaming();
             return;
         }
-        statusBar()->showMessage(tr("Streaming to %1").arg(
+        flash(tr("Streaming to %1").arg(
             StreamSettings::displayName(m_streamSettings.service)));
+        updateShellMode();
     });
 
     connect(m_controlsBar, &ControlsBar::streamingStopped, this, [this] {
         m_media->stopStreaming();
+        updateShellMode();
     });
 
     connect(m_media, &MediaController::streamingFinished, this, [this] {
         m_controlsBar->forceStopStreaming();
-        statusBar()->showMessage(tr("Stream ended."), 4000);
+        updateShellMode();
+        flash(tr("Stream ended."), 4000);
     });
 
     // v7 Tier 3: live bitrate + dropped-frames updates from ffmpeg → mixer.
@@ -483,8 +511,7 @@ void MainWindow::connectModelSignals() {
             m_transitionBtn->click();
         } else if (actionId == QLatin1String(HotkeyManager::kReplaySave)) {
             if (m_outputSettings.replayBufferSeconds <= 0) {
-                statusBar()->showMessage(
-                    tr("Replay buffer is disabled — enable it in Output Settings."), 4000);
+                flash(tr("Replay buffer is disabled — enable it in Output Settings."), 4000);
             } else {
                 const QString dir = QStandardPaths::writableLocation(
                     QStandardPaths::MoviesLocation);
@@ -502,9 +529,9 @@ void MainWindow::connectModelSignals() {
                                          m_preview->nativeWidth(),
                                          m_preview->nativeHeight(),
                                          std::move(pcm), &err))
-                    statusBar()->showMessage(tr("Replay save failed: %1").arg(err), 5000);
+                    flash(tr("Replay save failed: %1").arg(err), 5000);
                 else
-                    statusBar()->showMessage(tr("Saving replay…"), 2000);
+                    flash(tr("Saving replay…"), 2000);
             }
         } else if (actionId.startsWith(QStringLiteral("scene.switch."))) {
             const int idx = actionId.mid(13).toInt() - 1;  // 0-based
@@ -526,8 +553,7 @@ void MainWindow::connectModelSignals() {
     // Replay saved notification
     connect(m_media, &MediaController::replaySaved, this,
             [this](const QString& path) {
-        statusBar()->showMessage(
-            tr("Replay saved: %1").arg(QFileInfo(path).fileName()), 5000);
+        flash(tr("Replay saved: %1").arg(QFileInfo(path).fileName()), 5000);
     });
 }
 
@@ -579,7 +605,7 @@ bool MainWindow::saveProject() {
 
     m_undoStack->setClean();
     updateWindowTitle();
-    statusBar()->showMessage(tr("Saved %1").arg(QFileInfo(m_projectPath).fileName()), 2500);
+    flash(tr("Saved %1").arg(QFileInfo(m_projectPath).fileName()), 2500);
     return true;
 }
 
@@ -608,7 +634,7 @@ bool MainWindow::loadProject(const QString& filePath) {
     m_undoStack->setClean();
     updateWindowTitle();
     updateStatusBar();
-    statusBar()->showMessage(tr("Opened %1").arg(QFileInfo(filePath).fileName()), 2500);
+    flash(tr("Opened %1").arg(QFileInfo(filePath).fileName()), 2500);
     return true;
 }
 
@@ -619,14 +645,31 @@ void MainWindow::updateWindowTitle() {
     setWindowTitle(QStringLiteral("%1%2 - MalloyStudio")
         .arg(m_undoStack && !m_undoStack->isClean() ? QStringLiteral("*") : QString())
         .arg(name));
+    if (m_shell) m_shell->header()->setProjectName(name);
+    if (m_dashboard) m_dashboard->setProjectName(name);
 }
 
 void MainWindow::updateStatusBar() {
-    statusBar()->showMessage(tr("Scenes: %1   Layers: %2   Sources: %3   %4")
+    // The capture summary used to live in the OS status bar; surface the live
+    // scene/source counts in the workspace header subtitle while on Recording.
+    if (!m_shell) return;
+    const QString summary = tr("%1 scenes · %2 sources")
         .arg(m_scenes->sceneCount())
-        .arg(m_scenes->totalSourceCount())
-        .arg(m_scenes->sourceCount())
-        .arg(m_captureStatus));
+        .arg(m_scenes->sourceCount());
+    if (m_shell->currentWorkspace() == QLatin1String("record"))
+        m_shell->header()->setSubtitle(summary);
+}
+
+void MainWindow::updateShellMode() {
+    if (!m_shell) return;
+    StudioStatusBar::Mode mode = StudioStatusBar::Mode::Idle;
+    if (m_media && m_media->isStreaming())      mode = StudioStatusBar::Mode::Streaming;
+    else if (m_media && m_media->isRecording()) mode = StudioStatusBar::Mode::Recording;
+    m_shell->status()->setMode(mode);
+}
+
+void MainWindow::flash(const QString& text, int ms) {
+    if (m_shell) m_shell->status()->flashMessage(text, ms);
 }
 
 void MainWindow::updatePreviewLabel() {

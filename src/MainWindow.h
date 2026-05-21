@@ -17,8 +17,9 @@ class AudioMixerPanel;
 class AudioController;
 class MediaController;
 class CaptureController;
+class AppShell;
+class Dashboard;
 class QAction;
-class QDockWidget;
 class QPushButton;
 class QUndoStack;
 class QWidget;
@@ -45,6 +46,8 @@ private:
     void updateWindowTitle();
     void updateStatusBar();
     void updatePreviewLabel();
+    void updateShellMode();              // reflect record/stream state in the status bar
+    void flash(const QString& text, int ms = 4000);  // transient status toast
 
     SceneCollection*   m_scenes            = nullptr;
     QUndoStack*        m_undoStack         = nullptr;
@@ -52,18 +55,16 @@ private:
     AudioController*   m_audio             = nullptr;
     MediaController*   m_media             = nullptr;
     HotkeyManager*     m_hotkeys           = nullptr;
+    AppShell*          m_shell             = nullptr;  // icon rail + workspaces + status bar
+    Dashboard*         m_dashboard         = nullptr;
     PreviewWidget*     m_preview           = nullptr;  // Program (TimedFrameSource)
     PreviewWidget*     m_stagePreview      = nullptr;  // Staged (studio mode only)
     QPushButton*       m_transitionBtn     = nullptr;  // between staged and program
-    QWidget*           m_studioContainer   = nullptr;  // central widget holder
+    QWidget*           m_studioContainer   = nullptr;  // preview area holder
     ScenesPanel*       m_scenesPanel       = nullptr;
     SourcesPanel*      m_sourcesPanel      = nullptr;
     InspectorPanel*    m_inspectorPanel    = nullptr;
     AudioMixerPanel*   m_mixerPanel        = nullptr;
-    QDockWidget*       m_scenesDock        = nullptr;
-    QDockWidget*       m_sourcesDock       = nullptr;
-    QDockWidget*       m_inspectorDock     = nullptr;
-    QDockWidget*       m_mixerDock         = nullptr;
     ControlsBar*       m_controlsBar       = nullptr;
     QAction*           m_studioModeAction  = nullptr;
     QImage             m_pendingTransFrom;

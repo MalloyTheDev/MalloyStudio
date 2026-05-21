@@ -15,7 +15,7 @@ if(NOT DEFINED Qt6_DIR AND NOT DEFINED CMAKE_PREFIX_PATH)
     endif()
 endif()
 
-find_package(Qt6 6.5 REQUIRED COMPONENTS Widgets Test)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Widgets Test Svg)
 
 qt_standard_project_setup()
 
@@ -70,6 +70,31 @@ set(MALLOY_CORE_SOURCES
 set(MALLOY_UI_SOURCES
     src/MainWindow.cpp
     src/MainWindow.h
+    src/ui/Theme.cpp
+    src/ui/Theme.h
+    src/ui/IconFactory.cpp
+    src/ui/IconFactory.h
+    src/ui/shell/NavModel.h
+    src/ui/shell/IconRail.cpp
+    src/ui/shell/IconRail.h
+    src/ui/shell/WorkspaceHeader.cpp
+    src/ui/shell/WorkspaceHeader.h
+    src/ui/shell/StudioStatusBar.cpp
+    src/ui/shell/StudioStatusBar.h
+    src/ui/shell/AppShell.cpp
+    src/ui/shell/AppShell.h
+    src/ui/components/PanelFrame.cpp
+    src/ui/components/PanelFrame.h
+    src/ui/components/Placeholder.cpp
+    src/ui/components/Placeholder.h
+    src/ui/components/MeterBar.cpp
+    src/ui/components/MeterBar.h
+    src/ui/workspaces/RecordingWorkspace.cpp
+    src/ui/workspaces/RecordingWorkspace.h
+    src/ui/workspaces/PlaceholderWorkspace.cpp
+    src/ui/workspaces/PlaceholderWorkspace.h
+    src/ui/dashboard/Dashboard.cpp
+    src/ui/dashboard/Dashboard.h
     src/ui/ControlsBar.cpp
     src/ui/ControlsBar.h
     src/ui/AudioMixerPanel.cpp
@@ -116,6 +141,7 @@ target_include_directories(MalloyStudio PRIVATE src)
 
 target_link_libraries(MalloyStudio PRIVATE
     Qt6::Widgets
+    Qt6::Svg
     d3d11
     dxgi
     uuid

@@ -1,0 +1,575 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>MalloyStudio — Audit & Redesign Plan</title>
+<link rel="stylesheet" href="tokens.css"/>
+<style>
+  body { overflow: auto; }
+  .doc { max-width: 980px; margin: 0 auto; padding: 64px 40px 120px; }
+  h1 { font-weight: 600; font-size: 40px; letter-spacing: -0.02em; margin: 0; line-height: 1.05; }
+  h2 { font-weight: 600; font-size: 24px; letter-spacing: -0.01em; margin: 48px 0 14px; padding-top: 24px; border-top: 1px solid var(--border); }
+  h3 { font-weight: 600; font-size: 16px; margin: 24px 0 8px; color: var(--text); }
+  h4 { font-weight: 600; font-size: 13px; margin: 16px 0 6px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; }
+  p { color: var(--text-dim); line-height: 1.65; margin: 8px 0; }
+  li { color: var(--text-dim); line-height: 1.6; margin: 4px 0; }
+  ul, ol { padding-left: 22px; }
+  strong { color: var(--text); font-weight: 600; }
+  code, .mono { font-family: var(--font-mono); font-size: 12.5px; background: var(--surface-1); padding: 1px 5px; border-radius: 3px; border: 1px solid var(--border); color: var(--text); }
+  pre { background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; overflow: auto; font: 400 12.5px/1.55 var(--font-mono); color: var(--text); }
+  pre code { background: transparent; border: 0; padding: 0; }
+  .nav { position: sticky; top: 0; background: oklch(0.16 0.006 270 / 0.9); backdrop-filter: blur(12px); padding: 14px 0; margin: 0 -40px 40px; padding-left: 40px; padding-right: 40px; border-bottom: 1px solid var(--border); z-index: 100; display: flex; align-items: center; gap: 16px; font-size: 12px; flex-wrap: wrap; }
+  .nav a { color: var(--text-dim); text-decoration: none; padding: 4px 8px; border-radius: 4px; }
+  .nav a:hover { color: var(--text); background: var(--surface-1); }
+  .lead { font-size: 17px; color: var(--text-dim); margin: 16px 0 32px; max-width: 760px; line-height: 1.6; }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin: 16px 0; }
+  .card { background: var(--surface-0); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px; }
+  .card-warn { border-color: oklch(0.80 0.15 75 / 0.4); background: oklch(0.80 0.15 75 / 0.05); }
+  .card-good { border-color: oklch(0.74 0.16 150 / 0.4); background: oklch(0.74 0.16 150 / 0.05); }
+  .card-rec  { border-color: oklch(0.66 0.22 25 / 0.4);  background: oklch(0.66 0.22 25 / 0.05); }
+  .card h3 { margin-top: 0; }
+  .meta-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 10px 0 0; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 13px; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { font-weight: 600; color: var(--text-mute); text-transform: uppercase; letter-spacing: 0.06em; font-size: 11px; }
+  td { color: var(--text-dim); }
+  td strong { color: var(--text); }
+  .kvs { display: grid; grid-template-columns: 200px 1fr; gap: 4px 16px; margin: 8px 0; }
+  .kvs > .k { color: var(--text-mute); font-size: 12px; }
+  .kvs > .v { color: var(--text); font-size: 13px; }
+  .pill { display: inline-flex; align-items: center; padding: 2px 7px; border-radius: 4px; font-size: 11px; font-weight: 500; font-family: var(--font-mono); }
+  .pill-v01 { background: var(--accent-glass); color: var(--accent-hi); border: 1px solid oklch(0.70 0.18 260 / 0.4); }
+  .pill-v02 { background: oklch(0.74 0.16 150 / 0.12); color: var(--success); border: 1px solid oklch(0.74 0.16 150 / 0.4); }
+  .pill-v03 { background: oklch(0.80 0.15 75 / 0.12); color: var(--warn); border: 1px solid oklch(0.80 0.15 75 / 0.4); }
+  .pill-future { background: var(--surface-2); color: var(--text-mute); border: 1px solid var(--border); }
+  .pill-keep { background: oklch(0.74 0.16 150 / 0.12); color: var(--success); border: 1px solid oklch(0.74 0.16 150 / 0.4); }
+  .pill-fix { background: oklch(0.80 0.15 75 / 0.12); color: var(--warn); border: 1px solid oklch(0.80 0.15 75 / 0.4); }
+  .pill-redo { background: oklch(0.66 0.22 25 / 0.12); color: var(--rec-hi); border: 1px solid oklch(0.66 0.22 25 / 0.4); }
+  .toc { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 18px 24px; }
+  .toc h4 { margin-top: 0; }
+  .toc ol { padding-left: 22px; columns: 2; column-gap: 24px; }
+  .toc li { margin: 5px 0; }
+  .toc a { color: var(--text); text-decoration: none; }
+  .toc a:hover { color: var(--accent-hi); }
+</style>
+</head>
+<body>
+<div class="doc">
+
+<nav class="nav">
+  <strong style="color: var(--text);">MalloyStudio</strong>
+  <span style="color: var(--text-mute);">Audit &amp; Redesign Plan · v8 → v0.1</span>
+  <span style="margin-left: auto; color: var(--text-mute); font-family: var(--font-mono); font-size: 11px;">May 2026 · Jess M. (design)</span>
+  <a href="MalloyStudio.html">↗ Open prototype</a>
+</nav>
+
+<h1>MalloyStudio Audit &amp; Redesign Plan</h1>
+<p class="lead">
+  A surgical review of the MalloyStudio v7 codebase and a concrete plan to take it from
+  "a competent OBS-style capture app" to a unified creator workstation that eventually
+  encompasses Vegas-style editing. This document pairs with the
+  <a href="MalloyStudio.html" style="color: var(--accent-hi); text-decoration: none;">interactive prototype</a> — the prototype is the visual spec, this doc is the engineering plan.
+</p>
+
+<div class="toc">
+  <h4>Contents</h4>
+  <ol>
+    <li><a href="#audit">Codebase audit</a></li>
+    <li><a href="#understanding">Product understanding</a></li>
+    <li><a href="#questions">Questions still open</a></li>
+    <li><a href="#structure">Recommended app structure</a></li>
+    <li><a href="#workflows">Core user workflows</a></li>
+    <li><a href="#screens">Screen-by-screen UX plan</a></li>
+    <li><a href="#system">Design system</a></li>
+    <li><a href="#components">Component architecture</a></li>
+    <li><a href="#impl">File-by-file impl plan</a></li>
+    <li><a href="#phases">Build phases</a></li>
+    <li><a href="#v01">v0.1 scope</a></li>
+    <li><a href="#v02">v0.2 scope</a></li>
+    <li><a href="#v03">v0.3 scope</a></li>
+    <li><a href="#roadmap">Long-term roadmap</a></li>
+    <li><a href="#risks">Risks &amp; blockers</a></li>
+    <li><a href="#next">Immediate next steps</a></li>
+  </ol>
+</div>
+
+
+<h2 id="audit">1. Codebase audit</h2>
+
+<h3>Current app structure</h3>
+<p>
+  MalloyStudio is a <strong>Windows-only Qt 6 / C++17 desktop application</strong> built with CMake.
+  Layout is a single main window (<code>MainWindow</code>) hosting a Preview widget and a constellation of
+  <code>QDockWidget</code>-based panels (Scenes, Sources, Audio Mixer, Inspector, Controls Bar).
+  The codebase is well-factored into model / capture / audio / recording / project / ui layers; nothing here is "bad" — it just stops at the OBS-equivalent surface area.
+</p>
+
+<table>
+  <thead><tr><th>Layer</th><th>Files (representative)</th><th>What it owns</th></tr></thead>
+  <tbody>
+    <tr><td><strong>model/</strong></td><td><code>Source</code>, <code>SceneItem</code>, <code>Scene</code>, <code>SceneCollection</code>, <code>FilterEffect</code></td><td>Pure data + undo + JSON I/O. Source library (shared refs), per-item transform + filter chain.</td></tr>
+    <tr><td><strong>capture/</strong></td><td><code>DxgiCapture</code>, <code>WindowCapture</code>, <code>WindowCaptureSession</code>, <code>WasapiCapture</code>, <code>CaptureController</code></td><td>Worker-thread capture engines + a controller that reconciles active sessions to scene state.</td></tr>
+    <tr><td><strong>audio/</strong></td><td><code>AudioInput</code>, <code>AudioController</code></td><td>Owns WASAPI workers, per-source reconcile, the VU bus.</td></tr>
+    <tr><td><strong>recording/</strong></td><td><code>EncoderRegistry</code>, <code>EncoderPipeline</code>, <code>MediaController</code>, <code>StreamingPipeline</code>, <code>StreamSettings</code>, <code>OutputSettings</code>, <code>Ring*Source</code></td><td>ffmpeg subprocess, video stdin + named-pipe audio, replay buffer, RTMP streaming, hardware encoder selection.</td></tr>
+    <tr><td><strong>project/</strong></td><td><code>ProjectDocument</code></td><td>Atomic load/save of <code>.malloy.json</code> via <code>QSaveFile</code>.</td></tr>
+    <tr><td><strong>input/</strong></td><td><code>HotkeyManager</code></td><td>Global hotkeys (mute, record toggle, scene switch, etc.).</td></tr>
+    <tr><td><strong>ui/</strong></td><td>16 files — Preview, ControlsBar, Inspector, AudioMixer, Scenes/Sources panels, picker dialogs, Hotkeys, VuMeter</td><td>All visible chrome. <strong>This is where ~95% of the redesign lands.</strong></td></tr>
+  </tbody>
+</table>
+
+<h3>Existing design system</h3>
+<p>
+  There isn't one yet, really. <code>resources/styles/dark.qss</code> is the only stylesheet — 64 lines, single-purpose:
+  it normalizes a few <code>objectName</code>-based widgets (<code>#emptyState</code>, <code>#recordTimer</code>, <code>#streamTimer</code>,
+  <code>#hintText</code>, <code>#typeAnnotation</code>) that were previously styled via inline <code>setStyleSheet()</code>.
+  The comment in the file is honest: <em>"Migrated from inline calls scattered across the UI."</em>
+</p>
+<p>
+  There's <strong>no token system</strong>, <strong>no documented type scale</strong>, <strong>no spacing scale</strong>, no shared button/input
+  classes. The recording-red (<code>#e05050</code>) and stream-orange (<code>#e08030</code>) colors are hardcoded in the QSS.
+  Icons live in <code>resources/icons/</code> but the set is incomplete — many panels rely on text-only buttons.
+</p>
+
+<h3>Existing components (Qt widgets)</h3>
+<ul>
+  <li><strong>Keep, light reskin:</strong> <code>PreviewWidget</code>, <code>VuMeter</code>, <code>AudioMixerPanel</code>, <code>ScenesPanel</code>, <code>SourcesPanel</code>, <code>InspectorPanel</code>, <code>ControlsBar</code>.</li>
+  <li><strong>Refactor:</strong> the picker dialogs (<code>MonitorPickerDialog</code>, <code>WindowPickerDialog</code>, <code>MicrophonePickerDialog</code>) are functional but visually inconsistent — every dialog reinvents its row layout. Extract one <code>PickerDialogBase</code> and reuse.</li>
+  <li><strong>Replace:</strong> <code>HotkeysDialog</code> is a single-column form per assignment. Move to a searchable, two-pane editor (categories left, bindings right) when v0.2 lands.</li>
+  <li><strong>Net-new for v0.1:</strong> Dashboard, Render Queue, Clips Library, Media Library, Project Manager, Onboarding, AI Lab placeholder.</li>
+  <li><strong>Net-new for v0.2+:</strong> Timeline editor and all of its surfaces (media bin, transport, inspector tabs, effect cards, ruler, track headers, clip widgets, snapping/markers).</li>
+</ul>
+
+<h3>Strengths to protect</h3>
+<div class="grid-2">
+  <div class="card card-good">
+    <h3>Subsystem boundaries are clean</h3>
+    <p>Model / capture / audio / recording / project / ui split is exactly what you want when adding a Vegas-style editor on top: the editor doesn't need to know anything about DXGI.</p>
+  </div>
+  <div class="card card-good">
+    <h3>Snapshot undo + atomic save</h3>
+    <p><code>SceneCollection</code> snapshot-based undo and <code>QSaveFile</code> for <code>.malloy.json</code> means project data is hard to corrupt. Preserve this; the editor's timeline state should be undoable through the same mechanism.</p>
+  </div>
+  <div class="card card-good">
+    <h3>Replay buffer + hardware encoders</h3>
+    <p>NVENC / QSV / AMF via <code>EncoderRegistry</code>, plus the in-memory ring buffer. This is the "Clip" feature creators expect, already built. Surface it more prominently on the Dashboard.</p>
+  </div>
+  <div class="card card-good">
+    <h3>Tests for the model layer</h3>
+    <p>12 model tests is a real foundation — JSON migration, undo coalescing, capture reconciliation. Adding editor / timeline tests later will be straightforward.</p>
+  </div>
+</div>
+
+<h3>Weaknesses to fix</h3>
+<div class="grid-2">
+  <div class="card card-warn">
+    <h3>No design tokens, no typography scale</h3>
+    <p>QSS is fragmented. Hardcoded colors (<code>#e05050</code>, <code>#e08030</code>, <code>#888</code>, <code>#9a9a9a</code>) appear with no semantic name. <strong>Action:</strong> introduce a <code>tokens.qss</code> with CSS-variable-equivalent (Qt has <code>qApp-&gt;property()</code>) and propagate.</p>
+  </div>
+  <div class="card card-warn">
+    <h3>Recording state isn't ambient</h3>
+    <p>Today the <code>recordTimer</code> shows in the ControlsBar only. Once the window is wider than the bar, you can lose track of it. <strong>Action:</strong> add a persistent status footer (mirrored from the prototype) that lives at the bottom of the main window regardless of dock layout.</p>
+  </div>
+  <div class="card card-warn">
+    <h3>Inspector "no properties" page</h3>
+    <p><code>QLabel#filterEmptyPage</code> is the only empty state in the entire UI. Every list (scenes, sources, future media bin) needs a teaching empty state — not just gray text.</p>
+  </div>
+  <div class="card card-warn">
+    <h3>Source-type Add menu is the only discovery path</h3>
+    <p>New users land in a window with empty Scenes + Sources panels and don't know to click "+" then pick a type. <strong>Action:</strong> first-launch onboarding that runs device detection and inserts a starter scene.</p>
+  </div>
+  <div class="card card-warn">
+    <h3>Dialogs over modes</h3>
+    <p><code>OutputSettingsDialog</code>, <code>StreamSettingsDialog</code>, <code>HotkeysDialog</code>, three picker dialogs — all modal popups that interrupt the canvas. <strong>Action:</strong> a unified Settings workspace; pickers become inline panels where they can.</p>
+  </div>
+  <div class="card card-warn">
+    <h3>No keyboard discoverability</h3>
+    <p><code>HotkeyManager</code> exists but the only place to see bindings is the Hotkeys dialog. <strong>Action:</strong> tooltips display the shortcut for every actionable button; a <code>⌘K</code> command palette surfaces all actions by name.</p>
+  </div>
+  <div class="card card-warn">
+    <h3>No project hub / dashboard</h3>
+    <p>The app opens directly into a blank capture canvas. Creators want a "where am I, what am I working on" view. <strong>Action:</strong> Dashboard as the default workspace.</p>
+  </div>
+  <div class="card card-warn">
+    <h3>Filename: <code>recording/MediaController.cpp</code> is misnamed</h3>
+    <p>It owns the encoder pipeline, not media. Suggest renaming to <code>RecorderController</code> to free up the "Media" namespace for the editor's bin.</p>
+  </div>
+</div>
+
+<h3>Routes / surfaces to redesign vs preserve</h3>
+<table>
+  <thead><tr><th>Surface</th><th>Today</th><th>Action</th></tr></thead>
+  <tbody>
+    <tr><td>Main capture canvas</td><td><code>PreviewWidget</code> + dockable panels</td><td><span class="pill pill-keep">PRESERVE</span> Refactor visual style only.</td></tr>
+    <tr><td>Output / Stream Settings</td><td>Two separate <code>QDialog</code>s</td><td><span class="pill pill-fix">CONSOLIDATE</span> into a single Settings workspace.</td></tr>
+    <tr><td>Hotkeys</td><td><code>HotkeysDialog</code></td><td><span class="pill pill-fix">REDESIGN</span> as a Settings → Hotkeys section + global ⌘K.</td></tr>
+    <tr><td>Source / monitor / window pickers</td><td>3 dialogs, each bespoke</td><td><span class="pill pill-fix">UNIFY</span> via <code>PickerDialogBase</code>.</td></tr>
+    <tr><td>Audio Mixer</td><td><code>AudioMixerPanel</code> dock</td><td><span class="pill pill-keep">PRESERVE</span> + add per-strip effects rack in v0.2.</td></tr>
+    <tr><td>Inspector</td><td>Single column form</td><td><span class="pill pill-fix">REDESIGN</span> with tabs (Effects / Transform / Audio / Speed).</td></tr>
+    <tr><td>Project lifecycle</td><td>Open from File menu</td><td><span class="pill pill-redo">NEW</span> Project Manager workspace.</td></tr>
+    <tr><td>Editor / timeline</td><td>—</td><td><span class="pill pill-redo">NEW</span> Editor workspace, ships v0.2.</td></tr>
+    <tr><td>Clips library</td><td>Replay buffer dumps a file</td><td><span class="pill pill-redo">NEW</span> Clips Library with tags, favorites, batch export.</td></tr>
+    <tr><td>Render queue</td><td>One render at a time, blocks UI</td><td><span class="pill pill-redo">NEW</span> background queue with retries.</td></tr>
+  </tbody>
+</table>
+
+
+<h2 id="understanding">2. Product understanding</h2>
+
+<p>
+  MalloyStudio is a <strong>local-first creator workstation for Windows</strong> built on Qt + the Windows capture stack.
+  It targets one user — a solo creator who records gameplay or screen content, sometimes streams, then edits and publishes —
+  who is currently using <em>two</em> apps (a capture app + an NLE) and wants <em>one</em>.
+</p>
+
+<p>The product is structured around five durable verbs:</p>
+<ul>
+  <li><strong>Capture</strong> — record, stream, clip. (Mostly built.)</li>
+  <li><strong>Organize</strong> — projects, media library, clips library.</li>
+  <li><strong>Edit</strong> — timeline, multi-track, transitions, text, effects, export.</li>
+  <li><strong>Render</strong> — background queue with retries.</li>
+  <li><strong>Augment</strong> — eventually AI helpers across all of the above.</li>
+</ul>
+
+
+<h2 id="questions">3. Questions still open</h2>
+<ol>
+  <li><strong>Editor depth:</strong> Are we matching Vegas/Premiere features 1:1 long-term, or is the editor "good enough to finish a stream highlight" — i.e., simpler cut-and-assemble for fast turnaround?</li>
+  <li><strong>Cross-platform:</strong> The capture stack is Windows-only by design. Is macOS/Linux ever on the roadmap, or do we commit fully to a Win32 creative app?</li>
+  <li><strong>Plugins:</strong> Will MalloyStudio support OBS-style plugins? If yes, the source-type registry needs to be extensible from the start.</li>
+  <li><strong>AI hosting:</strong> Local Whisper/CLIP is the plan, but transcription on a 2-hour stream takes time. Optional cloud fallback?</li>
+  <li><strong>Stream destinations:</strong> Multi-stream out (Twitch + YouTube simultaneous via a service like Restream) — first-party or pass-through?</li>
+  <li><strong>Auto-clip detection:</strong> Audio-driven (loud reactions) or game-event driven (overlay APIs / process hooks)?</li>
+  <li><strong>Project format:</strong> Should the editor's timeline live in <code>.malloy.json</code> (one project = one file) or split into <code>.malloyproj</code> bundles?</li>
+  <li><strong>Window size minimum:</strong> Is 1280×720 still acceptable as the floor, or are we committing to 1440×900 for the redesign?</li>
+</ol>
+
+
+<h2 id="structure">4. Recommended app structure</h2>
+
+<h4>Navigation</h4>
+<p>
+  A <strong>56 px icon rail</strong> on the left (always visible, tooltips on hover, collapsible) +
+  <strong>workspace-specific tabs inside the header</strong> (e.g. Editor → Edit / Color / Audio / Export).
+  Workspaces are independent — switching them does <em>not</em> reset the in-progress capture or render.
+</p>
+
+<table>
+  <thead><tr><th>Workspace</th><th>v0.1</th><th>v0.2</th><th>v0.3</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td>Dashboard</td><td><span class="pill pill-v01">v0.1</span></td><td></td><td></td><td>Project hub. Default screen.</td></tr>
+    <tr><td>Recording Studio</td><td><span class="pill pill-v01">v0.1</span></td><td></td><td></td><td>Existing capture canvas, restyled.</td></tr>
+    <tr><td>Streaming Studio</td><td><span class="pill pill-v01">v0.1</span></td><td></td><td></td><td>Pulls from existing <code>StreamingPipeline</code>.</td></tr>
+    <tr><td>Clips</td><td><span class="pill pill-v01">v0.1</span></td><td></td><td></td><td>List + grid view of replay-buffer captures.</td></tr>
+    <tr><td>Media</td><td><span class="pill pill-v01">v0.1</span></td><td></td><td></td><td>Shared file browser scoped to project locations.</td></tr>
+    <tr><td>Projects</td><td><span class="pill pill-v01">v0.1</span></td><td></td><td></td><td>Replaces "Open from File menu".</td></tr>
+    <tr><td>Render Queue</td><td><span class="pill pill-v01">v0.1</span></td><td></td><td></td><td>Background renders; v0.1 ships with single-job + retry.</td></tr>
+    <tr><td>Settings</td><td><span class="pill pill-v01">v0.1</span></td><td></td><td></td><td>Consolidates current dialogs.</td></tr>
+    <tr><td>Editor (timeline)</td><td></td><td><span class="pill pill-v02">v0.2</span></td><td></td><td>Multi-track. Biggest engineering lift.</td></tr>
+    <tr><td>AI Lab</td><td></td><td></td><td><span class="pill pill-v03">v0.3</span></td><td>Surfaces are stubbed v0.1; functions arrive v0.3.</td></tr>
+  </tbody>
+</table>
+
+
+<h2 id="workflows">5. Core user workflows</h2>
+
+<ol>
+  <li><strong>Cold-start to recording</strong> — first launch → onboarding (device detect) → Dashboard → "Start Recording" → recording active in Recording Studio. Target: under 60 seconds from app icon to red-dot.</li>
+  <li><strong>Stream-while-recording</strong> — Dashboard → "Go Live" → preflight check (key valid? bandwidth? scene set?) → live + recording simultaneously. Replay buffer stays armed.</li>
+  <li><strong>Clip during gameplay</strong> — global hotkey ⌥⌘C saves last 30 s from the replay buffer → toast confirms with a "Open in Editor" CTA → clip appears in Clips Library tagged with current project.</li>
+  <li><strong>Highlight reel</strong> — Clips Library → select N clips → "Open in Editor" → editor opens with selected clips already on the timeline → trim, add titles, export.</li>
+  <li><strong>Render &amp; publish</strong> — Editor → "Export" → render queued (background, doesn't block recording) → completed render shown in Render Queue with "Upload to YouTube" / "Open folder" actions.</li>
+  <li><strong>Resume after crash</strong> — every workspace saves layout + transient state. App boots back into the same workspace with autosave-recovered project.</li>
+</ol>
+
+
+<h2 id="screens">6. Screen-by-screen UX plan</h2>
+
+<p>The interactive prototype is the source of truth for layout and visuals. This section enumerates each screen's
+  required data, empty/loading/error states, primary actions, keyboard shortcuts, and what's in v0.1 vs deferred.</p>
+
+<h3>6.1 Dashboard <span class="pill pill-v01">v0.1</span></h3>
+<div class="kvs">
+  <div class="k">Required data</div><div class="v">Current project (or null), recent recordings (last 8), recent projects (last 8), recent clips (last 12), active+pending+completed renders, system health probes (devices, encoder, storage, stream key).</div>
+  <div class="k">Empty state</div><div class="v">If no project: hero card becomes a "Create your first project" CTA; system status still shows device readiness; Quick Actions remain available.</div>
+  <div class="k">Loading state</div><div class="v">Skeleton cards for hero + each grid card.</div>
+  <div class="k">Error state</div><div class="v">Per-card failure: e.g. "Storage check failed — drive disconnected?" with retry button. Recording &amp; Streaming buttons disable with explanatory tooltip if a dependency is missing.</div>
+  <div class="k">Primary actions</div><div class="v">Start Recording (F9), Go Live (F8), Open Editor, Import Media, Clip Last 30s (⌥⌘C), New Project (⌘N).</div>
+  <div class="k">Keyboard</div><div class="v">1 (workspace shortcut), ⌘K (palette), ⌘N (new project).</div>
+</div>
+
+<h3>6.2 Recording Studio <span class="pill pill-v01">v0.1</span></h3>
+<div class="kvs">
+  <div class="k">Required data</div><div class="v">Active scene, source list with visibility/lock state, audio inputs with live VU peaks, encoder profile, replay buffer state.</div>
+  <div class="k">Empty state</div><div class="v">No scene: large "Add your first scene" CTA in the preview area. No sources: inline "+ Display / Window / Camera / Mic" quick-add grid (mirrored from current Sources Panel additions).</div>
+  <div class="k">Recording-failed</div><div class="v">Red banner above ControlsBar with the ffmpeg stderr text and a "Open log" / "Retry" pair.</div>
+  <div class="k">Primary actions</div><div class="v">Start/Stop F9, Pause F10 (where supported), Save Replay ⌥⌘C, Scene 1-9 Ctrl+N, Transition picker, Profile selector.</div>
+</div>
+
+<h3>6.3 Streaming Studio <span class="pill pill-v01">v0.1</span></h3>
+<div class="kvs">
+  <div class="k">Required data</div><div class="v">Destination + key state (verified?), preflight (bandwidth, encoder, scene), live health (bitrate, dropped, ping, viewers), chat (placeholder dock), alerts (placeholder dock).</div>
+  <div class="k">Pre-live state</div><div class="v">Go-Live button is the visual anchor. Title, category, tags are required. Stream key never shown — only "Verified · 12 chars" with a "Replace…" link.</div>
+  <div class="k">Degraded state</div><div class="v">Health card switches to amber, status footer adds "DEGRADED" pill, chat continues working.</div>
+</div>
+
+<h3>6.4 Video Editor <span class="pill pill-v02">v0.2</span></h3>
+<div class="kvs">
+  <div class="k">Layout</div><div class="v">Top half: media bin (left) / preview monitor (center) / inspector (right) — all <strong>resizable splits</strong>. Bottom half: full-width multi-track timeline with sticky track headers + sticky ruler.</div>
+  <div class="k">Tracks</div><div class="v">v0.2 supports 3 video + 3 audio. v0.3+ allows arbitrary additions.</div>
+  <div class="k">Tools</div><div class="v">Select (V), Razor (C), Slip (Y), Hand (H). Snap toggle. Zoom 10–200 px/s.</div>
+  <div class="k">Effects</div><div class="v">Color correction, crop, sharpen ship v0.2. Keyframes ship v0.3.</div>
+  <div class="k">Empty state</div><div class="v">"Drag a clip from the bin to start", with a 60-fps mock playhead and ruler visible to teach the metaphor.</div>
+  <div class="k">Keyboard</div><div class="v">Space, J/K/L, ←/→ (frame), Shift+←/→ (second), ⌘B (split), M (marker), [ ] (in/out), ⌘E (export).</div>
+</div>
+
+<h3>6.5 Clips Library <span class="pill pill-v01">v0.1</span></h3>
+<div class="kvs">
+  <div class="k">Layout</div><div class="v">Left filters (Smart filter / Source / Tag), main grid or list, top search.</div>
+  <div class="k">Required data</div><div class="v">Clip name, duration, source project, recorded date, thumbnail (auto-grabbed from mid-point), tags, favorite flag, archived flag.</div>
+  <div class="k">Actions</div><div class="v">Preview (hover play), Open in Editor, Export selected, Add to project, Delete (with confirm), Batch tag.</div>
+</div>
+
+<h3>6.6 Media Library <span class="pill pill-v01">v0.1</span></h3>
+<div class="kvs">
+  <div class="k">Layout</div><div class="v">Folder tree (left), file table (main).</div>
+  <div class="k">Missing media flow</div><div class="v">Banner appears when any referenced file isn't on disk; "Locate…" opens a file picker, "Skip" hides the banner per session.</div>
+  <div class="k">Imports</div><div class="v">Drag-and-drop anywhere in the main area; ffprobe-driven metadata extraction.</div>
+</div>
+
+<h3>6.7 Project Manager <span class="pill pill-v01">v0.1</span></h3>
+<p>Card grid of <code>.malloy.json</code> projects, with cover thumbnail (last preview frame), size, last edited, status (Open / Active / Draft / Final / Archived). Actions: Open, Duplicate, Archive, Reveal in Explorer.</p>
+
+<h3>6.8 Render Queue <span class="pill pill-v01">v0.1</span></h3>
+<p>Tab strip: Active / Pending / Completed / Failed. Active jobs show animated progress + ETA. Failed jobs show ffmpeg exit code + log link; "Retry" re-enqueues. Completed jobs persist with "Open folder" / "Upload" / "Show in finder".</p>
+
+<h3>6.9 Settings <span class="pill pill-v01">v0.1</span></h3>
+<p>Two-pane: groups (left), content (right). Groups: General, Recording, Streaming, Video, Audio, Hotkeys, Storage, Performance, Appearance, Accounts, Experimental, AI placeholders. <strong>Consolidates the current OutputSettingsDialog + StreamSettingsDialog + HotkeysDialog.</strong></p>
+
+<h3>6.10 Onboarding <span class="pill pill-v01">v0.1</span></h3>
+<p>7 steps, never longer than 90 seconds: welcome → workflow choice → folder choice → device detect → quality → density → done. Skippable. Re-launchable from Settings → General → "Run setup wizard".</p>
+
+<h3>6.11 AI Lab <span class="pill pill-future">v0.3</span></h3>
+<p>v0.1 ships the placeholder screen — feature cards labelled "Soon". v0.3 unlocks them progressively (subtitles first, then clip detection, then chapters, etc).</p>
+
+
+<h2 id="system">7. Design system</h2>
+
+<h3>Visual direction</h3>
+<p>Studio-grade dark. Linear / Arc-influenced. Tightly-scoped neutral gray surfaces with a <strong>single accent color</strong> (blue by default; user-swappable). Recording red is the only other "loud" color — reserved for record/live states. Monospace (Geist Mono) carries all technical readouts (timecodes, dB, bitrates, file sizes); sans (Geist) carries everything else.</p>
+
+<h3>Tokens</h3>
+<pre><code>--bg-base       oklch(0.165 0.006 270)   /* page background */
+--surface-0     oklch(0.195 0.006 270)   /* cards, panels */
+--surface-1     oklch(0.225 0.006 270)   /* inputs, sub-panels */
+--surface-2     oklch(0.260 0.006 270)   /* hover, active */
+--surface-3     oklch(0.300 0.006 270)   /* press */
+
+--border        oklch(0.305 0.008 270)
+--border-strong oklch(0.385 0.010 270)
+
+--text          oklch(0.975 0 0)
+--text-dim      oklch(0.760 0.010 270)
+--text-mute     oklch(0.555 0.012 270)
+--text-faint    oklch(0.420 0.010 270)
+
+--accent        oklch(0.70 0.18 260)     /* default blue, user-swappable */
+--rec           oklch(0.66 0.22 25)      /* record / live, reserved */
+--success       oklch(0.74 0.16 150)
+--warn          oklch(0.80 0.15 75)</code></pre>
+
+<p>Variants exposed in <code>tokens.css</code>: <code>data-bg=true|charcoal|blue</code>, <code>data-accent=amber|green|blue|violet|bone</code>, <code>data-density=comfortable|compact|dense</code>. Density rescales control heights, font sizes, and row paddings via custom properties.</p>
+
+<h3>Type</h3>
+<table>
+  <thead><tr><th>Role</th><th>Family</th><th>Size</th><th>Weight</th></tr></thead>
+  <tbody>
+    <tr><td>Display (dashboard hero)</td><td>Geist</td><td>28</td><td>600</td></tr>
+    <tr><td>Page title</td><td>Geist</td><td>20</td><td>600</td></tr>
+    <tr><td>Section header</td><td>Geist</td><td>11 · uppercase · 0.08em</td><td>600</td></tr>
+    <tr><td>Body</td><td>Geist</td><td>13</td><td>400</td></tr>
+    <tr><td>Body small</td><td>Geist</td><td>12</td><td>400</td></tr>
+    <tr><td>Metadata / stat</td><td>Geist Mono</td><td>11–12 · tnum</td><td>500–600</td></tr>
+    <tr><td>Timecode</td><td>Geist Mono</td><td>14–16 · tnum</td><td>600</td></tr>
+  </tbody>
+</table>
+
+<h3>Spacing &amp; radii</h3>
+<p>4 / 8 / 12 / 16 / 20 / 24 / 32 / 40 / 48 — strict scale, no in-between values. Radii: 4 (tags), 6 (controls), 8 (cards), 10 (modal cards), 14 (modals).</p>
+
+<h3>State badges</h3>
+<p>Recording / Live: red dot with a 1.4s pulse. Rendering: spinner. Idle: gray static dot. Degraded streaming: amber chip. <strong>Color is never the only signal</strong> — a label always accompanies the dot (REC, LIVE, IDLE, RENDERING). This satisfies the "states beyond color alone" accessibility requirement.</p>
+
+
+<h2 id="components">8. Component architecture</h2>
+
+<table>
+  <thead><tr><th>Component</th><th>Where used</th><th>v0.1?</th></tr></thead>
+  <tbody>
+    <tr><td><strong>App shell</strong> · IconRail + WorkspaceHeader + StatusBar</td><td>Everywhere</td><td>✓</td></tr>
+    <tr><td><strong>Panel</strong> (.panel + .panel-hd + .panel-bd)</td><td>All workspaces</td><td>✓</td></tr>
+    <tr><td><strong>Splitter</strong> · resizable two-pane</td><td>Editor, Recording right column</td><td>✓</td></tr>
+    <tr><td><strong>Card</strong> (.card, .card-strong)</td><td>Dashboard, Render, Projects</td><td>✓</td></tr>
+    <tr><td><strong>Button</strong> (.btn variants: primary / rec / ghost / sm / lg / icon)</td><td>Everywhere</td><td>✓</td></tr>
+    <tr><td><strong>Tag / Badge</strong> (.tag + .tag-rec / -live / -accent / -success / -warn)</td><td>Everywhere</td><td>✓</td></tr>
+    <tr><td><strong>VU Meter</strong> · stereo + peak hold</td><td>Recording, Streaming, Dashboard</td><td>✓</td></tr>
+    <tr><td><strong>Placeholder</strong> · striped imagery substitute</td><td>Dashboard, Clips, Media, Projects, Editor</td><td>✓</td></tr>
+    <tr><td><strong>Input / Select / Slider</strong></td><td>Settings, Inspector, Onboarding</td><td>✓</td></tr>
+    <tr><td><strong>Tooltips</strong> + <strong>Kbd</strong> chip</td><td>Everywhere</td><td>✓</td></tr>
+    <tr><td><strong>Modal</strong> · with progress + step nav</td><td>Onboarding</td><td>✓</td></tr>
+    <tr><td><strong>Timeline · Clip · Waveform · Ruler · TrackHeader</strong></td><td>Editor</td><td>✗ v0.2</td></tr>
+    <tr><td><strong>EffectCard</strong> · collapsible effect with enable toggle</td><td>Editor Inspector</td><td>✗ v0.2</td></tr>
+    <tr><td><strong>Command palette</strong> · ⌘K</td><td>Everywhere</td><td>✗ v0.2</td></tr>
+  </tbody>
+</table>
+
+
+<h2 id="impl">9. File-by-file implementation plan</h2>
+
+<h3>Phase 1 (v0.1) — visual rewrite + Dashboard + new workspaces</h3>
+<table>
+  <thead><tr><th>File</th><th>Action</th><th>Why</th></tr></thead>
+  <tbody>
+    <tr><td><code>src/resources/styles/dark.qss</code></td><td><span class="pill pill-fix">EXPAND</span></td><td>Becomes the token sheet. Add CSS-variable-equivalent custom properties + selectors for every shared widget (<code>QFrame#card</code>, <code>QPushButton#primary</code>, etc).</td></tr>
+    <tr><td><code>src/resources/styles/tokens.qss</code></td><td><span class="pill pill-redo">NEW</span></td><td>Token definitions only — colors, spacing, radii. <code>dark.qss</code> consumes it.</td></tr>
+    <tr><td><code>src/ui/AppShell.{h,cpp}</code></td><td><span class="pill pill-redo">NEW</span></td><td>Hosts IconRail + WorkspaceStack + StatusBar. Replaces direct ownership of capture/edit UI from <code>MainWindow</code>.</td></tr>
+    <tr><td><code>src/ui/IconRail.{h,cpp}</code></td><td><span class="pill pill-redo">NEW</span></td><td>Left workspace switcher. Persists collapsed state.</td></tr>
+    <tr><td><code>src/ui/WorkspaceHeader.{h,cpp}</code></td><td><span class="pill pill-redo">NEW</span></td><td>Title + breadcrumb + workspace tabs + ⌘K trigger + project pill.</td></tr>
+    <tr><td><code>src/ui/StatusBar.{h,cpp}</code></td><td><span class="pill pill-redo">NEW</span></td><td>Persistent bottom bar — REC/LIVE/RENDER state, CPU/RAM/DISK, FPS, bitrate, dropped frames.</td></tr>
+    <tr><td><code>src/ui/dashboard/*</code></td><td><span class="pill pill-redo">NEW</span></td><td>HeroCard, QuickActions, NowPlayingCard, RecentRecordings, RenderQueueCard, RecentProjects, RecentClips, SystemStatus.</td></tr>
+    <tr><td><code>src/ui/PreviewWidget.{h,cpp}</code></td><td><span class="pill pill-keep">REUSE</span></td><td>Move into a <code>RecordingWorkspace</code> container; restyle via tokens.</td></tr>
+    <tr><td><code>src/ui/ControlsBar.{h,cpp}</code></td><td><span class="pill pill-fix">REWORK</span></td><td>Replace inline styles with class names; add mode selector (Record / Stream / Both), Clip button, profile dropdown matching prototype.</td></tr>
+    <tr><td><code>src/ui/AudioMixerPanel.{h,cpp}</code></td><td><span class="pill pill-keep">REUSE</span></td><td>Restyle strips per design tokens; widen the strip; add per-channel effects affordance (disabled in v0.1).</td></tr>
+    <tr><td><code>src/ui/ScenesPanel.{h,cpp}</code> · <code>SourcesPanel.{h,cpp}</code></td><td><span class="pill pill-fix">RESTYLE</span></td><td>Match row spec from prototype; add the quick-add chips row under Sources.</td></tr>
+    <tr><td><code>src/ui/InspectorPanel.{h,cpp}</code></td><td><span class="pill pill-fix">REDESIGN</span></td><td>Tabbed (Effects / Transform / Audio / Speed); add the EffectCard collapsible component.</td></tr>
+    <tr><td><code>src/ui/OutputSettingsDialog.*</code> · <code>StreamSettingsDialog.*</code> · <code>HotkeysDialog.*</code></td><td><span class="pill pill-redo">DEPRECATE</span></td><td>Folded into Settings workspace. Keep them as fallback for one release behind a feature flag.</td></tr>
+    <tr><td><code>src/ui/MonitorPickerDialog.*</code> etc</td><td><span class="pill pill-fix">UNIFY</span></td><td>Extract <code>PickerDialogBase</code>; all three pickers reuse it.</td></tr>
+    <tr><td><code>src/ui/SettingsWorkspace.{h,cpp}</code></td><td><span class="pill pill-redo">NEW</span></td><td>Two-pane settings, 12 sections.</td></tr>
+    <tr><td><code>src/ui/clips/ClipsLibrary.{h,cpp}</code></td><td><span class="pill pill-redo">NEW</span></td><td>Folder/tag filters + grid/list + preview.</td></tr>
+    <tr><td><code>src/ui/media/MediaLibrary.{h,cpp}</code></td><td><span class="pill pill-redo">NEW</span></td><td>Folder tree + table + missing-media banner.</td></tr>
+    <tr><td><code>src/ui/projects/ProjectManager.{h,cpp}</code></td><td><span class="pill pill-redo">NEW</span></td><td>Card grid of <code>.malloy.json</code> files.</td></tr>
+    <tr><td><code>src/ui/render/RenderQueueScreen.{h,cpp}</code></td><td><span class="pill pill-redo">NEW</span></td><td>Active / Pending / Completed / Failed tabs.</td></tr>
+    <tr><td><code>src/ui/onboarding/OnboardingFlow.{h,cpp}</code></td><td><span class="pill pill-redo">NEW</span></td><td>7-step QStackedWidget modal.</td></tr>
+    <tr><td><code>src/ui/CommandPalette.{h,cpp}</code></td><td><span class="pill pill-redo">NEW (v0.2)</span></td><td>⌘K palette; uses an action registry to fuzzy-find every menu item + hotkey.</td></tr>
+    <tr><td><code>src/recording/RenderQueue.{h,cpp}</code></td><td><span class="pill pill-redo">NEW</span></td><td>Background job queue for renders (uses existing <code>EncoderPipeline</code>). Single-job in v0.1, parallel in v0.2.</td></tr>
+    <tr><td><code>src/project/ProjectRegistry.{h,cpp}</code></td><td><span class="pill pill-redo">NEW</span></td><td>Index of all <code>.malloy.json</code> projects across known folders; powers the Project Manager.</td></tr>
+    <tr><td><code>src/project/ClipsRegistry.{h,cpp}</code></td><td><span class="pill pill-redo">NEW</span></td><td>Sidecar metadata for replay-buffer clips (tags, favorites, source project).</td></tr>
+    <tr><td><code>src/recording/MediaController.{h,cpp}</code></td><td><span class="pill pill-fix">RENAME</span></td><td>→ <code>RecorderController</code>. Frees "Media" for the editor's bin.</td></tr>
+  </tbody>
+</table>
+
+
+<h2 id="phases">10. Build phases</h2>
+
+<h4>Phase 0 — Audit &amp; foundation (this doc)</h4>
+<p>1 week. Token sheet, AppShell scaffolding, IconRail, StatusBar in place but workspace-empty.</p>
+
+<h4>Phase 1 — Dashboard + restyled Recording Studio</h4>
+<p>3 weeks. All existing capture features keep working; UI moves into AppShell; Dashboard ships.</p>
+
+<h4>Phase 2 — Clips / Media / Projects / Render Queue / Settings workspaces</h4>
+<p>4 weeks. Surfaces the existing replay-buffer pipeline as a real library. Settings consolidation deprecates the three current dialogs.</p>
+
+<h4>Phase 3 — Onboarding + Stream Studio polish + Command Palette</h4>
+<p>2 weeks. Closes v0.1 scope.</p>
+
+<h4>Phase 4 — Editor (timeline) v0.2</h4>
+<p>10–12 weeks. The big lift. See <a href="#v02">v0.2 scope</a>.</p>
+
+<h4>Phase 5 — AI Lab v0.3</h4>
+<p>8 weeks. Whisper subtitles first, then clip detection. Cloud-optional.</p>
+
+
+<h2 id="v01">11. v0.1 scope</h2>
+<ul>
+  <li>AppShell (icon rail + workspace header + status bar)</li>
+  <li>Token-based dark theme with density / accent / bg variants</li>
+  <li>Dashboard (with quick actions, system status, recents)</li>
+  <li>Recording Studio (existing capture features, restyled, with new ControlsBar)</li>
+  <li>Streaming Studio (existing streaming pipeline, restyled, with health card + chat/alerts placeholders)</li>
+  <li>Clips Library (built on replay buffer + new ClipsRegistry)</li>
+  <li>Media Library (file-system browser + ffprobe metadata)</li>
+  <li>Project Manager (replaces "File &gt; Open")</li>
+  <li>Render Queue (single-job background + retry + log viewer)</li>
+  <li>Settings workspace (consolidates 3 dialogs)</li>
+  <li>Onboarding flow (7 steps)</li>
+  <li>Empty / loading / error / no-device / low-disk states for every workspace</li>
+  <li>Keyboard: 1–0 workspaces, F9 record, F8 live, ⌥⌘C clip</li>
+</ul>
+
+
+<h2 id="v02">12. v0.2 scope</h2>
+<ul>
+  <li><strong>Editor workspace</strong>: media bin + preview monitor + inspector + multi-track timeline (3 V + 3 A)</li>
+  <li>Tools: Select, Razor, Slip, Hand. Snap, zoom 10–200 px/s</li>
+  <li>Effects: Color Correction, Crop, Sharpen, Opacity (no keyframes yet)</li>
+  <li>Transitions: Cut, Fade, Slide (cross-clip)</li>
+  <li>Text overlays via existing Text source type</li>
+  <li>Multi-job parallel render queue with retries + speed tier</li>
+  <li>Command palette (⌘K)</li>
+  <li>Replay buffer surfaces clip during recording with toast + "Open in Editor"</li>
+  <li>Stream destination profiles (Twitch / YouTube / Custom RTMP) + multi-stream out via local relay</li>
+</ul>
+
+
+<h2 id="v03">13. v0.3 scope</h2>
+<ul>
+  <li><strong>AI Lab</strong> unlocked progressively: Whisper subtitles → silence removal → clip detection → chapters → thumbnail variations → title ideas</li>
+  <li>Keyframes (timeline + inspector)</li>
+  <li>Arbitrary track count (add/remove V/A tracks)</li>
+  <li>Audio effects rack per mixer strip (gate, compressor, EQ)</li>
+  <li>Color grading (LUTs)</li>
+  <li>Export presets: YouTube 1080/4k, Twitch VOD, Shorts/Reels 9:16</li>
+  <li>Project format v3 (timeline + media + clips bundled into <code>.malloyproj</code>)</li>
+</ul>
+
+
+<h2 id="roadmap">14. Long-term roadmap toward OBS + Vegas replacement</h2>
+<table>
+  <thead><tr><th>Capability</th><th>OBS-equivalent</th><th>Vegas-equivalent</th><th>Target</th></tr></thead>
+  <tbody>
+    <tr><td>Capture / scenes / sources / filters</td><td>✓</td><td></td><td><span class="pill pill-keep">Have</span></td></tr>
+    <tr><td>Streaming + replay buffer + hardware encoders</td><td>✓</td><td></td><td><span class="pill pill-keep">Have</span></td></tr>
+    <tr><td>Timeline / multi-track / trim / split / transitions</td><td></td><td>✓</td><td><span class="pill pill-v02">v0.2</span></td></tr>
+    <tr><td>Effects / color grading / LUTs / keyframes</td><td></td><td>✓</td><td><span class="pill pill-v03">v0.3</span></td></tr>
+    <tr><td>Plugins / extensible source types</td><td>✓</td><td>✓</td><td><span class="pill pill-future">v0.4</span></td></tr>
+    <tr><td>Proxy media / smart prerendering</td><td></td><td>✓</td><td><span class="pill pill-future">v0.4</span></td></tr>
+    <tr><td>HDR / 4k editing / 10-bit pipelines</td><td></td><td>✓</td><td><span class="pill pill-future">v0.5</span></td></tr>
+    <tr><td>Plugin SDK + marketplace</td><td>✓</td><td>✓</td><td><span class="pill pill-future">v1.0</span></td></tr>
+    <tr><td>AI editing assistant (conversational)</td><td></td><td></td><td><span class="pill pill-v03">v0.3+</span></td></tr>
+  </tbody>
+</table>
+
+
+<h2 id="risks">15. Risks &amp; blockers</h2>
+<ul>
+  <li><strong>Timeline performance</strong> — Qt's <code>QGraphicsScene</code> can struggle with 1000+ clip widgets. Plan: render timeline directly via <code>QPainter</code> on a custom <code>QWidget</code>, virtualize clips outside the viewport.</li>
+  <li><strong>Decoder cost</strong> — playback of multiple 4K streams in the preview monitor needs hardware decode (D3D11VA via ffmpeg). Single 1080p60 is fine; ramping up to 4-stream multicam needs investigation.</li>
+  <li><strong>Project format migration</strong> — adding the timeline to <code>.malloy.json</code> requires a v3 schema. The model layer already has a v1→v2 migration; reuse that pattern.</li>
+  <li><strong>Window capture chrome</strong> — README admits client-area only. DXGI per-window via WGC (Windows.Graphics.Capture) is the right answer; requires Windows 10 1903+ which we already require.</li>
+  <li><strong>Stream key storage</strong> — never plain-text in the project file. Use Windows Credential Manager via <code>QtKeychain</code>.</li>
+  <li><strong>Replay buffer + memory</strong> — currently in-memory ring. 30 s @ 1080p60 is ~8 GB raw. Confirm we're storing encoded frames (we are; just documenting).</li>
+  <li><strong>AI on big files</strong> — a 2-hour 1080p60 stream is 14 GB. Whisper transcription with Word-level timestamps is many minutes. The UI must communicate "this takes time" gracefully and allow cancel/resume.</li>
+  <li><strong>QSS reach</strong> — Qt stylesheets can't do everything (compound selectors, container queries). Some custom widgets will need to do their own painting. Pre-plan the boundary.</li>
+  <li><strong>One-developer bandwidth</strong> — the v0.2 editor is ~3 months of work for one person. Consider shipping v0.1 as a 1.0 release, marketing it as a capture + clips workstation, and treating the editor as a separate v2.0.</li>
+</ul>
+
+
+<h2 id="next">16. Immediate next steps</h2>
+<ol>
+  <li><strong>Answer the 8 open questions above.</strong> Especially editor depth, plugin support, and cross-platform — those determine the architecture.</li>
+  <li><strong>Adopt the token system</strong> — port <code>tokens.css</code> into a <code>tokens.qss</code> + <code>qApp</code> palette. Replace hardcoded hex values across the existing UI (one PR per panel).</li>
+  <li><strong>Land AppShell + IconRail + StatusBar.</strong> Keep the current MainWindow capture surface inside the new "Recording" workspace. No functional change, only chrome.</li>
+  <li><strong>Build Dashboard skeleton.</strong> Wire it to live data: <code>SceneCollection</code> for current project, <code>RecorderController</code> for recordings list, <code>ProjectRegistry</code> (new) for projects.</li>
+  <li><strong>Extract <code>PickerDialogBase</code></strong> and migrate the three picker dialogs.</li>
+  <li><strong>Begin Clips/Media/Projects workspaces in parallel</strong> — they share the same "left filter + main content" pattern.</li>
+  <li><strong>Set up a feature-flag system</strong> so we can ship the new shell with the old workspaces fallback-able. Big releases like this are best landed behind a flag.</li>
+  <li><strong>Write three more model tests</strong>: ClipsRegistry roundtrip, RenderQueue retry semantics, ProjectRegistry rescan idempotence.</li>
+</ol>
+
+<p style="margin-top: 64px; color: var(--text-mute); font-size: 12px; text-align: center;">
+  Companion artifact to the <a href="MalloyStudio.html" style="color: var(--accent-hi);">interactive prototype</a>. ↑ Back to top.
+</p>
+
+</div>
+</body>
+</html>
