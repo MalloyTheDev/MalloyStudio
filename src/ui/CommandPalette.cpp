@@ -12,6 +12,7 @@
 CommandPalette::CommandPalette(QWidget* parent) : QWidget(parent) {
     setObjectName(QStringLiteral("paletteOverlay"));
     hide();
+    if (parent) parent->installEventFilter(this);  // track parent resize
 
     auto* outer = new QVBoxLayout(this);
     outer->setContentsMargins(0, 96, 0, 0);
@@ -106,6 +107,10 @@ void CommandPalette::runCurrent() {
 }
 
 bool CommandPalette::eventFilter(QObject* watched, QEvent* event) {
+    if (watched == parentWidget() && event->type() == QEvent::Resize) {
+        if (isVisible()) setGeometry(parentWidget()->rect());
+        return false;
+    }
     if (watched == m_search && event->type() == QEvent::KeyPress) {
         auto* ke = static_cast<QKeyEvent*>(event);
         switch (ke->key()) {

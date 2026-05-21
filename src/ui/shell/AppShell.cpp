@@ -94,6 +94,11 @@ bool AppShell::eventFilter(QObject* watched, QEvent* event) {
     if (event->type() == QEvent::KeyPress) {
         auto* ke = static_cast<QKeyEvent*>(event);
         if (!(ke->modifiers() & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier))) {
+            // Don't switch workspaces while a modal overlay (command palette,
+            // onboarding) is up — it would change the screen behind it.
+            const auto overlays = findChildren<QWidget*>(QStringLiteral("paletteOverlay"));
+            for (QWidget* ov : overlays)
+                if (ov->isVisible()) return QWidget::eventFilter(watched, event);
             // Don't steal digits while typing into an editable widget.
             QWidget* fw = QApplication::focusWidget();
             const bool editing = qobject_cast<QLineEdit*>(fw)

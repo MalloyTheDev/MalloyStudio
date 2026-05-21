@@ -64,6 +64,7 @@ QPushButton* optionCard(const QString& icon, const QString& title, const QString
 OnboardingOverlay::OnboardingOverlay(QWidget* parent) : QWidget(parent) {
     setObjectName(QStringLiteral("paletteOverlay"));
     hide();
+    if (parent) parent->installEventFilter(this);  // track parent resize
 
     auto* outer = new QVBoxLayout(this);
     outer->setContentsMargins(0, 0, 0, 0);
@@ -327,6 +328,13 @@ void OnboardingOverlay::goToStep(int step) {
 void OnboardingOverlay::keyPressEvent(QKeyEvent* event) {
     if (event->key() == Qt::Key_Escape) { hide(); return; }
     QWidget::keyPressEvent(event);
+}
+
+bool OnboardingOverlay::eventFilter(QObject* watched, QEvent* event) {
+    if (watched == parentWidget() && event->type() == QEvent::Resize) {
+        if (isVisible()) setGeometry(parentWidget()->rect());
+    }
+    return QWidget::eventFilter(watched, event);
 }
 
 void OnboardingOverlay::paintEvent(QPaintEvent*) {
