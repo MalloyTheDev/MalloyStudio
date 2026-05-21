@@ -26,6 +26,16 @@ public:
     void setRecordEnabled(bool enabled, const QString& disabledTooltip = QString());
     void setStreamEnabled(bool enabled, const QString& disabledTooltip = QString());
 
+    // Programmatically drive the Record/Stream buttons (keeps the bar's own
+    // visuals/timers in sync) so other surfaces — e.g. the Dashboard hero or
+    // the Streaming Studio "Go Live" button — can start/stop capture. No-ops
+    // when the corresponding button is disabled.
+    void toggleRecord();
+    void toggleStream();
+
+    bool isRecording() const { return m_recording; }
+    bool isStreaming() const { return m_streaming; }
+
     // v7 Tier 3: live ffmpeg progress for the streaming pipeline (bitrate in
     // kbps, dropped frames). Updates the stream stats label next to the LIVE
     // timer. Hidden when not streaming.

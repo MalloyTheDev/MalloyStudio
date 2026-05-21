@@ -307,6 +307,10 @@ QLabel#statValue {
 /* Workspace background base */
 QWidget#workspaceBody { background-color: #0d0e11; }
 QWidget#recSideCol { background-color: #141518; }
+QListWidget#settingsNav { background: transparent; border: none; }
+QListWidget#settingsNav::item { padding: 6px 10px; border-radius: 6px; color: #aeb1b8; }
+QListWidget#settingsNav::item:hover { background: #1b1c1f; color: #f7f7f7; }
+QListWidget#settingsNav::item:selected { background: rgba(87,155,255,18%); color: #f7f7f7; }
 QScrollArea { border: none; background: transparent; }
 QScrollArea > QWidget > QWidget { background: transparent; }
 

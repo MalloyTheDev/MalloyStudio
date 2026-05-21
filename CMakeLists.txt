@@ -91,6 +91,16 @@ set(MALLOY_UI_SOURCES
     src/ui/components/MeterBar.h
     src/ui/workspaces/RecordingWorkspace.cpp
     src/ui/workspaces/RecordingWorkspace.h
+    src/ui/workspaces/StreamingWorkspace.cpp
+    src/ui/workspaces/StreamingWorkspace.h
+    src/ui/workspaces/SettingsWorkspace.cpp
+    src/ui/workspaces/SettingsWorkspace.h
+    src/ui/workspaces/AILabWorkspace.cpp
+    src/ui/workspaces/AILabWorkspace.h
+    src/ui/workspaces/EditorWorkspace.cpp
+    src/ui/workspaces/EditorWorkspace.h
+    src/ui/workspaces/LibraryWorkspaces.cpp
+    src/ui/workspaces/LibraryWorkspaces.h
     src/ui/workspaces/PlaceholderWorkspace.cpp
     src/ui/workspaces/PlaceholderWorkspace.h
     src/ui/dashboard/Dashboard.cpp

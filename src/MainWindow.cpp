@@ -12,6 +12,11 @@
 #include "ui/shell/WorkspaceHeader.h"
 #include "ui/shell/StudioStatusBar.h"
 #include "ui/workspaces/RecordingWorkspace.h"
+#include "ui/workspaces/StreamingWorkspace.h"
+#include "ui/workspaces/SettingsWorkspace.h"
+#include "ui/workspaces/AILabWorkspace.h"
+#include "ui/workspaces/EditorWorkspace.h"
+#include "ui/workspaces/LibraryWorkspaces.h"
 #include "ui/workspaces/PlaceholderWorkspace.h"
 #include "ui/dashboard/Dashboard.h"
 #include "audio/AudioController.h"
@@ -155,30 +160,17 @@ void MainWindow::setupUi() {
             [this](const QString& id) { m_shell->setCurrentWorkspace(id); });
     m_shell->addWorkspace(QStringLiteral("dashboard"), m_dashboard);
     m_shell->addWorkspace(QStringLiteral("record"), recording);
-    m_shell->addWorkspace(QStringLiteral("stream"),
-        new PlaceholderWorkspace(QStringLiteral("stream"), tr("Streaming"),
-            tr("Go live, stream health, chat and alerts."), this));
-    m_shell->addWorkspace(QStringLiteral("editor"),
-        new PlaceholderWorkspace(QStringLiteral("editor"), tr("Editor"),
-            tr("Multi-track timeline editing arrives in a later phase."), this));
-    m_shell->addWorkspace(QStringLiteral("clips"),
-        new PlaceholderWorkspace(QStringLiteral("clips"), tr("Clips"),
-            tr("Your replay-buffer captures, tagged and searchable."), this));
-    m_shell->addWorkspace(QStringLiteral("media"),
-        new PlaceholderWorkspace(QStringLiteral("media"), tr("Media"),
-            tr("Project media library with import and relink."), this));
-    m_shell->addWorkspace(QStringLiteral("projects"),
-        new PlaceholderWorkspace(QStringLiteral("projects"), tr("Projects"),
-            tr("All your MalloyStudio projects in one place."), this));
-    m_shell->addWorkspace(QStringLiteral("render"),
-        new PlaceholderWorkspace(QStringLiteral("render"), tr("Render Queue"),
-            tr("Background renders with progress and retries."), this));
-    m_shell->addWorkspace(QStringLiteral("ai"),
-        new PlaceholderWorkspace(QStringLiteral("ai"), tr("AI Lab"),
-            tr("Clip detection, subtitles, and editing assists — planned."), this));
-    m_shell->addWorkspace(QStringLiteral("settings"),
-        new PlaceholderWorkspace(QStringLiteral("settings"), tr("Settings"),
-            tr("Encoder, devices, hotkeys, storage and appearance."), this));
+    m_streamStudio = new StreamingWorkspace(this);
+    connect(m_streamStudio, &StreamingWorkspace::goLiveRequested,
+            this, [this] { m_controlsBar->toggleStream(); });
+    m_shell->addWorkspace(QStringLiteral("stream"), m_streamStudio);
+    m_shell->addWorkspace(QStringLiteral("editor"), new EditorWorkspace(this));
+    m_shell->addWorkspace(QStringLiteral("clips"), new ClipsWorkspace(this));
+    m_shell->addWorkspace(QStringLiteral("media"), new MediaWorkspace(this));
+    m_shell->addWorkspace(QStringLiteral("projects"), new ProjectsWorkspace(this));
+    m_shell->addWorkspace(QStringLiteral("render"), new RenderWorkspace(this));
+    m_shell->addWorkspace(QStringLiteral("ai"), new AILabWorkspace(this));
+    m_shell->addWorkspace(QStringLiteral("settings"), new SettingsWorkspace(this));
 
     setCentralWidget(m_shell);
     m_shell->setCurrentWorkspace(QStringLiteral("dashboard"));
@@ -662,10 +654,12 @@ void MainWindow::updateStatusBar() {
 
 void MainWindow::updateShellMode() {
     if (!m_shell) return;
+    const bool streaming = m_media && m_media->isStreaming();
     StudioStatusBar::Mode mode = StudioStatusBar::Mode::Idle;
-    if (m_media && m_media->isStreaming())      mode = StudioStatusBar::Mode::Streaming;
+    if (streaming)                              mode = StudioStatusBar::Mode::Streaming;
     else if (m_media && m_media->isRecording()) mode = StudioStatusBar::Mode::Recording;
     m_shell->status()->setMode(mode);
+    if (m_streamStudio) m_streamStudio->setLive(streaming);
 }
 
 void MainWindow::flash(const QString& text, int ms) {

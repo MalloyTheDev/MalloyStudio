@@ -88,6 +88,14 @@ void ControlsBar::onTransitionComboChanged(int index) {
 // Recording
 // ---------------------------------------------------------------------------
 
+void ControlsBar::toggleRecord() {
+    if (m_recordBtn && m_recordBtn->isEnabled()) onRecordClicked();
+}
+
+void ControlsBar::toggleStream() {
+    if (m_streamBtn && m_streamBtn->isEnabled()) onStreamClicked();
+}
+
 void ControlsBar::onRecordClicked() {
     if (!m_recording) {
         m_recording = true;
