@@ -10,6 +10,7 @@
 #include "project/ProjectDocument.h"
 #include "project/ClipsRegistry.h"
 #include "project/ProjectRegistry.h"
+#include "project/MediaRegistry.h"
 #include "recording/OutputSettings.h"
 #include "recording/EncoderPipeline.h"
 #include "recording/RingTimedPcmSource.h"
@@ -118,6 +119,8 @@ private slots:
     // Project registry: scans a dir for *.malloy.json, ignores other files,
     // and parses scene counts. Backs the Projects workspace.
     void projectRegistryScansMalloyFiles();
+    // Media registry: classifies files by extension and ignores non-media.
+    void mediaRegistryClassifiesByExtension();
 };
 
 void MalloyModelTests::initTestCase() {
@@ -1324,6 +1327,29 @@ void MalloyModelTests::projectRegistryScansMalloyFiles() {
     QVERIFY(names.contains(QStringLiteral("beta")));
     QCOMPARE(alphaScenes, 3);
     QCOMPARE(betaScenes, 1);
+}
+
+void MalloyModelTests::mediaRegistryClassifiesByExtension() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    auto touch = [&](const QString& name) {
+        QFile f(dir.filePath(name));
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write("x");
+        f.close();
+    };
+    touch(QStringLiteral("clip.mp4"));
+    touch(QStringLiteral("song.wav"));
+    touch(QStringLiteral("thumb.png"));
+    touch(QStringLiteral("readme.txt"));        // ignored
+    touch(QStringLiteral("scene.malloy.json")); // ignored (not a media ext)
+
+    MediaRegistry reg;
+    reg.setSearchDirs({dir.path()});
+    QCOMPARE(reg.count(), 3);
+    QCOMPARE(reg.countOfKind(MediaInfo::Video), 1);
+    QCOMPARE(reg.countOfKind(MediaInfo::Audio), 1);
+    QCOMPARE(reg.countOfKind(MediaInfo::Image), 1);
 }
 
 QTEST_MAIN(MalloyModelTests)

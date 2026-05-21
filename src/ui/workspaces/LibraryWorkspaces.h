@@ -8,8 +8,10 @@
 
 class ClipsRegistry;
 class ProjectRegistry;
+class MediaRegistry;
 class QLabel;
 class QScrollArea;
+class QVBoxLayout;
 
 class ClipsWorkspace : public QWidget {
     Q_OBJECT
@@ -27,7 +29,14 @@ private:
 class MediaWorkspace : public QWidget {
     Q_OBJECT
 public:
-    explicit MediaWorkspace(QWidget* parent = nullptr);
+    explicit MediaWorkspace(MediaRegistry* registry, QWidget* parent = nullptr);
+
+private:
+    void rebuild();
+
+    MediaRegistry* m_registry = nullptr;
+    QScrollArea* m_scroll = nullptr;
+    QLabel* m_countLabel = nullptr;
 };
 
 class ProjectsWorkspace : public QWidget {

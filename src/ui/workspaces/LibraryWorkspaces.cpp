@@ -5,6 +5,7 @@
 #include "ui/Theme.h"
 #include "project/ClipsRegistry.h"
 #include "project/ProjectRegistry.h"
+#include "project/MediaRegistry.h"
 
 #include <QComboBox>
 #include <QFrame>
@@ -205,7 +206,8 @@ void ClipsWorkspace::rebuild() {
 }
 
 // ───────────────────────────── Media ──────────────────────────────────────
-MediaWorkspace::MediaWorkspace(QWidget* parent) : QWidget(parent) {
+MediaWorkspace::MediaWorkspace(MediaRegistry* registry, QWidget* parent)
+    : QWidget(parent), m_registry(registry) {
     auto* row = new QHBoxLayout(this);
     row->setContentsMargins(0, 0, 0, 0);
     row->setSpacing(0);
@@ -216,16 +218,16 @@ MediaWorkspace::MediaWorkspace(QWidget* parent) : QWidget(parent) {
     auto* av = new QVBoxLayout(aside);
     av->setContentsMargins(6, 8, 6, 8);
     av->setSpacing(2);
-    av->addWidget(Theme::makeSectionHeader(tr("Folders")));
-    av->addWidget(filterRow(QStringLiteral("folder"), tr("All media"), 284, true));
-    av->addWidget(filterRow(QStringLiteral("folder"), tr("Footage"), 142));
-    av->addWidget(filterRow(QStringLiteral("folder"), tr("Audio"), 48));
-    av->addWidget(filterRow(QStringLiteral("folder"), tr("Images"), 62));
-    av->addWidget(filterRow(QStringLiteral("folder"), tr("Projects"), 32));
+    av->addWidget(Theme::makeSectionHeader(tr("Library")));
+    av->addWidget(filterRow(QStringLiteral("media"), tr("All media"),
+                            registry ? registry->count() : 0, true));
     av->addWidget(Theme::makeSectionHeader(tr("File types")));
-    av->addWidget(filterRow(QStringLiteral("media"), tr("Video"), 142));
-    av->addWidget(filterRow(QStringLiteral("speaker"), tr("Audio"), 48));
-    av->addWidget(filterRow(QStringLiteral("image"), tr("Image"), 62));
+    av->addWidget(filterRow(QStringLiteral("editor"), tr("Video"),
+                            registry ? registry->countOfKind(MediaInfo::Video) : 0));
+    av->addWidget(filterRow(QStringLiteral("speaker"), tr("Audio"),
+                            registry ? registry->countOfKind(MediaInfo::Audio) : 0));
+    av->addWidget(filterRow(QStringLiteral("image"), tr("Image"),
+                            registry ? registry->countOfKind(MediaInfo::Image) : 0));
     av->addStretch();
     row->addWidget(aside);
 
@@ -238,70 +240,88 @@ MediaWorkspace::MediaWorkspace(QWidget* parent) : QWidget(parent) {
     auto* tb = new QHBoxLayout(toolbar);
     tb->setContentsMargins(16, 12, 16, 12); tb->setSpacing(8);
     tb->addWidget(search(tr("Search media…")));
-    tb->addWidget(lbl(tr("284 files · 412 GB"), QStringLiteral("mute"), 11, false, true));
-    tb->addWidget(Theme::makeTag(tr("1 missing"), QStringLiteral("warn")));
+    m_countLabel = lbl(QString(), QStringLiteral("mute"), 11, false, true);
+    tb->addWidget(m_countLabel);
     tb->addStretch();
     tb->addWidget(new QPushButton(Icons::icon(QStringLiteral("upload"), Theme::Text, 12), tr(" Import")));
     mv->addWidget(toolbar);
+    auto* div = new QFrame; div->setObjectName(QStringLiteral("divider")); div->setFixedHeight(1);
+    mv->addWidget(div);
 
-    // Missing media banner
-    auto* banner = new QFrame(main);
-    banner->setStyleSheet(QStringLiteral("background: rgba(245,174,57,0.08); border: none; border-bottom: 1px solid rgba(245,174,57,0.4);"));
-    auto* bh = new QHBoxLayout(banner);
-    bh->setContentsMargins(16, 10, 16, 10); bh->setSpacing(8);
-    auto* warn = new QLabel; warn->setPixmap(Icons::pixmap(QStringLiteral("alert"), Theme::Warn, 14));
-    bh->addWidget(warn);
-    bh->addWidget(lbl(tr("One file is missing — Thumbnail — final.psd, referenced by 1 project."), QStringLiteral("dim"), 12));
-    bh->addStretch();
-    bh->addWidget(new QPushButton(tr("Locate…")));
-    bh->addWidget(ghost(tr("Skip")));
-    mv->addWidget(banner);
+    m_scroll = new QScrollArea(main);
+    m_scroll->setWidgetResizable(true);
+    m_scroll->setFrameShape(QFrame::NoFrame);
+    mv->addWidget(m_scroll, 1);
+    row->addWidget(main, 1);
 
-    // Table (manual: header + rows in a card)
+    if (m_registry)
+        connect(m_registry, &MediaRegistry::changed, this, &MediaWorkspace::rebuild);
+    rebuild();
+}
+
+void MediaWorkspace::rebuild() {
+    const QVector<MediaInfo> media = m_registry ? m_registry->media() : QVector<MediaInfo>{};
+    qint64 totalBytes = 0;
+    for (const MediaInfo& m : media) totalBytes += m.sizeBytes;
+    if (m_countLabel) {
+        const double mb = totalBytes / (1024.0 * 1024.0);
+        const QString sz = mb >= 1024.0 ? QStringLiteral("%1 GB").arg(mb / 1024.0, 0, 'f', 1)
+                                        : QStringLiteral("%1 MB").arg(mb, 0, 'f', 1);
+        m_countLabel->setText(tr("%1 files · %2").arg(media.size()).arg(sz));
+    }
+
     auto* body = new QWidget;
     body->setObjectName(QStringLiteral("workspaceBody"));
+
+    if (media.isEmpty()) {
+        auto* v = new QVBoxLayout(body);
+        v->setAlignment(Qt::AlignCenter); v->setSpacing(8);
+        auto* icon = new QLabel;
+        icon->setPixmap(Icons::pixmap(QStringLiteral("media"), Theme::TextFaint, 40));
+        icon->setAlignment(Qt::AlignCenter);
+        v->addWidget(icon, 0, Qt::AlignHCenter);
+        auto* t = lbl(tr("No media found"), QString(), 16, true);
+        t->setAlignment(Qt::AlignCenter);
+        v->addWidget(t, 0, Qt::AlignHCenter);
+        auto* s = lbl(tr("Video, audio, and image files in your Movies, Pictures, and Music\n"
+                         "folders appear here. Recordings you save will show up automatically."),
+                      QStringLiteral("mute"), 12);
+        s->setAlignment(Qt::AlignCenter);
+        v->addWidget(s, 0, Qt::AlignHCenter);
+        m_scroll->setWidget(body);
+        return;
+    }
+
     auto* bodyV = new QVBoxLayout(body);
     bodyV->setContentsMargins(16, 16, 16, 16);
     auto* card = new QFrame; card->setObjectName(QStringLiteral("card"));
     auto* cv = new QVBoxLayout(card); cv->setContentsMargins(0, 0, 0, 0); cv->setSpacing(0);
 
-    auto makeRow = [&](const QString& name, const QString& props, const QString& size,
-                       const QString& used, const QString& when, bool header, bool missing) {
+    auto rowWidget = [&](const QString& name, const QString& type, const QString& size,
+                         const QString& when, bool header) {
         auto* w = new QWidget;
         auto* g = new QGridLayout(w);
         g->setContentsMargins(12, header ? 8 : 10, 12, header ? 8 : 10);
         g->setHorizontalSpacing(8);
-        const QString tone = header ? QStringLiteral("mute") : (missing ? QStringLiteral("warn") : QString());
-        auto* n = lbl(name, tone, header ? 11 : 13, header);
-        auto* p = lbl(props, header ? QStringLiteral("mute") : QStringLiteral("mute"), 11, false, !header);
-        auto* s = lbl(size, QStringLiteral("mute"), 11, false, !header);
-        auto* u = lbl(used, header ? QStringLiteral("mute") : QString(), 11);
-        auto* m = lbl(when, QStringLiteral("mute"), 11);
-        g->addWidget(n, 0, 0); g->addWidget(p, 0, 1); g->addWidget(s, 0, 2);
-        g->addWidget(u, 0, 3); g->addWidget(m, 0, 4);
-        g->setColumnStretch(0, 3); g->setColumnStretch(1, 2);
+        g->addWidget(lbl(name, header ? QStringLiteral("mute") : QString(), header ? 11 : 13, header), 0, 0);
+        g->addWidget(lbl(type, QStringLiteral("mute"), 11, false, !header), 0, 1);
+        g->addWidget(lbl(size, QStringLiteral("mute"), 11, false, !header), 0, 2);
+        g->addWidget(lbl(when, QStringLiteral("mute"), 11), 0, 3);
+        g->setColumnStretch(0, 3); g->setColumnStretch(1, 1);
         return w;
     };
-    cv->addWidget(makeRow(tr("Name"), tr("Properties"), tr("Size"), tr("Used"), tr("Modified"), true, false));
-    struct M { QString name, props, size, used, when; bool missing; };
-    const QVector<M> media = {
-        {tr("Spire — Ep 14 raw.mkv"), QStringLiteral("1920×1080 60p"), QStringLiteral("14.2 GB"), QStringLiteral("●"), tr("1h ago"), false},
-        {tr("Webcam α7C — Ep 14.mkv"), QStringLiteral("1920×1080 60p"), QStringLiteral("4.8 GB"), QStringLiteral("●"), tr("1h ago"), false},
-        {tr("Mic — SM7B (cleaned).wav"), QStringLiteral("48 kHz · Stereo"), QStringLiteral("1.1 GB"), QStringLiteral("●"), tr("45 min ago"), false},
-        {tr("Intro card v3.mp4"), QStringLiteral("3840×2160 60p"), QStringLiteral("92 MB"), QStringLiteral("●"), tr("Feb 28"), false},
-        {tr("B-roll — sunset.mp4"), QStringLiteral("3840×2160 30p"), QStringLiteral("220 MB"), tr("unused"), tr("Feb 12"), false},
-        {tr("Thumbnail — final.psd"), QStringLiteral("1920×1080"), QStringLiteral("24 MB"), tr("missing"), tr("Feb 02"), true},
-    };
-    for (int r = 0; r < media.size(); ++r) {
+    cv->addWidget(rowWidget(tr("Name"), tr("Type"), tr("Size"), tr("Modified"), true));
+    for (const MediaInfo& m : media) {
         auto* divr = new QFrame; divr->setObjectName(QStringLiteral("divider")); divr->setFixedHeight(1);
         cv->addWidget(divr);
-        const M& m = media[r];
-        cv->addWidget(makeRow(m.name, m.props, m.size, m.used, m.when, false, m.missing));
+        cv->addWidget(rowWidget(m.name,
+                                QStringLiteral("%1 · %2").arg(m.kindText(), m.ext.toUpper()),
+                                m.sizeText(),
+                                m.modified.toString(QStringLiteral("MMM d, yyyy")), false));
     }
     bodyV->addWidget(card);
     bodyV->addStretch();
-    mv->addWidget(scrollArea(body), 1);
-    row->addWidget(main, 1);
+    m_scroll->setWidget(body);
 }
 
 // ──────────────────────────── Projects ────────────────────────────────────

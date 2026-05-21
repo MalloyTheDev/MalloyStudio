@@ -19,6 +19,7 @@ class MediaController;
 class CaptureController;
 class ClipsRegistry;
 class ProjectRegistry;
+class MediaRegistry;
 class AppShell;
 class Dashboard;
 class StreamingWorkspace;
@@ -63,6 +64,7 @@ private:
     HotkeyManager*     m_hotkeys           = nullptr;
     ClipsRegistry*     m_clipsRegistry     = nullptr;
     ProjectRegistry*   m_projectRegistry   = nullptr;
+    MediaRegistry*     m_mediaRegistry     = nullptr;
     AppShell*          m_shell             = nullptr;  // icon rail + workspaces + status bar
     Dashboard*         m_dashboard         = nullptr;
     StreamingWorkspace* m_streamStudio     = nullptr;

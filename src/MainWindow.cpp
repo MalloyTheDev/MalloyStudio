@@ -31,6 +31,7 @@
 #include "project/ProjectDocument.h"
 #include "project/ClipsRegistry.h"
 #include "project/ProjectRegistry.h"
+#include "project/MediaRegistry.h"
 
 #include <QAction>
 #include <QCloseEvent>
@@ -62,6 +63,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     m_audio             = new AudioController(this);
     m_clipsRegistry     = new ClipsRegistry(this);
     m_projectRegistry   = new ProjectRegistry(this);
+    m_mediaRegistry     = new MediaRegistry(this);
     m_outputSettings    = OutputSettings::load();
     m_streamSettings    = StreamSettings::load();
     m_captureStatus     = m_captureController->statusSummary();
@@ -177,7 +179,7 @@ void MainWindow::setupUi() {
     m_shell->addWorkspace(QStringLiteral("stream"), m_streamStudio);
     m_shell->addWorkspace(QStringLiteral("editor"), new EditorWorkspace(this));
     m_shell->addWorkspace(QStringLiteral("clips"), new ClipsWorkspace(m_clipsRegistry, this));
-    m_shell->addWorkspace(QStringLiteral("media"), new MediaWorkspace(this));
+    m_shell->addWorkspace(QStringLiteral("media"), new MediaWorkspace(m_mediaRegistry, this));
     auto* projects = new ProjectsWorkspace(m_projectRegistry, this);
     connect(projects, &ProjectsWorkspace::openRequested, this, [this](const QString& path) {
         if (maybeSave()) loadProject(path);
@@ -481,6 +483,7 @@ void MainWindow::connectModelSignals() {
             this, [this](const QString& path, qint64 bytes) {
         m_controlsBar->forceStopRecording();
         updateShellMode();
+        m_mediaRegistry->addSearchDir(QFileInfo(path).absolutePath());
         flash(tr("Saved %1 (%2 KB)").arg(QFileInfo(path).fileName()).arg(bytes / 1024), 5000);
     });
 
