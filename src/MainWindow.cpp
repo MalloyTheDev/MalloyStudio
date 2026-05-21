@@ -163,6 +163,8 @@ void MainWindow::setupUi() {
     m_dashboard = new Dashboard(this);
     connect(m_dashboard, &Dashboard::navigateTo, this,
             [this](const QString& id) { m_shell->setCurrentWorkspace(id); });
+    connect(m_dashboard, &Dashboard::recordRequested, this, [this] { m_controlsBar->toggleRecord(); });
+    connect(m_dashboard, &Dashboard::streamRequested, this, [this] { m_controlsBar->toggleStream(); });
     m_shell->addWorkspace(QStringLiteral("dashboard"), m_dashboard);
     m_shell->addWorkspace(QStringLiteral("record"), recording);
     m_streamStudio = new StreamingWorkspace(this);
@@ -709,6 +711,10 @@ void MainWindow::updateShellMode() {
     else if (m_media && m_media->isRecording()) mode = StudioStatusBar::Mode::Recording;
     m_shell->status()->setMode(mode);
     if (m_streamStudio) m_streamStudio->setLive(streaming);
+    if (m_dashboard) {
+        m_dashboard->setRecording(m_media && m_media->isRecording());
+        m_dashboard->setStreaming(streaming);
+    }
 }
 
 void MainWindow::flash(const QString& text, int ms) {

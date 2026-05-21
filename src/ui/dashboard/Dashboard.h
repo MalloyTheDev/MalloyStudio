@@ -5,6 +5,7 @@
 
 class MeterBar;
 class QLabel;
+class QPushButton;
 class QTimer;
 
 // Project-hub home screen (dashboard.jsx): hero, quick actions, now-playing
@@ -17,9 +18,13 @@ public:
     explicit Dashboard(QWidget* parent = nullptr);
 
     void setProjectName(const QString& name);
+    void setRecording(bool on);
+    void setStreaming(bool on);
 
 signals:
     void navigateTo(const QString& workspaceId);
+    void recordRequested();
+    void streamRequested();
 
 private:
     QWidget* buildHero();
@@ -31,8 +36,13 @@ private:
     QWidget* buildRecentClips();
     QWidget* buildSystemStatus();
     void tickMeters();
+    void refreshState();
 
-    QLabel*   m_heroTitle = nullptr;
+    QLabel*      m_heroTitle = nullptr;
+    QPushButton* m_recBtn = nullptr;
+    QPushButton* m_liveBtn = nullptr;
+    bool m_recording = false;
+    bool m_streaming = false;
     MeterBar* m_micMeter = nullptr;
     MeterBar* m_deskMeter = nullptr;
     QLabel*   m_micDb = nullptr;

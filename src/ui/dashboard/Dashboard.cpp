@@ -132,6 +132,21 @@ void Dashboard::setProjectName(const QString& name) {
     if (m_heroTitle) m_heroTitle->setText(name.isEmpty() ? tr("Untitled project") : name);
 }
 
+void Dashboard::setRecording(bool on) { m_recording = on; refreshState(); }
+void Dashboard::setStreaming(bool on) { m_streaming = on; refreshState(); }
+
+void Dashboard::refreshState() {
+    if (m_recBtn) {
+        m_recBtn->setText(m_recording ? tr("  Stop Recording") : tr("  Start Recording"));
+        m_recBtn->setIcon(Icons::icon(m_recording ? QStringLiteral("stop") : QStringLiteral("record"),
+                                      Theme::Text, 14));
+    }
+    if (m_liveBtn) {
+        m_liveBtn->setText(m_streaming ? tr("  End Stream") : tr("  Go Live"));
+        Theme::setVariant(m_liveBtn, m_streaming ? QStringLiteral("outlineRec") : QString());
+    }
+}
+
 QWidget* Dashboard::buildHero() {
     auto* c = card();
     auto* v = new QVBoxLayout(c);
@@ -157,19 +172,19 @@ QWidget* Dashboard::buildHero() {
 
     auto* btns = new QHBoxLayout;
     btns->setSpacing(12);
-    auto* rec = new QPushButton(Icons::icon(QStringLiteral("record"), Theme::Text, 14), tr("  Start Recording"));
-    Theme::setVariant(rec, QStringLiteral("rec"));
-    rec->setCursor(Qt::PointingHandCursor);
-    connect(rec, &QPushButton::clicked, this, [this] { emit navigateTo(QStringLiteral("record")); });
-    auto* live = new QPushButton(Icons::icon(QStringLiteral("stream"), Theme::Text, 14), tr("  Go Live"));
-    live->setCursor(Qt::PointingHandCursor);
-    connect(live, &QPushButton::clicked, this, [this] { emit navigateTo(QStringLiteral("stream")); });
+    m_recBtn = new QPushButton(Icons::icon(QStringLiteral("record"), Theme::Text, 14), tr("  Start Recording"));
+    Theme::setVariant(m_recBtn, QStringLiteral("rec"));
+    m_recBtn->setCursor(Qt::PointingHandCursor);
+    connect(m_recBtn, &QPushButton::clicked, this, &Dashboard::recordRequested);
+    m_liveBtn = new QPushButton(Icons::icon(QStringLiteral("stream"), Theme::Text, 14), tr("  Go Live"));
+    m_liveBtn->setCursor(Qt::PointingHandCursor);
+    connect(m_liveBtn, &QPushButton::clicked, this, &Dashboard::streamRequested);
     auto* edit = new QPushButton(Icons::icon(QStringLiteral("editor"), Theme::TextDim, 14), tr("  Open Editor"));
     Theme::setVariant(edit, QStringLiteral("ghost"));
     edit->setCursor(Qt::PointingHandCursor);
     connect(edit, &QPushButton::clicked, this, [this] { emit navigateTo(QStringLiteral("editor")); });
-    btns->addWidget(rec);
-    btns->addWidget(live);
+    btns->addWidget(m_recBtn);
+    btns->addWidget(m_liveBtn);
     btns->addWidget(edit);
     btns->addStretch();
     v->addLayout(btns);
@@ -222,7 +237,11 @@ QWidget* Dashboard::buildQuickActions() {
         h->addLayout(tv);
         h->addStretch();
         const QString target = a.target;
-        connect(b, &QPushButton::clicked, this, [this, target] { emit navigateTo(target); });
+        connect(b, &QPushButton::clicked, this, [this, target] {
+            if (target == QLatin1String("record")) emit recordRequested();
+            else if (target == QLatin1String("stream")) emit streamRequested();
+            else emit navigateTo(target);
+        });
         grid->addWidget(b, i / 2, i % 2);
         ++i;
     }
