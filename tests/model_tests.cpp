@@ -9,6 +9,7 @@
 #include "model/Source.h"
 #include "project/ProjectDocument.h"
 #include "project/ClipsRegistry.h"
+#include "project/ProjectRegistry.h"
 #include "recording/OutputSettings.h"
 #include "recording/EncoderPipeline.h"
 #include "recording/RingTimedPcmSource.h"
@@ -114,6 +115,9 @@ private slots:
     // Clips registry: metadata persists to JSON and survives a reload, and
     // favorites toggle. Backs the Clips workspace.
     void clipsRegistryRoundTrips();
+    // Project registry: scans a dir for *.malloy.json, ignores other files,
+    // and parses scene counts. Backs the Projects workspace.
+    void projectRegistryScansMalloyFiles();
 };
 
 void MalloyModelTests::initTestCase() {
@@ -1289,6 +1293,37 @@ void MalloyModelTests::clipsRegistryRoundTrips() {
     QVERIFY(first.favorite);
     QCOMPARE(first.tags, QStringList{QStringLiteral("highlight")});
     QCOMPARE(first.durationText(), QStringLiteral("0:30"));
+}
+
+void MalloyModelTests::projectRegistryScansMalloyFiles() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    auto write = [&](const QString& name, const QByteArray& content) {
+        QFile f(dir.filePath(name));
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write(content);
+        f.close();
+    };
+    write(QStringLiteral("alpha.malloy.json"), R"({"scenes":[{},{},{}]})");
+    write(QStringLiteral("beta.malloy.json"),  R"({"scenes":[{}]})");
+    write(QStringLiteral("notes.txt"),         "ignore me");
+    write(QStringLiteral("plain.json"),        "{}");   // not *.malloy.json => ignored
+
+    ProjectRegistry reg;
+    reg.setSearchDirs({dir.path()});
+    QCOMPARE(reg.count(), 2);
+
+    QStringList names;
+    int alphaScenes = -99, betaScenes = -99;
+    for (const ProjectInfo& p : reg.projects()) {
+        names << p.name;
+        if (p.name == QLatin1String("alpha")) alphaScenes = p.sceneCount;
+        if (p.name == QLatin1String("beta"))  betaScenes = p.sceneCount;
+    }
+    QVERIFY(names.contains(QStringLiteral("alpha")));
+    QVERIFY(names.contains(QStringLiteral("beta")));
+    QCOMPARE(alphaScenes, 3);
+    QCOMPARE(betaScenes, 1);
 }
 
 QTEST_MAIN(MalloyModelTests)

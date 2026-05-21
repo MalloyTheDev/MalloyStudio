@@ -4,6 +4,7 @@
 #include "ui/IconFactory.h"
 #include "ui/Theme.h"
 #include "project/ClipsRegistry.h"
+#include "project/ProjectRegistry.h"
 
 #include <QComboBox>
 #include <QFrame>
@@ -304,7 +305,8 @@ MediaWorkspace::MediaWorkspace(QWidget* parent) : QWidget(parent) {
 }
 
 // ──────────────────────────── Projects ────────────────────────────────────
-ProjectsWorkspace::ProjectsWorkspace(QWidget* parent) : QWidget(parent) {
+ProjectsWorkspace::ProjectsWorkspace(ProjectRegistry* registry, QWidget* parent)
+    : QWidget(parent), m_registry(registry) {
     auto* col = new QVBoxLayout(this);
     col->setContentsMargins(0, 0, 0, 0);
     col->setSpacing(0);
@@ -313,56 +315,87 @@ ProjectsWorkspace::ProjectsWorkspace(QWidget* parent) : QWidget(parent) {
     auto* tb = new QHBoxLayout(toolbar);
     tb->setContentsMargins(16, 12, 16, 12); tb->setSpacing(8);
     tb->addWidget(search(tr("Search projects…")));
-    tb->addWidget(lbl(tr("6 projects · 305 GB"), QStringLiteral("mute"), 11, false, true));
+    m_countLabel = lbl(QString(), QStringLiteral("mute"), 11, false, true);
+    tb->addWidget(m_countLabel);
     tb->addStretch();
     auto* neu = new QPushButton(Icons::icon(QStringLiteral("plus"), Theme::BgBase, 12), tr(" New project"));
     Theme::setVariant(neu, QStringLiteral("primary"));
+    connect(neu, &QPushButton::clicked, this, &ProjectsWorkspace::newRequested);
     tb->addWidget(neu);
     col->addWidget(toolbar);
     auto* div = new QFrame; div->setObjectName(QStringLiteral("divider")); div->setFixedHeight(1);
     col->addWidget(div);
 
+    m_scroll = new QScrollArea(this);
+    m_scroll->setWidgetResizable(true);
+    m_scroll->setFrameShape(QFrame::NoFrame);
+    col->addWidget(m_scroll, 1);
+
+    if (m_registry)
+        connect(m_registry, &ProjectRegistry::changed, this, &ProjectsWorkspace::rebuild);
+    rebuild();
+}
+
+void ProjectsWorkspace::rebuild() {
+    const QVector<ProjectInfo> projects = m_registry ? m_registry->projects() : QVector<ProjectInfo>{};
+    qint64 totalBytes = 0;
+    for (const ProjectInfo& p : projects) totalBytes += p.sizeBytes;
+    if (m_countLabel) {
+        const double mb = totalBytes / (1024.0 * 1024.0);
+        const QString sz = mb >= 1024.0 ? QStringLiteral("%1 GB").arg(mb / 1024.0, 0, 'f', 1)
+                                        : QStringLiteral("%1 MB").arg(mb, 0, 'f', 1);
+        m_countLabel->setText(tr("%1 projects · %2").arg(projects.size()).arg(sz));
+    }
+
     auto* body = new QWidget;
     body->setObjectName(QStringLiteral("workspaceBody"));
-    auto* gl = new QGridLayout(body);
-    gl->setContentsMargins(16, 16, 16, 16);
-    gl->setSpacing(16);
-    struct P { QString name, sub, cover, meta, date; bool current; };
-    const QVector<P> projects = {
-        {tr("Spire of the Hollow Sun"), tr("Stream series · 14 eps"), tr("Gameplay · Spire"), tr("142 GB · 14 sessions"), tr("2 hr ago"), true},
-        {tr("Tuesday Vlog — Week 22"), tr("Vlog · weekly"), tr("Webcam · A-roll"), tr("38 GB · 7 sessions"), tr("Yesterday"), false},
-        {tr("Coding Sessions · S3"), tr("Coding series · 6 eps"), tr("Editor capture"), tr("88 GB · 6 sessions"), tr("4 days"), false},
-        {tr("Boss Rush — Compilation"), tr("One-off · 30 min"), tr("Final cut · v3"), tr("21 GB · 1 session"), tr("2 weeks"), false},
-        {tr("Game Dev Diary · Pilot"), tr("Pilot · 12 min"), tr("Concept"), tr("4 GB · 2 sessions"), tr("1 month"), false},
-        {tr("Late-night Tutorial #07"), tr("Tutorial · 22 min"), tr("Talking head"), tr("12 GB · 3 sessions"), tr("3 months"), false},
-    };
-    int i = 0;
-    for (const P& p : projects) {
-        auto* card = new QFrame; card->setObjectName(QStringLiteral("card"));
-        auto* cv = new QVBoxLayout(card);
-        cv->setContentsMargins(12, 12, 12, 12); cv->setSpacing(8);
-        cv->addWidget(new Placeholder(p.cover, 16, 9));
-        auto* nameRow = new QHBoxLayout; nameRow->setSpacing(6);
-        nameRow->addWidget(lbl(p.name, QString(), 13, true));
-        if (p.current) nameRow->addWidget(Theme::makeTag(tr("Current"), QStringLiteral("accent")));
-        nameRow->addStretch();
-        cv->addLayout(nameRow);
-        cv->addWidget(lbl(p.sub, QStringLiteral("mute"), 11));
-        auto* metaRow = new QHBoxLayout;
-        metaRow->addWidget(lbl(p.meta, QStringLiteral("mute"), 10, false, true));
-        metaRow->addStretch();
-        metaRow->addWidget(lbl(p.date, QStringLiteral("mute"), 10));
-        cv->addLayout(metaRow);
-        auto* btns = new QHBoxLayout; btns->setSpacing(4);
-        auto* open = new QPushButton(Icons::icon(QStringLiteral("play"), Theme::Text, 11), tr(" Open"));
-        btns->addWidget(open, 1);
-        btns->addWidget(ghost(QString(), QStringLiteral("folder")));
-        cv->addLayout(btns);
-        gl->addWidget(card, i / 3, i % 3);
-        ++i;
+
+    if (projects.isEmpty()) {
+        auto* v = new QVBoxLayout(body);
+        v->setAlignment(Qt::AlignCenter); v->setSpacing(8);
+        auto* icon = new QLabel;
+        icon->setPixmap(Icons::pixmap(QStringLiteral("projects"), Theme::TextFaint, 40));
+        icon->setAlignment(Qt::AlignCenter);
+        v->addWidget(icon, 0, Qt::AlignHCenter);
+        auto* t = lbl(tr("No projects found"), QString(), 16, true);
+        t->setAlignment(Qt::AlignCenter);
+        v->addWidget(t, 0, Qt::AlignHCenter);
+        auto* s = lbl(tr("Create one with File ▸ New, then Save.\n"
+                         ".malloy.json projects in your Movies and Documents folders appear here."),
+                      QStringLiteral("mute"), 12);
+        s->setAlignment(Qt::AlignCenter);
+        v->addWidget(s, 0, Qt::AlignHCenter);
+    } else {
+        auto* gl = new QGridLayout(body);
+        gl->setContentsMargins(16, 16, 16, 16);
+        gl->setSpacing(16);
+        int i = 0;
+        for (const ProjectInfo& p : projects) {
+            auto* card = new QFrame; card->setObjectName(QStringLiteral("card"));
+            auto* cv = new QVBoxLayout(card);
+            cv->setContentsMargins(12, 12, 12, 12); cv->setSpacing(8);
+            cv->addWidget(new Placeholder(p.name, 16, 9));
+            cv->addWidget(lbl(p.name, QString(), 13, true));
+            const QString sub = p.sceneCount >= 0
+                ? tr("%n scene(s)", nullptr, p.sceneCount) : tr("MalloyStudio project");
+            cv->addWidget(lbl(sub, QStringLiteral("mute"), 11));
+            auto* metaRow = new QHBoxLayout;
+            metaRow->addWidget(lbl(p.sizeText(), QStringLiteral("mute"), 10, false, true));
+            metaRow->addStretch();
+            metaRow->addWidget(lbl(p.modified.toString(QStringLiteral("MMM d, yyyy")), QStringLiteral("mute"), 10));
+            cv->addLayout(metaRow);
+            auto* btns = new QHBoxLayout; btns->setSpacing(4);
+            auto* open = new QPushButton(Icons::icon(QStringLiteral("play"), Theme::Text, 11), tr(" Open"));
+            const QString path = p.filePath;
+            connect(open, &QPushButton::clicked, this, [this, path] { emit openRequested(path); });
+            btns->addWidget(open, 1);
+            cv->addLayout(btns);
+            gl->addWidget(card, i / 3, i % 3);
+            ++i;
+        }
+        gl->setRowStretch((i + 2) / 3, 1);
     }
-    gl->setRowStretch((i + 2) / 3, 1);
-    col->addWidget(scrollArea(body), 1);
+    m_scroll->setWidget(body);
 }
 
 // ─────────────────────────── Render Queue ─────────────────────────────────

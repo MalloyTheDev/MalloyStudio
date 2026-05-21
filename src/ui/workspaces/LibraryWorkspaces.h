@@ -7,6 +7,7 @@
 // the others still use demo content pending their registries.
 
 class ClipsRegistry;
+class ProjectRegistry;
 class QLabel;
 class QScrollArea;
 
@@ -32,7 +33,18 @@ public:
 class ProjectsWorkspace : public QWidget {
     Q_OBJECT
 public:
-    explicit ProjectsWorkspace(QWidget* parent = nullptr);
+    explicit ProjectsWorkspace(ProjectRegistry* registry, QWidget* parent = nullptr);
+
+signals:
+    void openRequested(const QString& filePath);
+    void newRequested();
+
+private:
+    void rebuild();
+
+    ProjectRegistry* m_registry = nullptr;
+    QScrollArea* m_scroll = nullptr;
+    QLabel* m_countLabel = nullptr;
 };
 
 class RenderWorkspace : public QWidget {

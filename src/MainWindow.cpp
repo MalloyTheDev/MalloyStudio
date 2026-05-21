@@ -30,6 +30,7 @@
 #include "capture/CaptureController.h"
 #include "project/ProjectDocument.h"
 #include "project/ClipsRegistry.h"
+#include "project/ProjectRegistry.h"
 
 #include <QAction>
 #include <QCloseEvent>
@@ -60,6 +61,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     m_captureController = new CaptureController(m_scenes, this);
     m_audio             = new AudioController(this);
     m_clipsRegistry     = new ClipsRegistry(this);
+    m_projectRegistry   = new ProjectRegistry(this);
     m_outputSettings    = OutputSettings::load();
     m_streamSettings    = StreamSettings::load();
     m_captureStatus     = m_captureController->statusSummary();
@@ -176,7 +178,12 @@ void MainWindow::setupUi() {
     m_shell->addWorkspace(QStringLiteral("editor"), new EditorWorkspace(this));
     m_shell->addWorkspace(QStringLiteral("clips"), new ClipsWorkspace(m_clipsRegistry, this));
     m_shell->addWorkspace(QStringLiteral("media"), new MediaWorkspace(this));
-    m_shell->addWorkspace(QStringLiteral("projects"), new ProjectsWorkspace(this));
+    auto* projects = new ProjectsWorkspace(m_projectRegistry, this);
+    connect(projects, &ProjectsWorkspace::openRequested, this, [this](const QString& path) {
+        if (maybeSave()) loadProject(path);
+    });
+    connect(projects, &ProjectsWorkspace::newRequested, this, &MainWindow::newProject);
+    m_shell->addWorkspace(QStringLiteral("projects"), projects);
     m_shell->addWorkspace(QStringLiteral("render"), new RenderWorkspace(this));
     m_shell->addWorkspace(QStringLiteral("ai"), new AILabWorkspace(this));
     m_settings = new SettingsWorkspace(this);
@@ -661,6 +668,7 @@ bool MainWindow::saveProject() {
 
     m_undoStack->setClean();
     updateWindowTitle();
+    if (m_projectRegistry) m_projectRegistry->addSearchDir(QFileInfo(m_projectPath).absolutePath());
     flash(tr("Saved %1").arg(QFileInfo(m_projectPath).fileName()), 2500);
     return true;
 }
@@ -690,6 +698,7 @@ bool MainWindow::loadProject(const QString& filePath) {
     m_undoStack->setClean();
     updateWindowTitle();
     updateStatusBar();
+    if (m_projectRegistry) m_projectRegistry->addSearchDir(QFileInfo(filePath).absolutePath());
     flash(tr("Opened %1").arg(QFileInfo(filePath).fileName()), 2500);
     return true;
 }
