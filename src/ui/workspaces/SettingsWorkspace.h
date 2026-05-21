@@ -26,8 +26,11 @@ private:
     QWidget* buildGenericPage(const QString& title);
     void loadRecordingSettings();
     void applyRecordingSettings();
+    void updateEncoderDerived();   // rate-control/CRF follow the chosen encoder
 
     QStackedWidget* m_stack = nullptr;
+    QComboBox* m_encoderCombo = nullptr;
+    QComboBox* m_rateCombo = nullptr;
     QComboBox* m_resCombo = nullptr;
     QComboBox* m_fpsCombo = nullptr;
     QComboBox* m_containerCombo = nullptr;

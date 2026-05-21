@@ -2,6 +2,7 @@
 #include "ui/IconFactory.h"
 #include "ui/Theme.h"
 #include "recording/OutputSettings.h"
+#include "recording/EncoderRegistry.h"
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -146,12 +147,25 @@ QWidget* SettingsWorkspace::buildRecordingPage() {
     m_fpsCombo = combo({QStringLiteral("60"), QStringLiteral("30"), QStringLiteral("24")});
     m_replayCheck = check(true);
 
+    // Encoder list comes from EncoderRegistry (detected ffmpeg encoders);
+    // item data is the ffmpeg codec id stored in OutputSettings.videoCodec.
+    m_encoderCombo = new QComboBox;
+    m_encoderCombo->setFixedWidth(260);
+    for (const auto& e : EncoderRegistry::available())
+        m_encoderCombo->addItem(e.display, e.id);
+    connect(m_encoderCombo, &QComboBox::currentIndexChanged, this,
+            [this](int) { updateEncoderDerived(); });
+
+    // Rate control is derived from the encoder (hardware → CBR, software → CRF),
+    // so it's shown but not independently editable.
+    m_rateCombo = combo({tr("CRF (quality-based)"), tr("CBR (constant bitrate)")});
+    m_rateCombo->setEnabled(false);
+
     col->addWidget(settingsBlock(tr("Encoder"), {
-        {tr("Hardware encoder"), tr("Detected: NVENC AV1, H.264. Falls back to x264. Edit via Edit ▸ Output Settings."),
-         combo({tr("NVENC H.264 (recommended)"), tr("NVENC AV1"), tr("QuickSync H.264"), tr("x264 (CPU)")})},
-        {tr("Rate control"), tr("CBR for streams, CRF for archival recordings."),
-         combo({tr("CRF (quality-based)"), tr("CBR (constant bitrate)")})},
-        {tr("CRF"), tr("Lower = higher quality. 18–23 is typical."), m_crfEdit},
+        {tr("Video encoder"), tr("Detected ffmpeg encoders. Hardware encoders use CBR; x264 uses CRF."),
+         m_encoderCombo},
+        {tr("Rate control"), tr("Follows the encoder — CBR for hardware, CRF for x264."), m_rateCombo},
+        {tr("CRF"), tr("Lower = higher quality. 18–23 is typical (x264 only)."), m_crfEdit},
         {tr("Container"), tr("MKV survives crashes; MP4 is more compatible."), m_containerCombo},
     }));
 
@@ -212,8 +226,22 @@ QWidget* SettingsWorkspace::buildGenericPage(const QString& title) {
     return page;
 }
 
+void SettingsWorkspace::updateEncoderDerived() {
+    if (!m_encoderCombo) return;
+    const QString id = m_encoderCombo->currentData().toString();
+    const EncoderRegistry::Encoder* enc = EncoderRegistry::find(id);
+    const bool hw = enc && enc->isHardware;
+    if (m_rateCombo) m_rateCombo->setCurrentIndex(hw ? 1 : 0);  // CBR : CRF
+    if (m_crfEdit) m_crfEdit->setEnabled(!hw);                  // CRF only for x264
+}
+
 void SettingsWorkspace::loadRecordingSettings() {
     const OutputSettings o = OutputSettings::load();
+    if (m_encoderCombo) {
+        const int ei = m_encoderCombo->findData(o.videoCodec);
+        m_encoderCombo->setCurrentIndex(ei >= 0 ? ei : 0);
+    }
+    updateEncoderDerived();
     if (m_resCombo)
         m_resCombo->setCurrentIndex(o.width >= 3840 ? 2 : o.width >= 2560 ? 1 : 0);
     if (m_fpsCombo) {
@@ -228,7 +256,8 @@ void SettingsWorkspace::loadRecordingSettings() {
 }
 
 void SettingsWorkspace::applyRecordingSettings() {
-    OutputSettings o = OutputSettings::load();  // preserve encoder/codec/etc.
+    OutputSettings o = OutputSettings::load();  // preserve fields we don't expose
+    if (m_encoderCombo) o.videoCodec = m_encoderCombo->currentData().toString();
     static const int dims[3][2] = {{1920, 1080}, {2560, 1440}, {3840, 2160}};
     const int ri = m_resCombo ? qBound(0, m_resCombo->currentIndex(), 2) : 0;
     o.width = dims[ri][0];
