@@ -42,7 +42,7 @@ AudioMixerPanel::AudioMixerPanel(AudioController* controller,
     // (loopback:default is auto-created, so this is rare — but we cover it).
     m_emptyLabel = new QLabel(tr("No audio inputs detected."), this);
     m_emptyLabel->setAlignment(Qt::AlignCenter);
-    m_emptyLabel->setStyleSheet(QStringLiteral("color: #888; padding: 8px;"));
+    m_emptyLabel->setStyleSheet(QStringLiteral("color: #70737a; padding: 8px;"));
     m_emptyLabel->setVisible(false);
     root->addWidget(m_emptyLabel);
 
@@ -198,5 +198,5 @@ void AudioMixerPanel::onConnectionChanged(const QString& id, bool connected) {
     it.value().mute->setEnabled(connected);
     it.value().name->setStyleSheet(connected
         ? QString()
-        : QStringLiteral("color: #888888; font-style: italic;"));
+        : QStringLiteral("color: #70737a; font-style: italic;"));
 }

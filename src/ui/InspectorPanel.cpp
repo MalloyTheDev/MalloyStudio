@@ -84,7 +84,7 @@ InspectorPanel::InspectorPanel(SceneCollection* scenes,
     titleFont.setBold(true);
     m_title->setFont(titleFont);
     m_type = new QLabel(inner);
-    m_type->setStyleSheet(QStringLiteral("color: #a0a0a0;"));
+    m_type->setStyleSheet(QStringLiteral("color: #70737a;"));
 
     // Toggles
     m_visible = new QCheckBox(tr("Visible"), inner);
@@ -128,11 +128,11 @@ InspectorPanel::InspectorPanel(SceneCollection* scenes,
     m_pickMonitor = new QPushButton(tr("Pick Monitor…"), inner);
     m_imagePath   = new QLabel(inner);
     m_imagePath->setWordWrap(true);
-    m_imagePath->setStyleSheet(QStringLiteral("color: #a0a0c0;"));
+    m_imagePath->setStyleSheet(QStringLiteral("color: #aeb1b8;"));
     m_browseImage = new QPushButton(tr("Browse…"), inner);
     m_windowLabel = new QLabel(inner);
     m_windowLabel->setWordWrap(true);
-    m_windowLabel->setStyleSheet(QStringLiteral("color: #a0c0a0;"));
+    m_windowLabel->setStyleSheet(QStringLiteral("color: #aeb1b8;"));
     m_pickWindow  = new QPushButton(tr("Change Window…"), inner);
     m_audioLabel  = new QLabel(tr("Capture device:"), inner);
     m_audioDevice = new QComboBox(inner);
@@ -195,7 +195,7 @@ InspectorPanel::InspectorPanel(SceneCollection* scenes,
     auto* emptyPage = new QLabel(tr("Select a filter above to edit its properties"), m_filterProps);
     emptyPage->setAlignment(Qt::AlignCenter);
     emptyPage->setWordWrap(true);
-    emptyPage->setStyleSheet(QStringLiteral("color: #808080;"));
+    emptyPage->setStyleSheet(QStringLiteral("color: #70737a;"));
     m_filterPageEmpty = m_filterProps->addWidget(emptyPage);
 
     // Page 1: Crop

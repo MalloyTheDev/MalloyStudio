@@ -20,7 +20,7 @@ ScenesPanel::ScenesPanel(SceneCollection* scenes, QWidget* parent)
     m_emptyLabel = new QLabel(tr("No scenes yet — click + to add one."), this);
     m_emptyLabel->setAlignment(Qt::AlignCenter);
     m_emptyLabel->setWordWrap(true);
-    m_emptyLabel->setStyleSheet(QStringLiteral("color: #888; padding: 24px;"));
+    m_emptyLabel->setStyleSheet(QStringLiteral("color: #70737a; padding: 24px;"));
     m_emptyLabel->setVisible(false);
     layout->addWidget(m_emptyLabel);
 

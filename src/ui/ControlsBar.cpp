@@ -36,7 +36,7 @@ ControlsBar::ControlsBar(QWidget* parent) : QWidget(parent) {
     // --- Stream button + timer (left of record so it appears first) ---
     m_streamTimer = new QLabel(QStringLiteral(""), this);
     m_streamTimer->setVisible(false);
-    m_streamTimer->setStyleSheet(QStringLiteral("color: #e08030; font-weight: bold;"));
+    m_streamTimer->setStyleSheet(QStringLiteral("color: #ff625f; font-weight: bold;"));
     layout->addWidget(m_streamTimer);
 
     // Live ffmpeg progress shown next to the timer while streaming. Smaller +
@@ -44,7 +44,7 @@ ControlsBar::ControlsBar(QWidget* parent) : QWidget(parent) {
     m_streamStats = new QLabel(QStringLiteral(""), this);
     m_streamStats->setVisible(false);
     m_streamStats->setStyleSheet(QStringLiteral(
-        "color: #b08060; font-size: 8pt; padding-left: 4px;"));
+        "color: #70737a; font-size: 8pt; padding-left: 4px;"));
     layout->addWidget(m_streamStats);
 
     m_streamBtn = new QPushButton(tr("⬛  Start Stream"), this);
@@ -54,7 +54,7 @@ ControlsBar::ControlsBar(QWidget* parent) : QWidget(parent) {
     // --- Recording button + timer ---
     m_recordTimer = new QLabel(QStringLiteral(""), this);
     m_recordTimer->setVisible(false);
-    m_recordTimer->setStyleSheet(QStringLiteral("color: #e05050; font-weight: bold;"));
+    m_recordTimer->setStyleSheet(QStringLiteral("color: #ff625f; font-weight: bold;"));
     layout->addWidget(m_recordTimer);
 
     m_recordBtn = new QPushButton(tr("●  Start Recording"), this);

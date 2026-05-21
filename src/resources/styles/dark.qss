@@ -194,6 +194,17 @@ QSplitter::handle:vertical { height: 6px; }
 QStatusBar { background: #141518; color: #aeb1b8; border-top: 1px solid #2d2f33; }
 QStatusBar::item { border: none; }
 
+/* ── Group boxes ──────────────────────────────────────────────────────── */
+QGroupBox {
+    border: 1px solid #2d2f33; border-radius: 8px;
+    margin-top: 10px; padding: 10px 8px 8px; background: transparent;
+    font-weight: 600;
+}
+QGroupBox::title {
+    subcontrol-origin: margin; subcontrol-position: top left;
+    left: 10px; padding: 0 4px; color: #70737a;
+}
+
 /* ── Tabs ─────────────────────────────────────────────────────────────── */
 QTabWidget::pane { border: 1px solid #2d2f33; border-radius: 8px; top: -1px; }
 QTabBar::tab {

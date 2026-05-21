@@ -37,7 +37,7 @@ SourcesPanel::SourcesPanel(SceneCollection* scenes, AudioController* audio, QWid
     m_emptyLabel = new QLabel(tr("No sources in this scene — click + to add one."), this);
     m_emptyLabel->setAlignment(Qt::AlignCenter);
     m_emptyLabel->setWordWrap(true);
-    m_emptyLabel->setStyleSheet(QStringLiteral("color: #888; padding: 24px;"));
+    m_emptyLabel->setStyleSheet(QStringLiteral("color: #70737a; padding: 24px;"));
     m_emptyLabel->setVisible(false);
     layout->addWidget(m_emptyLabel);
 
@@ -184,7 +184,7 @@ QWidget* SourcesPanel::createLayerRow(int index) {
     name->setTextInteractionFlags(Qt::NoTextInteraction);
 
     auto* type = new QLabel(Source::typeToString(source->type()), row);
-    type->setStyleSheet(QStringLiteral("color: #9a9a9a;"));
+    type->setStyleSheet(QStringLiteral("color: #70737a;"));
 
     if (source->type() == Source::Type::DisplayCapture && source->hasMonitorConfig()) {
         type->setText(type->text() + QStringLiteral("  LIVE-ready"));

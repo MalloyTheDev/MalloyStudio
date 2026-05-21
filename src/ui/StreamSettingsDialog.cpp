@@ -39,7 +39,7 @@ StreamSettingsDialog::StreamSettingsDialog(const StreamSettings& current, QWidge
     // Live URL preview (read-only, updates as the user types the key)
     m_urlPreviewLabel = new QLabel(serviceGroup);
     m_urlPreviewLabel->setWordWrap(true);
-    m_urlPreviewLabel->setStyleSheet(QStringLiteral("color: gray; font-size: 10px;"));
+    m_urlPreviewLabel->setStyleSheet(QStringLiteral("color: #70737a; font-size: 10px;"));
     serviceLayout->addRow(tr("RTMP URL:"), m_urlPreviewLabel);
 
     mainLayout->addWidget(serviceGroup);
@@ -96,7 +96,7 @@ StreamSettingsDialog::StreamSettingsDialog(const StreamSettings& current, QWidge
     // the platform's published maximum.
     m_bitrateHint = new QLabel(encGroup);
     m_bitrateHint->setWordWrap(true);
-    m_bitrateHint->setStyleSheet(QStringLiteral("color: #888; font-size: 9pt;"));
+    m_bitrateHint->setStyleSheet(QStringLiteral("color: #70737a; font-size: 9pt;"));
     encLayout->addRow(QString(), m_bitrateHint);
 
     m_keyframeSpinBox = new QSpinBox(encGroup);
