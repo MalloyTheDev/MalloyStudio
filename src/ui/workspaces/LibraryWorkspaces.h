@@ -9,6 +9,7 @@
 class ClipsRegistry;
 class ProjectRegistry;
 class MediaRegistry;
+class RenderQueue;
 class QLabel;
 class QScrollArea;
 class QVBoxLayout;
@@ -59,5 +60,12 @@ private:
 class RenderWorkspace : public QWidget {
     Q_OBJECT
 public:
-    explicit RenderWorkspace(QWidget* parent = nullptr);
+    explicit RenderWorkspace(RenderQueue* queue, QWidget* parent = nullptr);
+
+private:
+    void rebuild();
+
+    RenderQueue* m_queue = nullptr;
+    QScrollArea* m_scroll = nullptr;
+    QLabel* m_countLabel = nullptr;
 };

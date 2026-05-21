@@ -20,6 +20,7 @@ class CaptureController;
 class ClipsRegistry;
 class ProjectRegistry;
 class MediaRegistry;
+class RenderQueue;
 class AppShell;
 class Dashboard;
 class StreamingWorkspace;
@@ -65,6 +66,7 @@ private:
     ClipsRegistry*     m_clipsRegistry     = nullptr;
     ProjectRegistry*   m_projectRegistry   = nullptr;
     MediaRegistry*     m_mediaRegistry     = nullptr;
+    RenderQueue*       m_renderQueue       = nullptr;
     AppShell*          m_shell             = nullptr;  // icon rail + workspaces + status bar
     Dashboard*         m_dashboard         = nullptr;
     StreamingWorkspace* m_streamStudio     = nullptr;

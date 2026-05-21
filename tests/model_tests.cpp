@@ -11,6 +11,7 @@
 #include "project/ClipsRegistry.h"
 #include "project/ProjectRegistry.h"
 #include "project/MediaRegistry.h"
+#include "recording/RenderQueue.h"
 #include "recording/OutputSettings.h"
 #include "recording/EncoderPipeline.h"
 #include "recording/RingTimedPcmSource.h"
@@ -121,6 +122,8 @@ private slots:
     void projectRegistryScansMalloyFiles();
     // Media registry: classifies files by extension and ignores non-media.
     void mediaRegistryClassifiesByExtension();
+    // Render queue: promotes, progresses, completes, persists.
+    void renderQueueProcessesAndPersists();
 };
 
 void MalloyModelTests::initTestCase() {
@@ -1350,6 +1353,33 @@ void MalloyModelTests::mediaRegistryClassifiesByExtension() {
     QCOMPARE(reg.countOfKind(MediaInfo::Video), 1);
     QCOMPARE(reg.countOfKind(MediaInfo::Audio), 1);
     QCOMPARE(reg.countOfKind(MediaInfo::Image), 1);
+}
+
+void MalloyModelTests::renderQueueProcessesAndPersists() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString store = dir.filePath(QStringLiteral("rq.json"));
+
+    RenderQueue q;
+    q.setStorePath(store);
+    QCOMPARE(q.jobs().size(), 0);
+
+    q.enqueue(QStringLiteral("a.mp4"), QStringLiteral("1080p60"), QStringLiteral("Proj"));
+    q.enqueue(QStringLiteral("b.mp4"), QStringLiteral("1080p60"), QStringLiteral("Proj"));
+    QCOMPARE(q.jobs().size(), 2);
+    QCOMPARE(q.countOfState(RenderJob::Active), 1);    // first promoted immediately
+    QCOMPARE(q.countOfState(RenderJob::Pending), 1);
+
+    for (int i = 0; i < 100 && q.countOfState(RenderJob::Completed) == 0; ++i)
+        q.advanceForTest();
+    QCOMPARE(q.countOfState(RenderJob::Completed), 1);
+    QCOMPARE(q.countOfState(RenderJob::Active), 1);     // second promoted
+
+    // Reload from the same store: completed history survives; active requeues.
+    RenderQueue q2;
+    q2.setStorePath(store);
+    QCOMPARE(q2.jobs().size(), 2);
+    QCOMPARE(q2.countOfState(RenderJob::Completed), 1);
 }
 
 QTEST_MAIN(MalloyModelTests)

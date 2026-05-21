@@ -6,6 +6,7 @@
 #include "project/ClipsRegistry.h"
 #include "project/ProjectRegistry.h"
 #include "project/MediaRegistry.h"
+#include "recording/RenderQueue.h"
 
 #include <QComboBox>
 #include <QFrame>
@@ -419,7 +420,8 @@ void ProjectsWorkspace::rebuild() {
 }
 
 // ─────────────────────────── Render Queue ─────────────────────────────────
-RenderWorkspace::RenderWorkspace(QWidget* parent) : QWidget(parent) {
+RenderWorkspace::RenderWorkspace(RenderQueue* queue, QWidget* parent)
+    : QWidget(parent), m_queue(queue) {
     auto* col = new QVBoxLayout(this);
     col->setContentsMargins(0, 0, 0, 0);
     col->setSpacing(0);
@@ -427,16 +429,47 @@ RenderWorkspace::RenderWorkspace(QWidget* parent) : QWidget(parent) {
     auto* toolbar = new QWidget(this);
     auto* tb = new QHBoxLayout(toolbar);
     tb->setContentsMargins(16, 12, 16, 12); tb->setSpacing(8);
-    for (const QString& t : {tr("Active 2"), tr("Pending 3"), tr("Completed 47"), tr("Failed 1")}) {
-        auto* b = new QPushButton(t);
-        Theme::setVariant(b, QStringLiteral("ghost"));
-        tb->addWidget(b);
-    }
+    m_countLabel = lbl(QString(), QStringLiteral("mute"), 11, false, true);
+    tb->addWidget(m_countLabel);
     tb->addStretch();
-    tb->addWidget(new QPushButton(Icons::icon(QStringLiteral("plus"), Theme::Text, 12), tr(" New render")));
+    auto* pause = new QPushButton(tr("Pause queue"));
+    Theme::setVariant(pause, QStringLiteral("ghost"));
+    pause->setCheckable(true);
+    connect(pause, &QPushButton::toggled, this, [this, pause](bool on) {
+        if (m_queue) m_queue->setPaused(on);
+        pause->setText(on ? tr("Resume queue") : tr("Pause queue"));
+    });
+    tb->addWidget(pause);
+    auto* neu = new QPushButton(Icons::icon(QStringLiteral("plus"), Theme::Text, 12), tr(" New render"));
+    connect(neu, &QPushButton::clicked, this, [this] {
+        if (!m_queue) return;
+        static int n = 1;
+        m_queue->enqueue(tr("Highlight reel %1.mp4").arg(n++),
+                         tr("1080p60 · NVENC · 24 Mb/s"), tr("Spire of the Hollow Sun"),
+                         QStringLiteral("D:\\Renders\\Spire\\"));
+    });
+    tb->addWidget(neu);
     col->addWidget(toolbar);
     auto* div = new QFrame; div->setObjectName(QStringLiteral("divider")); div->setFixedHeight(1);
     col->addWidget(div);
+
+    m_scroll = new QScrollArea(this);
+    m_scroll->setWidgetResizable(true);
+    m_scroll->setFrameShape(QFrame::NoFrame);
+    col->addWidget(m_scroll, 1);
+
+    if (m_queue) connect(m_queue, &RenderQueue::changed, this, &RenderWorkspace::rebuild);
+    rebuild();
+}
+
+void RenderWorkspace::rebuild() {
+    using S = RenderJob::State;
+    const QVector<RenderJob> jobs = m_queue ? m_queue->jobs() : QVector<RenderJob>{};
+    if (m_countLabel && m_queue) {
+        m_countLabel->setText(tr("%1 active · %2 pending · %3 done · %4 failed")
+            .arg(m_queue->countOfState(S::Active)).arg(m_queue->countOfState(S::Pending))
+            .arg(m_queue->countOfState(S::Completed)).arg(m_queue->countOfState(S::Failed)));
+    }
 
     auto* body = new QWidget;
     body->setObjectName(QStringLiteral("workspaceBody"));
@@ -444,65 +477,117 @@ RenderWorkspace::RenderWorkspace(QWidget* parent) : QWidget(parent) {
     bv->setContentsMargins(16, 16, 16, 16);
     bv->setSpacing(12);
 
-    bv->addWidget(Theme::makeSectionHeader(tr("Active")));
-    auto activeJob = [&](const QString& name, const QString& meta, int pct, const QString& eta) {
+    auto sectionFor = [&](S st) -> QVector<RenderJob> {
+        QVector<RenderJob> out;
+        for (const RenderJob& j : jobs) if (j.state == st) out << j;
+        return out;
+    };
+
+    const bool empty = jobs.isEmpty();
+    if (empty) {
+        auto* v = bv;
+        v->addStretch();
+        auto* icon = new QLabel; icon->setPixmap(Icons::pixmap(QStringLiteral("render"), Theme::TextFaint, 40));
+        icon->setAlignment(Qt::AlignCenter);
+        v->addWidget(icon, 0, Qt::AlignHCenter);
+        auto* t = lbl(tr("No renders queued"), QString(), 16, true); t->setAlignment(Qt::AlignCenter);
+        v->addWidget(t, 0, Qt::AlignHCenter);
+        auto* s = lbl(tr("Use “New render” to queue one. Jobs progress here and persist across launches."),
+                      QStringLiteral("mute"), 12); s->setAlignment(Qt::AlignCenter);
+        v->addWidget(s, 0, Qt::AlignHCenter);
+        v->addStretch();
+        m_scroll->setWidget(body);
+        return;
+    }
+
+    // Active
+    const auto active = sectionFor(S::Active);
+    const auto pending = sectionFor(S::Pending);
+    if (!active.isEmpty() || !pending.isEmpty())
+        bv->addWidget(Theme::makeSectionHeader(tr("Active")));
+    for (const RenderJob& j : active) {
         auto* card = new QFrame; card->setObjectName(QStringLiteral("card"));
         auto* cv = new QVBoxLayout(card); cv->setContentsMargins(14, 14, 14, 14); cv->setSpacing(8);
         auto* top = new QHBoxLayout;
         auto* tv = new QVBoxLayout; tv->setSpacing(2);
-        tv->addWidget(lbl(name, QString(), 13, true));
-        tv->addWidget(lbl(meta, QStringLiteral("mute"), 11, false, true));
+        tv->addWidget(lbl(j.name, QString(), 13, true));
+        tv->addWidget(lbl(QStringLiteral("%1 · %2").arg(j.project, j.target), QStringLiteral("mute"), 11, false, true));
         top->addLayout(tv, 1);
-        auto* pv = new QVBoxLayout; pv->setSpacing(0);
-        pv->addWidget(lbl(QStringLiteral("%1%").arg(pct), QStringLiteral("accent"), 14, true, true), 0, Qt::AlignRight);
-        pv->addWidget(lbl(tr("ETA %1").arg(eta), QStringLiteral("mute"), 11, false, true), 0, Qt::AlignRight);
-        top->addLayout(pv);
+        top->addWidget(lbl(QStringLiteral("%1%").arg(j.progress), QStringLiteral("accent"), 14, true, true));
+        auto* cancel = new QPushButton(Icons::icon(QStringLiteral("close"), Theme::TextDim, 11), QString());
+        Theme::setVariant(cancel, QStringLiteral("ghost")); cancel->setFixedWidth(26);
+        const QString id = j.id;
+        connect(cancel, &QPushButton::clicked, this, [this, id] { if (m_queue) m_queue->cancel(id); });
+        top->addWidget(cancel);
         cv->addLayout(top);
-        auto* bar = new QProgressBar; bar->setRange(0, 100); bar->setValue(pct);
+        auto* bar = new QProgressBar; bar->setRange(0, 100); bar->setValue(j.progress);
         bar->setTextVisible(false); bar->setFixedHeight(6);
         cv->addWidget(bar);
-        return card;
-    };
-    bv->addWidget(activeJob(tr("Ep 14 — Highlights.mp4"), tr("Spire · 1080p60 · NVENC · 24 Mb/s"), 64, QStringLiteral("3:42")));
-    bv->addWidget(activeJob(tr("Ep 14 — Full episode.mp4"), tr("Spire · 1080p60 · NVENC · 18 Mb/s"), 12, QStringLiteral("14:08")));
-
-    bv->addWidget(Theme::makeSectionHeader(tr("Failed")));
-    auto* fail = new QFrame; fail->setObjectName(QStringLiteral("card"));
-    fail->setStyleSheet(QStringLiteral("QFrame#card{background: rgba(252,68,71,0.06); border-color: rgba(252,68,71,0.45);}"));
-    auto* fh = new QHBoxLayout(fail); fh->setContentsMargins(12, 12, 12, 12); fh->setSpacing(10);
-    auto* fi = new QLabel; fi->setPixmap(Icons::pixmap(QStringLiteral("alert"), Theme::RecHi, 16));
-    fh->addWidget(fi);
-    auto* fv = new QVBoxLayout; fv->setSpacing(2);
-    fv->addWidget(lbl(tr("Ep 14 — Director's cut.mp4"), QString(), 13, true));
-    fv->addWidget(lbl(tr("ffmpeg exited with code 234 · libx264 failed at frame 412,108"), QStringLiteral("mute"), 11, false, true));
-    fh->addLayout(fv, 1);
-    fh->addWidget(ghost(tr("View log")));
-    fh->addWidget(new QPushButton(Icons::icon(QStringLiteral("refresh"), Theme::Text, 11), tr(" Retry")));
-    bv->addWidget(fail);
-
-    bv->addWidget(Theme::makeSectionHeader(tr("Recently completed")));
-    auto* done = new QFrame; done->setObjectName(QStringLiteral("card"));
-    auto* dv = new QVBoxLayout(done); dv->setContentsMargins(0, 0, 0, 0); dv->setSpacing(0);
-    struct D { QString name, dur, size, when; };
-    const QVector<D> dones = {
-        {tr("Ep 13 — Highlights.mp4"), QStringLiteral("22:18 · 1080p60"), QStringLiteral("1.4 GB"), tr("Yesterday 10:42 PM")},
-        {tr("Ep 13 — Full.mp4"), QStringLiteral("1:51:00 · 1080p60"), QStringLiteral("4.2 GB"), tr("Yesterday 10:08 PM")},
-        {tr("Vlog — Week 21.mp4"), QStringLiteral("14:12 · 1080p30"), QStringLiteral("880 MB"), tr("Mon 3:18 PM")},
-    };
-    for (int r = 0; r < dones.size(); ++r) {
-        if (r) { auto* d2 = new QFrame; d2->setObjectName(QStringLiteral("divider")); d2->setFixedHeight(1); dv->addWidget(d2); }
-        const D& d = dones[r];
-        auto* w = new QWidget; auto* h = new QHBoxLayout(w); h->setContentsMargins(12, 10, 12, 10); h->setSpacing(10);
-        auto* ck = new QLabel; ck->setPixmap(Icons::pixmap(QStringLiteral("check"), Theme::Success, 14));
-        h->addWidget(ck);
-        h->addWidget(lbl(d.name, QString(), 13));
-        h->addStretch();
-        h->addWidget(lbl(d.dur, QStringLiteral("mute"), 11, false, true));
-        h->addWidget(lbl(d.size, QStringLiteral("mute"), 11, false, true));
-        h->addWidget(lbl(d.when, QStringLiteral("mute"), 11));
-        dv->addWidget(w);
+        bv->addWidget(card);
     }
-    bv->addWidget(done);
+
+    // Pending
+    for (const RenderJob& j : pending) {
+        auto* w = new QWidget; w->setObjectName(QStringLiteral("row")); w->setFixedHeight(40);
+        auto* h = new QHBoxLayout(w); h->setContentsMargins(12, 0, 12, 0); h->setSpacing(10);
+        h->addWidget(lbl(j.name, QString(), 13));
+        h->addWidget(lbl(j.target, QStringLiteral("mute"), 11, false, true));
+        h->addStretch();
+        h->addWidget(lbl(tr("queued"), QStringLiteral("mute"), 11));
+        auto* cancel = new QPushButton(Icons::icon(QStringLiteral("trash"), Theme::TextDim, 11), QString());
+        Theme::setVariant(cancel, QStringLiteral("ghost")); cancel->setFixedWidth(26);
+        const QString id = j.id;
+        connect(cancel, &QPushButton::clicked, this, [this, id] { if (m_queue) m_queue->cancel(id); });
+        h->addWidget(cancel);
+        bv->addWidget(w);
+    }
+
+    // Failed
+    const auto failed = sectionFor(S::Failed);
+    if (!failed.isEmpty()) bv->addWidget(Theme::makeSectionHeader(tr("Failed")));
+    for (const RenderJob& j : failed) {
+        auto* card = new QFrame; card->setObjectName(QStringLiteral("card"));
+        card->setStyleSheet(QStringLiteral("QFrame#card{background: rgba(252,68,71,0.06); border-color: rgba(252,68,71,0.45);}"));
+        auto* h = new QHBoxLayout(card); h->setContentsMargins(12, 12, 12, 12); h->setSpacing(10);
+        auto* fi = new QLabel; fi->setPixmap(Icons::pixmap(QStringLiteral("alert"), Theme::RecHi, 16));
+        h->addWidget(fi);
+        auto* fv = new QVBoxLayout; fv->setSpacing(2);
+        fv->addWidget(lbl(j.name, QString(), 13, true));
+        fv->addWidget(lbl(j.error.isEmpty() ? tr("Render failed") : j.error, QStringLiteral("mute"), 11, false, true));
+        h->addLayout(fv, 1);
+        auto* retry = new QPushButton(Icons::icon(QStringLiteral("refresh"), Theme::Text, 11), tr(" Retry"));
+        const QString id = j.id;
+        connect(retry, &QPushButton::clicked, this, [this, id] { if (m_queue) m_queue->retry(id); });
+        h->addWidget(retry);
+        bv->addWidget(card);
+    }
+
+    // Completed
+    const auto done = sectionFor(S::Completed);
+    if (!done.isEmpty()) {
+        auto* hdr = new QHBoxLayout;
+        hdr->addWidget(Theme::makeSectionHeader(tr("Recently completed")), 1);
+        auto* clear = new QPushButton(tr("Clear")); Theme::setVariant(clear, QStringLiteral("ghost"));
+        connect(clear, &QPushButton::clicked, this, [this] { if (m_queue) m_queue->clearCompleted(); });
+        hdr->addWidget(clear);
+        bv->addLayout(hdr);
+        auto* cardd = new QFrame; cardd->setObjectName(QStringLiteral("card"));
+        auto* dv = new QVBoxLayout(cardd); dv->setContentsMargins(0, 0, 0, 0); dv->setSpacing(0);
+        for (int r = 0; r < done.size(); ++r) {
+            if (r) { auto* d2 = new QFrame; d2->setObjectName(QStringLiteral("divider")); d2->setFixedHeight(1); dv->addWidget(d2); }
+            const RenderJob& j = done[r];
+            auto* w = new QWidget; auto* h = new QHBoxLayout(w); h->setContentsMargins(12, 10, 12, 10); h->setSpacing(10);
+            auto* ck = new QLabel; ck->setPixmap(Icons::pixmap(QStringLiteral("check"), Theme::Success, 14));
+            h->addWidget(ck);
+            h->addWidget(lbl(j.name, QString(), 13));
+            h->addStretch();
+            h->addWidget(lbl(j.target, QStringLiteral("mute"), 11, false, true));
+            h->addWidget(lbl(j.finishedAt.toString(QStringLiteral("MMM d · h:mm AP")), QStringLiteral("mute"), 11));
+            dv->addWidget(w);
+        }
+        bv->addWidget(cardd);
+    }
+
     bv->addStretch();
-    col->addWidget(scrollArea(body), 1);
+    m_scroll->setWidget(body);
 }

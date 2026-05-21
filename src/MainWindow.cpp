@@ -32,6 +32,7 @@
 #include "project/ClipsRegistry.h"
 #include "project/ProjectRegistry.h"
 #include "project/MediaRegistry.h"
+#include "recording/RenderQueue.h"
 
 #include <QAction>
 #include <QCloseEvent>
@@ -64,6 +65,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     m_clipsRegistry     = new ClipsRegistry(this);
     m_projectRegistry   = new ProjectRegistry(this);
     m_mediaRegistry     = new MediaRegistry(this);
+    m_renderQueue       = new RenderQueue(this);
     m_outputSettings    = OutputSettings::load();
     m_streamSettings    = StreamSettings::load();
     m_captureStatus     = m_captureController->statusSummary();
@@ -186,7 +188,8 @@ void MainWindow::setupUi() {
     });
     connect(projects, &ProjectsWorkspace::newRequested, this, &MainWindow::newProject);
     m_shell->addWorkspace(QStringLiteral("projects"), projects);
-    m_shell->addWorkspace(QStringLiteral("render"), new RenderWorkspace(this));
+    m_shell->addWorkspace(QStringLiteral("render"), new RenderWorkspace(m_renderQueue, this));
+    connect(m_renderQueue, &RenderQueue::changed, this, [this] { updateShellMode(); });
     m_shell->addWorkspace(QStringLiteral("ai"), new AILabWorkspace(this));
     m_settings = new SettingsWorkspace(this);
     connect(m_settings, &SettingsWorkspace::recordingSettingsApplied, this, [this] {
@@ -732,8 +735,9 @@ void MainWindow::updateShellMode() {
     if (!m_shell) return;
     const bool streaming = m_media && m_media->isStreaming();
     StudioStatusBar::Mode mode = StudioStatusBar::Mode::Idle;
-    if (streaming)                              mode = StudioStatusBar::Mode::Streaming;
-    else if (m_media && m_media->isRecording()) mode = StudioStatusBar::Mode::Recording;
+    if (streaming)                                       mode = StudioStatusBar::Mode::Streaming;
+    else if (m_media && m_media->isRecording())          mode = StudioStatusBar::Mode::Recording;
+    else if (m_renderQueue && m_renderQueue->hasActive()) mode = StudioStatusBar::Mode::Rendering;
     m_shell->status()->setMode(mode);
     if (m_streamStudio) m_streamStudio->setLive(streaming);
     if (m_dashboard) {

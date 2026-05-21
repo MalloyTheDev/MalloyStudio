@@ -60,6 +60,8 @@ set(MALLOY_CORE_SOURCES
     src/project/ProjectRegistry.h
     src/project/MediaRegistry.cpp
     src/project/MediaRegistry.h
+    src/recording/RenderQueue.cpp
+    src/recording/RenderQueue.h
     src/model/Canvas.h
     src/model/FilterEffect.cpp
     src/model/FilterEffect.h
