@@ -351,6 +351,9 @@ QListWidget#paletteList { background: transparent; border: none; padding: 6px; }
 QListWidget#paletteList::item { padding: 6px 10px; border-radius: 6px; color: #aeb1b8; }
 QListWidget#paletteList::item:selected { background: rgba(87,155,255,18%); color: #f7f7f7; }
 
+/* Onboarding wizard card */
+QFrame#onboardCard { background-color: #141518; border: 1px solid #414449; border-radius: 14px; }
+
 /* Hero / placeholder helpers */
 QLabel#heroTitle { font-size: 28px; font-weight: 600; color: #f7f7f7; }
 QFrame#placeholder {

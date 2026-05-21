@@ -21,6 +21,7 @@ class AppShell;
 class Dashboard;
 class StreamingWorkspace;
 class CommandPalette;
+class OnboardingOverlay;
 class QAction;
 class QPushButton;
 class QUndoStack;
@@ -61,6 +62,7 @@ private:
     Dashboard*         m_dashboard         = nullptr;
     StreamingWorkspace* m_streamStudio     = nullptr;
     CommandPalette*    m_palette           = nullptr;
+    OnboardingOverlay* m_onboarding        = nullptr;
     PreviewWidget*     m_preview           = nullptr;  // Program (TimedFrameSource)
     PreviewWidget*     m_stagePreview      = nullptr;  // Staged (studio mode only)
     QPushButton*       m_transitionBtn     = nullptr;  // between staged and program

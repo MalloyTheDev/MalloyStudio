@@ -76,6 +76,8 @@ set(MALLOY_UI_SOURCES
     src/ui/IconFactory.h
     src/ui/CommandPalette.cpp
     src/ui/CommandPalette.h
+    src/ui/OnboardingOverlay.cpp
+    src/ui/OnboardingOverlay.h
     src/ui/shell/NavModel.h
     src/ui/shell/IconRail.cpp
     src/ui/shell/IconRail.h

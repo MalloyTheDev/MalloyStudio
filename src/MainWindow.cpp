@@ -13,6 +13,7 @@
 #include "ui/shell/StudioStatusBar.h"
 #include "ui/shell/NavModel.h"
 #include "ui/CommandPalette.h"
+#include "ui/OnboardingOverlay.h"
 #include "ui/workspaces/RecordingWorkspace.h"
 #include "ui/workspaces/StreamingWorkspace.h"
 #include "ui/workspaces/SettingsWorkspace.h"
@@ -43,6 +44,7 @@
 #include <QSettings>
 #include <QShortcut>
 #include <QStandardPaths>
+#include <QTimer>
 #include <QUndoStack>
 #include <QVBoxLayout>
 
@@ -184,6 +186,8 @@ void MainWindow::setupUi() {
         if (id == QLatin1String("record")) updateStatusBar();
     });
 
+    m_onboarding = new OnboardingOverlay(m_shell);
+
     // Command palette (Ctrl+K) overlaying the shell.
     m_palette = new CommandPalette(m_shell);
     {
@@ -209,12 +213,22 @@ void MainWindow::setupUi() {
         cmds.push_back({QStringLiteral("proj.save"), tr("Save Project"),
                         tr("Project · Ctrl+S"), QStringLiteral("download"),
                         [this] { saveProject(); }});
+        cmds.push_back({QStringLiteral("setup"), tr("Run Setup Wizard"),
+                        tr("Help"), QStringLiteral("sparkle"),
+                        [this] { m_onboarding->openWizard(); }});
         m_palette->setCommands(cmds);
     }
     connect(m_shell->header(), &WorkspaceHeader::commandPaletteRequested,
             this, [this] { m_palette->openPalette(); });
     auto* paletteSc = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_K), this);
     connect(paletteSc, &QShortcut::activated, this, [this] { m_palette->openPalette(); });
+
+    // First-run setup wizard (shows once; relaunch from Help or the palette).
+    QSettings onboardSettings;
+    if (!onboardSettings.value(QStringLiteral("onboarding/completed"), false).toBool()) {
+        onboardSettings.setValue(QStringLiteral("onboarding/completed"), true);
+        QTimer::singleShot(0, this, [this] { m_onboarding->openWizard(); });
+    }
 }
 
 void MainWindow::setupMenus() {
@@ -309,6 +323,9 @@ void MainWindow::setupMenus() {
     });
 
     auto* helpMenu = menuBar()->addMenu(tr("&Help"));
+    auto* setupAction = helpMenu->addAction(tr("Setup &Wizard…"));
+    connect(setupAction, &QAction::triggered, this, [this] { m_onboarding->openWizard(); });
+    helpMenu->addSeparator();
     auto* aboutAction = helpMenu->addAction(tr("&About MalloyStudio"));
     connect(aboutAction, &QAction::triggered, this, [this] {
         QMessageBox::about(this, tr("About MalloyStudio"),
