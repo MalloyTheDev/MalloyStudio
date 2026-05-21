@@ -1,8 +1,11 @@
 #pragma once
 
+#include "recording/StreamSettings.h"
+
 #include <QWidget>
 
 class MeterBar;
+class QComboBox;
 class QLabel;
 class QLineEdit;
 class QPushButton;
@@ -26,6 +29,14 @@ private:
     QWidget* buildCenter();
     QWidget* buildRail();
     void tick();
+    void loadMeta();      // populate fields from StreamSettings
+    void persistMeta();   // write title/category/tags back to StreamSettings
+
+    StreamSettings m_settings;
+    QLineEdit*   m_titleEdit = nullptr;
+    QComboBox*   m_catCombo = nullptr;
+    QPushButton* m_destBtn = nullptr;
+    QWidget*     m_tagsHost = nullptr;
 
     bool m_live = false;
     int  m_elapsed = 0;

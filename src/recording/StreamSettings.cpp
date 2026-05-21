@@ -96,6 +96,9 @@ StreamSettings StreamSettings::load() {
     o.customUrl   = s.value(QStringLiteral("stream/customUrl"),   o.customUrl  ).toString();
     o.bitrateKbps = s.value(QStringLiteral("stream/bitrateKbps"), o.bitrateKbps).toInt();
     o.keyframeSec = s.value(QStringLiteral("stream/keyframeSec"), o.keyframeSec).toInt();
+    o.title       = s.value(QStringLiteral("stream/title"),    o.title).toString();
+    o.category    = s.value(QStringLiteral("stream/category"), o.category).toString();
+    o.tags        = s.value(QStringLiteral("stream/tags"),     o.tags).toStringList();
     o.streamKey   = loadStreamKey();
     return o;
 }
@@ -106,5 +109,8 @@ void StreamSettings::save() const {
     s.setValue(QStringLiteral("stream/customUrl"),   customUrl);
     s.setValue(QStringLiteral("stream/bitrateKbps"), bitrateKbps);
     s.setValue(QStringLiteral("stream/keyframeSec"), keyframeSec);
+    s.setValue(QStringLiteral("stream/title"),    title);
+    s.setValue(QStringLiteral("stream/category"), category);
+    s.setValue(QStringLiteral("stream/tags"),     tags);
     saveStreamKey(streamKey);
 }

@@ -1,5 +1,6 @@
 #pragma once
 #include <QString>
+#include <QStringList>
 
 // App-wide RTMP streaming settings.
 //
@@ -18,6 +19,12 @@ struct StreamSettings {
     QString customUrl     = QStringLiteral("rtmp://your-server.example.com/live/{key}");  // template for Service::Custom
     int     bitrateKbps   = 4500;                 // 1080p60 sweet spot for Twitch
     int     keyframeSec   = 2;                    // Twitch/YouTube hard requirement: ≤4s
+
+    // Broadcast metadata shown in the Streaming Studio (persisted, not yet sent
+    // to any platform API — that integration is future work).
+    QString     title;
+    QString     category;
+    QStringList tags;
 
     // Round-trip through QSettings (service/customUrl/bitrate/keyframe) and
     // Credential Manager (streamKey).

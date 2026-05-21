@@ -52,12 +52,52 @@ StreamingWorkspace::StreamingWorkspace(QWidget* parent) : QWidget(parent) {
     row->addWidget(buildCenter(), 1);
     row->addWidget(buildRail());
 
+    loadMeta();
+    connect(m_titleEdit, &QLineEdit::editingFinished, this, &StreamingWorkspace::persistMeta);
+    connect(m_catCombo->lineEdit(), &QLineEdit::editingFinished, this, &StreamingWorkspace::persistMeta);
+    connect(m_catCombo, &QComboBox::activated, this, [this](int) { persistMeta(); });
+
     m_timer = new QTimer(this);
     m_timer->setInterval(100);
     connect(m_timer, &QTimer::timeout, this, &StreamingWorkspace::tick);
     m_timer->start();
 
     setLive(false);
+}
+
+namespace {
+QStringList defaultStreamTags() {
+    return {QObject::tr("Souls-like"), QObject::tr("No-hit"),
+            QObject::tr("Phase 3"), QObject::tr("Late-night")};
+}
+}
+
+void StreamingWorkspace::loadMeta() {
+    m_settings = StreamSettings::load();
+    m_titleEdit->setText(m_settings.title.isEmpty()
+        ? tr("Spire — No-hit attempt night 4 · Phase 3 grind") : m_settings.title);
+    if (!m_settings.category.isEmpty()) m_catCombo->setCurrentText(m_settings.category);
+    m_destBtn->setText(QStringLiteral("%1  ▾").arg(StreamSettings::displayName(m_settings.service)));
+
+    QStringList tags = m_settings.tags.isEmpty() ? defaultStreamTags() : m_settings.tags;
+    if (auto* h = qobject_cast<QHBoxLayout*>(m_tagsHost->layout())) {
+        while (QLayoutItem* it = h->takeAt(0)) {
+            if (it->widget()) it->widget()->deleteLater();
+            delete it;
+        }
+        for (const QString& t : tags) h->addWidget(Theme::makeTag(t));
+        h->addStretch();
+    }
+}
+
+void StreamingWorkspace::persistMeta() {
+    // Reload first so we never clobber a stream key changed elsewhere.
+    StreamSettings s = StreamSettings::load();
+    s.title    = m_titleEdit->text();
+    s.category = m_catCombo->currentText();
+    if (s.tags.isEmpty()) s.tags = defaultStreamTags();
+    s.save();
+    m_settings = s;
 }
 
 QWidget* StreamingWorkspace::buildCenter() {
@@ -70,9 +110,9 @@ QWidget* StreamingWorkspace::buildCenter() {
     auto* dest = new QHBoxLayout;
     dest->setSpacing(8);
     dest->addWidget(Theme::makeTag(tr("Destination"), QStringLiteral("accent")));
-    auto* twitch = new QPushButton(tr("Twitch · /malloy_live  ▾"));
-    twitch->setCursor(Qt::PointingHandCursor);
-    dest->addWidget(twitch);
+    m_destBtn = new QPushButton(tr("Twitch · /malloy_live  ▾"));
+    m_destBtn->setCursor(Qt::PointingHandCursor);
+    dest->addWidget(m_destBtn);
     auto* add = new QPushButton(Icons::icon(QStringLiteral("plus"), Theme::TextDim, 12), tr(" Add destination"));
     Theme::setVariant(add, QStringLiteral("ghost"));
     dest->addWidget(add);
@@ -94,21 +134,23 @@ QWidget* StreamingWorkspace::buildCenter() {
     auto* left = new QVBoxLayout;
     left->setSpacing(6);
     left->addWidget(lbl(tr("STREAM TITLE"), QStringLiteral("mute"), 11));
-    auto* title = new QLineEdit(tr("Spire — No-hit attempt night 4 · Phase 3 grind"));
-    left->addWidget(title);
+    m_titleEdit = new QLineEdit;
+    left->addWidget(m_titleEdit);
     auto* selers = new QHBoxLayout;
     selers->setSpacing(8);
-    auto* cat = new QComboBox; cat->addItem(tr("Category · Spire of the Hollow Sun"));
+    m_catCombo = new QComboBox;
+    m_catCombo->setEditable(true);
+    m_catCombo->addItems({tr("Spire of the Hollow Sun"), tr("Just Chatting"),
+                          tr("Software & Game Dev"), tr("Retro")});
     auto* lang = new QComboBox; lang->addItem(tr("Language · English")); lang->setFixedWidth(180);
-    selers->addWidget(cat, 1);
+    selers->addWidget(m_catCombo, 1);
     selers->addWidget(lang);
     left->addLayout(selers);
-    auto* tags = new QHBoxLayout;
+    m_tagsHost = new QWidget;
+    auto* tags = new QHBoxLayout(m_tagsHost);
+    tags->setContentsMargins(0, 0, 0, 0);
     tags->setSpacing(4);
-    for (const QString& t : {tr("Souls-like"), tr("No-hit"), tr("Phase 3"), tr("Late-night")})
-        tags->addWidget(Theme::makeTag(t));
-    tags->addStretch();
-    left->addLayout(tags);
+    left->addWidget(m_tagsHost);
     gh->addLayout(left, 1);
 
     auto* right = new QVBoxLayout;
