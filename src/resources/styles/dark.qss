@@ -25,6 +25,12 @@ QWidget {
     font-size: 13px;
 }
 QMainWindow, QDialog { background-color: #0d0e11; }
+/* Labels paint no background of their own — the universal QWidget rule above
+   would otherwise bleed #0d0e11 into every QLabel, showing as a dark box wherever
+   a label sits on a lighter card/button (e.g. dashboard quick actions). Tag pills
+   and section headers re-assert their own background via more-specific selectors.
+   Declared before QToolTip so the tooltip's own background still wins by order. */
+QLabel { background: transparent; }
 QToolTip {
     background-color: #141518;
     color: #f7f7f7;

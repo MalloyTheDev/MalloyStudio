@@ -229,6 +229,11 @@ QWidget* Dashboard::buildQuickActions() {
         auto* b = new QPushButton;
         b->setObjectName(QStringLiteral("actionButton"));
         b->setCursor(Qt::PointingHandCursor);
+        // QPushButton computes its size hint from its (empty) text, ignoring the
+        // nested layout below — so a grid cell squeezes the icon-chip + two text
+        // lines until the title and subtitle overlap. Pin a content-sized height
+        // (same remedy as the onboarding optionCard, which shares this style).
+        b->setMinimumHeight(52);
         auto* h = new QHBoxLayout(b);
         h->setContentsMargins(8, 8, 8, 8);
         h->setSpacing(12);
