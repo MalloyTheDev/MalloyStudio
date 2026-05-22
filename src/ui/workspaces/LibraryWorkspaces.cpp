@@ -90,11 +90,17 @@ ClipsWorkspace::ClipsWorkspace(ClipsRegistry* registry, QWidget* parent)
     av->addWidget(filterRow(QStringLiteral("folder"), tr("Archived"), 0));
     av->addWidget(Theme::makeSectionHeader(tr("Tags")));
     auto* tagWrap = new QWidget;
-    auto* tg = new QHBoxLayout(tagWrap);
-    tg->setContentsMargins(12, 0, 12, 0); tg->setSpacing(4);
-    for (const QString& t : {tr("no-hit"), tr("highlight"), tr("fail"), tr("reveal")})
-        tg->addWidget(Theme::makeTag(t));
-    tg->addStretch();
+    auto* tg = new QGridLayout(tagWrap);
+    tg->setContentsMargins(12, 0, 12, 0);
+    tg->setHorizontalSpacing(4); tg->setVerticalSpacing(4);
+    // The four pills don't fit on one row in this 240px sidebar — a single
+    // QHBoxLayout compresses the widest ("HIGHLIGHT") until its centered text
+    // clips mid-word. Wrap to a 2×2 grid; a trailing stretch column keeps the
+    // pills hugging the left at their natural width.
+    const QString tagNames[] = {tr("no-hit"), tr("highlight"), tr("fail"), tr("reveal")};
+    for (int i = 0; i < 4; ++i)
+        tg->addWidget(Theme::makeTag(tagNames[i]), i / 2, i % 2, Qt::AlignLeft);
+    tg->setColumnStretch(2, 1);
     av->addWidget(tagWrap);
     av->addStretch();
     row->addWidget(aside);

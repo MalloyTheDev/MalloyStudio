@@ -140,19 +140,23 @@ AudioMixerPanel::Strip AudioMixerPanel::makeStrip(const QString& id, const Audio
     s.name->setFont(f);
 
     s.meter = new VuMeter(s.root);
-    s.meter->setMinimumWidth(120);
+    // Compact minimums: this strip lives in a ~340px-wide sidebar rail, so the
+    // widths must sum to less than that or the QHBoxLayout compresses past the
+    // minimums and the sliders overlap the name label. The meter/volume stretch
+    // to fill whatever space remains, so they still grow on a wider layout.
+    s.meter->setMinimumWidth(36);
 
     s.volume = new QSlider(Qt::Horizontal, s.root);
     s.volume->setRange(0, 150); // 0..150 maps to 0.0..1.5
     s.volume->setValue(static_cast<int>(in.volume * 100.0f));
-    s.volume->setMinimumWidth(80);
+    s.volume->setMinimumWidth(48);
     s.volume->setToolTip(tr("Volume (0–150 %)"));
 
     // Pan: -100..+100 maps to -1.0..+1.0; tick at center.
     s.pan = new QSlider(Qt::Horizontal, s.root);
     s.pan->setRange(-100, 100);
     s.pan->setValue(static_cast<int>(in.pan * 100.0f));
-    s.pan->setFixedWidth(80);
+    s.pan->setFixedWidth(52);
     s.pan->setToolTip(tr("Pan  ◄ L──C──R ►"));
     s.pan->setTickPosition(QSlider::TicksBelow);
     s.pan->setTickInterval(100);
