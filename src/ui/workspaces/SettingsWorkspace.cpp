@@ -10,6 +10,7 @@
 #include <QFileDialog>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QKeySequenceEdit>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -172,6 +173,9 @@ SettingsWorkspace::SettingsWorkspace(QWidget* parent) : QWidget(parent) {
         auto* it = new QListWidgetItem(Icons::icon(g.icon, Theme::TextMute, 14), g.label, nav);
         it->setSizeHint(QSize(0, 34));
     }
+    // Dim the AI placeholders entry — it's a preview with no engine behind it.
+    if (auto* aiItem = nav->item(groups.size() - 1))
+        aiItem->setForeground(Theme::TextMute);
     auto* navWrap = new QWidget(this);
     navWrap->setObjectName(QStringLiteral("recSideCol"));
     auto* nw = new QVBoxLayout(navWrap);
@@ -183,13 +187,18 @@ SettingsWorkspace::SettingsWorkspace(QWidget* parent) : QWidget(parent) {
     m_stack = new QStackedWidget(this);
     for (const G& g : groups) {
         QWidget* page = nullptr;
-        if (g.label == tr("Recording"))      page = buildRecordingPage();
-        else if (g.label == tr("General"))   page = buildGeneralPage();
-        else if (g.label == tr("Streaming")) page = buildStreamingPage();
-        else if (g.label == tr("Video"))     page = buildVideoPage();
-        else if (g.label == tr("Audio"))     page = buildAudioPage();
-        else if (g.label == tr("Storage"))   page = buildStoragePage();
-        else                                 page = buildGenericPage(g.label);
+        if (g.label == tr("Recording"))         page = buildRecordingPage();
+        else if (g.label == tr("General"))      page = buildGeneralPage();
+        else if (g.label == tr("Streaming"))    page = buildStreamingPage();
+        else if (g.label == tr("Video"))        page = buildVideoPage();
+        else if (g.label == tr("Audio"))        page = buildAudioPage();
+        else if (g.label == tr("Storage"))      page = buildStoragePage();
+        else if (g.label == tr("Hotkeys"))      page = buildHotkeysPage();
+        else if (g.label == tr("Performance"))  page = buildPerformancePage();
+        else if (g.label == tr("Appearance"))   page = buildAppearancePage();
+        else if (g.label == tr("Accounts"))     page = buildAccountsPage();
+        else if (g.label == tr("Experimental")) page = buildExperimentalPage();
+        else                                    page = buildAIPage();   // AI placeholders
         m_stack->addWidget(page);
     }
     row->addWidget(m_stack, 1);
@@ -583,26 +592,132 @@ QWidget* SettingsWorkspace::buildStoragePage() {
     return scroll;
 }
 
-QWidget* SettingsWorkspace::buildGenericPage(const QString& title) {
-    auto* page = new QWidget;
-    page->setObjectName(QStringLiteral("workspaceBody"));
-    auto* outer = new QHBoxLayout(page);
-    outer->setContentsMargins(24, 24, 24, 24);
-    auto* content = new QWidget;
-    content->setMaximumWidth(800);
-    auto* col = new QVBoxLayout(content);
-    col->setContentsMargins(0, 0, 0, 0);
-    col->setSpacing(12);
-    col->addWidget(lbl(title, QString(), 20, true));
-    col->addWidget(lbl(tr("This section follows the same Setting / Field / Hint pattern as Recording."),
-                       QStringLiteral("mute"), 13));
-    col->addWidget(settingsBlock(tr("Sample section"), {
-        {tr("Some option"), tr("Hint text under the control."), combo({tr("Option A"), tr("Option B")}, 220)},
-        {tr("Toggle option"), tr("Hint text."), check(true)},
+QWidget* SettingsWorkspace::buildHotkeysPage() {
+    QWidget* scroll = nullptr;
+    auto* col = makePage(&scroll, tr("Hotkeys"),
+                         tr("System-wide shortcuts — they fire even when MalloyStudio isn't focused."));
+    QSettings s;
+    struct HK { QString id, label, hint; };
+    const QVector<HK> hks = {
+        {QStringLiteral("record.toggle"),     tr("Start / stop recording"), tr("Toggles the recorder.")},
+        {QStringLiteral("stream.toggle"),     tr("Start / stop streaming"), tr("Toggles Go Live.")},
+        {QStringLiteral("replay.save"),        tr("Save replay clip"),       tr("Writes the last 30 s from the replay buffer.")},
+        {QStringLiteral("studio.transition"),  tr("Studio transition"),      tr("Pushes the staged scene to program.")},
+    };
+    QVector<Item> items;
+    for (const HK& hk : hks) {
+        auto* edit = new QKeySequenceEdit(
+            QKeySequence(s.value(QStringLiteral("hotkeys/%1").arg(hk.id)).toString()));
+        edit->setFixedWidth(200);
+        const QString id = hk.id;
+        connect(edit, &QKeySequenceEdit::keySequenceChanged, this,
+                [this, id](const QKeySequence& seq) { emit hotkeyChanged(id, seq); });
+        items.append({hk.label, hk.hint, edit});
+    }
+    col->addWidget(settingsBlock(tr("Global shortcuts"), items));
+    col->addStretch();
+    return scroll;
+}
+
+QWidget* SettingsWorkspace::buildPerformancePage() {
+    QWidget* scroll = nullptr;
+    auto* col = makePage(&scroll, tr("Performance"), tr("Resource usage and background work."));
+
+    auto* maxRenders = new QSpinBox;
+    maxRenders->setRange(1, 4);
+    maxRenders->setValue(QSettings().value(QStringLiteral("perf/maxRenders"), 1).toInt());
+    maxRenders->setFixedWidth(140);
+    connect(maxRenders, &QSpinBox::valueChanged, this,
+            [](int v) { QSettings().setValue(QStringLiteral("perf/maxRenders"), v); });
+
+    col->addWidget(settingsBlock(tr("Background work"), {
+        {tr("Process priority"), tr("Higher priority can reduce dropped frames while recording."),
+         prefCombo(QStringLiteral("perf/priority"), {tr("Normal"), tr("Above normal"), tr("High")}, 0)},
+        {tr("Concurrent render jobs"), tr("How many queued renders run at once."), maxRenders},
+        {tr("Pause renders while recording"), tr("Keep the encoder free during live capture."),
+         prefCheck(QStringLiteral("perf/pauseRendersWhileRecording"), true)},
     }));
     col->addStretch();
-    outer->addWidget(content, 1);
-    return page;
+    return scroll;
+}
+
+QWidget* SettingsWorkspace::buildAppearancePage() {
+    QWidget* scroll = nullptr;
+    auto* col = makePage(&scroll, tr("Appearance"), tr("Theme and interface density."));
+
+    auto* theme = combo({tr("Dark")}, 220);
+    theme->setEnabled(false);
+
+    col->addWidget(settingsBlock(tr("Theme"), {
+        {tr("Color theme"), tr("Only the dark theme ships today; more are planned."), theme},
+        {tr("Accent color"), tr("Used for highlights and primary buttons."),
+         prefCombo(QStringLiteral("appearance/accent"),
+                   {tr("Blue"), tr("Green"), tr("Purple"), tr("Amber")}, 0)},
+    }));
+    col->addWidget(settingsBlock(tr("Layout"), {
+        {tr("Compact density"), tr("Tighter padding for smaller screens."),
+         prefCheck(QStringLiteral("appearance/compact"), false)},
+        {tr("Reduce motion"), tr("Minimise meter and progress animations."),
+         prefCheck(QStringLiteral("appearance/reduceMotion"), false)},
+    }));
+    col->addStretch();
+    return scroll;
+}
+
+QWidget* SettingsWorkspace::buildAccountsPage() {
+    QWidget* scroll = nullptr;
+    auto* col = makePage(&scroll, tr("Accounts"), tr("Connected streaming platforms."));
+
+    const StreamSettings st = StreamSettings::load();
+    const bool twitchOn = !st.streamKey.isEmpty();
+    auto status = [](const QString& text, bool ok) {
+        auto* l = lbl(text, ok ? QStringLiteral("success") : QStringLiteral("mute"), 13);
+        l->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        return l;
+    };
+
+    col->addWidget(settingsBlock(tr("Platforms"), {
+        {tr("Twitch"), tr("Set the stream key in Edit ▸ Stream Settings."),
+         status(twitchOn ? tr("Stream key configured") : tr("Not connected"), twitchOn)},
+        {tr("YouTube"), tr("OAuth sign-in is planned."), status(tr("Not connected"), false)},
+    }));
+    col->addStretch();
+    return scroll;
+}
+
+QWidget* SettingsWorkspace::buildExperimentalPage() {
+    QWidget* scroll = nullptr;
+    auto* col = makePage(&scroll, tr("Experimental"), tr("Preview features that may change or break."));
+
+    col->addWidget(settingsBlock(tr("Feature flags"), {
+        {tr("Editor keyframes"), tr("Animate clip properties over time (preview)."),
+         prefCheck(QStringLiteral("experimental/editorKeyframes"), false)},
+        {tr("Hardware AV1 encoding"), tr("Use AV1 on supported GPUs (preview)."),
+         prefCheck(QStringLiteral("experimental/av1"), false)},
+        {tr("AI assist surfaces"), tr("Surface the AI Lab entry points (preview)."),
+         prefCheck(QStringLiteral("experimental/aiAssist"), false)},
+    }));
+    col->addStretch();
+    return scroll;
+}
+
+QWidget* SettingsWorkspace::buildAIPage() {
+    QWidget* scroll = nullptr;
+    auto* col = makePage(&scroll, tr("AI placeholders"), tr("Planned, not yet shipped."));
+
+    auto* note = lbl(tr("These surfaces are wired into the UI but have no engine behind them yet. "
+                        "They live in the AI Lab workspace as a preview of what's coming."),
+                     QStringLiteral("dim"), 13);
+    note->setWordWrap(true);
+    col->addWidget(note);
+
+    col->addWidget(settingsBlock(tr("Planned"), {
+        {tr("Smart clip detection"), tr("Auto-find highlights from gameplay audio and game events."), nullptr},
+        {tr("Auto subtitles & chapters"), tr("Whisper transcription with chapter markers."), nullptr},
+        {tr("Title & thumbnail ideas"), tr("Draft metadata from the session."), nullptr},
+    }));
+    col->addStretch();
+    return scroll;
 }
 
 void SettingsWorkspace::updateEncoderDerived() {

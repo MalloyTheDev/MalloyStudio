@@ -216,6 +216,11 @@ void MainWindow::setupUi() {
         m_audio->setLimiterThresholdDb(static_cast<float>(
             limiterSettings.value(QStringLiteral("audio/limiterThresholdDb"), -3.0).toDouble()));
     }
+    // Settings ▸ Hotkeys rebinds global shortcuts on the live HotkeyManager.
+    connect(m_settings, &SettingsWorkspace::hotkeyChanged, this,
+            [this](const QString& actionId, const QKeySequence& seq) {
+        if (m_hotkeys) m_hotkeys->setBinding(actionId, seq);
+    });
     m_shell->addWorkspace(QStringLiteral("settings"), m_settings);
 
     setCentralWidget(m_shell);

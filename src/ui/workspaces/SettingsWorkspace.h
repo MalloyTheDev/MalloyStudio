@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QKeySequence>
 #include <QWidget>
 
 class QCheckBox;
@@ -24,6 +25,9 @@ signals:
     // Master-bus limiter changed in Settings ▸ Audio. MainWindow applies it to
     // the live AudioController. thresholdDb is in dBFS (e.g. -3.0).
     void audioLimiterChanged(bool enabled, double thresholdDb);
+    // A global hotkey binding changed in Settings ▸ Hotkeys. MainWindow forwards
+    // it to HotkeyManager::setBinding (which persists + re-registers it).
+    void hotkeyChanged(const QString& actionId, const QKeySequence& seq);
 
 protected:
     void showEvent(QShowEvent* event) override;   // focus the section list on entry
@@ -35,7 +39,12 @@ private:
     QWidget* buildVideoPage();
     QWidget* buildAudioPage();
     QWidget* buildStoragePage();
-    QWidget* buildGenericPage(const QString& title);
+    QWidget* buildHotkeysPage();
+    QWidget* buildPerformancePage();
+    QWidget* buildAppearancePage();
+    QWidget* buildAccountsPage();
+    QWidget* buildExperimentalPage();
+    QWidget* buildAIPage();
     void loadRecordingSettings();
     void applyRecordingSettings();
     void updateEncoderDerived();   // rate-control/CRF follow the chosen encoder
