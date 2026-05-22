@@ -43,8 +43,9 @@ QPushButton* optionCard(const QString& icon, const QString& title, const QString
     b->setObjectName(QStringLiteral("actionButton"));
     b->setCheckable(true);
     b->setCursor(Qt::PointingHandCursor);
+    b->setFixedHeight(60);   // so a stretched grid cell can't distort the content
     auto* h = new QHBoxLayout(b);
-    h->setContentsMargins(12, 12, 12, 12); h->setSpacing(12);
+    h->setContentsMargins(12, 10, 12, 10); h->setSpacing(12);
     if (!icon.isEmpty()) {
         auto* chip = new QFrame; chip->setObjectName(QStringLiteral("iconChip")); chip->setFixedSize(32, 32);
         auto* cv = new QVBoxLayout(chip); cv->setContentsMargins(0, 0, 0, 0);
@@ -53,8 +54,12 @@ QPushButton* optionCard(const QString& icon, const QString& title, const QString
         h->addWidget(chip);
     }
     auto* tv = new QVBoxLayout; tv->setSpacing(0);
-    tv->addWidget(lbl(title, QString(), 13, true));
-    tv->addWidget(lbl(sub, QStringLiteral("mute"), 11));
+    // Single-line title/sub — the local lbl() enables wordWrap, which overlaps
+    // when stacked spacing-0 inside this button, so turn it off here.
+    auto* tl = lbl(title, QString(), 13, true);          tl->setWordWrap(false);
+    auto* sl = lbl(sub, QStringLiteral("mute"), 11);     sl->setWordWrap(false);
+    tv->addWidget(tl);
+    tv->addWidget(sl);
     h->addLayout(tv); h->addStretch();
     return b;
 }
@@ -149,6 +154,7 @@ OnboardingOverlay::OnboardingOverlay(QWidget* parent) : QWidget(parent) {
             g->addWidget(c, i / 2, i % 2);
             ++i;
         }
+        g->setRowStretch(2, 1);   // anchor the 2x2 grid to the top
         m_steps->addWidget(w);
     }
     // Step 2 — folder
@@ -224,6 +230,7 @@ OnboardingOverlay::OnboardingOverlay(QWidget* parent) : QWidget(parent) {
             grp->addButton(c); if (i == 0) c->setChecked(true);
             g->addWidget(c, 0, i);
         }
+        g->setRowStretch(1, 1);   // anchor the card row to the top
         m_steps->addWidget(w);
     }
     // Step 5 — density
@@ -241,6 +248,7 @@ OnboardingOverlay::OnboardingOverlay(QWidget* parent) : QWidget(parent) {
             grp->addButton(c); if (i == 1) c->setChecked(true);
             g->addWidget(c, 0, i);
         }
+        g->setRowStretch(1, 1);   // anchor the card row to the top
         m_steps->addWidget(w);
     }
     // Step 6 — done
