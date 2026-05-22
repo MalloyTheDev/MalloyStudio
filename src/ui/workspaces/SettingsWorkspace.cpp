@@ -6,6 +6,7 @@
 
 #include <QCheckBox>
 #include <QComboBox>
+#include <QFileDialog>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -13,7 +14,9 @@
 #include <QListWidget>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSettings>
 #include <QStackedWidget>
+#include <QStandardPaths>
 #include <QVBoxLayout>
 
 namespace {
@@ -73,6 +76,47 @@ QLineEdit* line(const QString& text, int w = 260) {
 }
 QCheckBox* check(bool on) { auto* c = new QCheckBox; c->setChecked(on); return c; }
 
+// --- QSettings-backed controls: load current value, persist on every change. ---
+QCheckBox* prefCheck(const QString& key, bool def) {
+    auto* c = new QCheckBox;
+    c->setChecked(QSettings().value(key, def).toBool());
+    QObject::connect(c, &QCheckBox::toggled, c, [key](bool on) { QSettings().setValue(key, on); });
+    return c;
+}
+QComboBox* prefCombo(const QString& key, std::initializer_list<QString> opts, int defIndex, int w = 220) {
+    auto* c = new QComboBox;
+    for (const QString& o : opts) c->addItem(o);
+    c->setFixedWidth(w);
+    c->setCurrentIndex(QSettings().value(key, defIndex).toInt());
+    QObject::connect(c, &QComboBox::currentIndexChanged, c, [key](int i) { QSettings().setValue(key, i); });
+    return c;
+}
+QLineEdit* prefLine(const QString& key, const QString& def, int w = 260) {
+    auto* e = new QLineEdit(QSettings().value(key, def).toString());
+    e->setFixedWidth(w);
+    QObject::connect(e, &QLineEdit::editingFinished, e, [key, e] { QSettings().setValue(key, e->text()); });
+    return e;
+}
+// A line edit + Browse… button bound to a directory QSettings key.
+QWidget* folderRow(const QString& key, const QString& def, int w = 260) {
+    auto* host = new QWidget;
+    auto* h = new QHBoxLayout(host);
+    h->setContentsMargins(0, 0, 0, 0);
+    h->setSpacing(6);
+    auto* e = new QLineEdit(QSettings().value(key, def).toString());
+    e->setFixedWidth(w);
+    auto* b = new QPushButton(QObject::tr("Browse…"));
+    Theme::setVariant(b, QStringLiteral("ghost"));
+    QObject::connect(e, &QLineEdit::editingFinished, e, [key, e] { QSettings().setValue(key, e->text()); });
+    QObject::connect(b, &QPushButton::clicked, host, [host, e, key] {
+        const QString d = QFileDialog::getExistingDirectory(host, QObject::tr("Choose Folder"), e->text());
+        if (!d.isEmpty()) { e->setText(d); QSettings().setValue(key, d); }
+    });
+    h->addWidget(e);
+    h->addWidget(b);
+    return host;
+}
+
 } // namespace
 
 SettingsWorkspace::SettingsWorkspace(QWidget* parent) : QWidget(parent) {
@@ -108,8 +152,13 @@ SettingsWorkspace::SettingsWorkspace(QWidget* parent) : QWidget(parent) {
 
     // Right content
     m_stack = new QStackedWidget(this);
-    for (const G& g : groups)
-        m_stack->addWidget(g.label == tr("Recording") ? buildRecordingPage() : buildGenericPage(g.label));
+    for (const G& g : groups) {
+        QWidget* page = nullptr;
+        if (g.label == tr("Recording"))    page = buildRecordingPage();
+        else if (g.label == tr("General")) page = buildGeneralPage();
+        else                               page = buildGenericPage(g.label);
+        m_stack->addWidget(page);
+    }
     row->addWidget(m_stack, 1);
 
     connect(nav, &QListWidget::currentRowChanged, m_stack, &QStackedWidget::setCurrentIndex);
@@ -157,6 +206,31 @@ QWidget* SettingsWorkspace::buildRecordingPage() {
     m_rateCombo = combo({tr("CRF (quality-based)"), tr("CBR (constant bitrate)")});
     m_rateCombo->setEnabled(false);
 
+    // Storage + auto-action controls. Persisted via QSettings on Apply; the
+    // folder feeds recording/lastDir (the dir the Save dialog opens to) and the
+    // filename pattern feeds recording/filenamePattern (expanded by MainWindow).
+    m_folderEdit = new QLineEdit;
+    m_folderEdit->setFixedWidth(260);
+    auto* folderW = new QWidget;
+    auto* folderH = new QHBoxLayout(folderW);
+    folderH->setContentsMargins(0, 0, 0, 0);
+    folderH->setSpacing(6);
+    auto* browseBtn = new QPushButton(tr("Browse…"));
+    Theme::setVariant(browseBtn, QStringLiteral("ghost"));
+    connect(browseBtn, &QPushButton::clicked, this, [this] {
+        const QString d = QFileDialog::getExistingDirectory(
+            this, tr("Recording Folder"), m_folderEdit->text());
+        if (!d.isEmpty()) m_folderEdit->setText(d);
+    });
+    folderH->addWidget(m_folderEdit);
+    folderH->addWidget(browseBtn);
+
+    m_filenameEdit = new QLineEdit;
+    m_filenameEdit->setFixedWidth(320);
+    m_autoStart = check(false);
+    m_autoStop  = check(true);
+    m_saveClip  = check(true);
+
     col->addWidget(settingsBlock(tr("Encoder"), {
         {tr("Video encoder"), tr("Detected ffmpeg encoders. Hardware encoders use CBR; x264 uses CRF."),
          m_encoderCombo},
@@ -171,17 +245,17 @@ QWidget* SettingsWorkspace::buildRecordingPage() {
     }));
 
     col->addWidget(settingsBlock(tr("Storage"), {
-        {tr("Recording folder"), tr("Use a fast NVMe — recordings get large."),
-         line(QStringLiteral("D:\\Renders\\Sessions"), 320)},
-        {tr("Filename pattern"), tr("Tokens: {project} {scene} {date} {time} {n}."),
-         line(QStringLiteral("{project} — {date} {time}"), 320)},
+        {tr("Recording folder"), tr("Where the Save dialog opens. Use a fast NVMe — recordings get large."),
+         folderW},
+        {tr("Filename pattern"), tr("Tokens: {project} {scene} {date} {time}."),
+         m_filenameEdit},
         {tr("Replay buffer"), tr("In-RAM ring of the last 30 seconds."), m_replayCheck},
     }));
 
     col->addWidget(settingsBlock(tr("Auto-actions"), {
-        {tr("Auto-start when game launches"), tr("Detect from a process list."), check(false)},
-        {tr("Auto-stop on inactivity"), tr("Helpful for unattended capture."), check(true)},
-        {tr("Save clip on hotkey"), tr("Auto-name with timestamp."), check(true)},
+        {tr("Auto-start when game launches"), tr("Detect from a process list."), m_autoStart},
+        {tr("Auto-stop on inactivity"), tr("Helpful for unattended capture."), m_autoStop},
+        {tr("Save clip on hotkey"), tr("Auto-name with timestamp."), m_saveClip},
     }));
 
     loadRecordingSettings();
@@ -195,6 +269,57 @@ QWidget* SettingsWorkspace::buildRecordingPage() {
     col->addLayout(applyRow);
     col->addStretch();
 
+    outer->addWidget(content, 1);
+    scroll->setWidget(page);
+    return scroll;
+}
+
+QWidget* SettingsWorkspace::buildGeneralPage() {
+    auto* scroll = new QScrollArea;
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    auto* page = new QWidget;
+    page->setObjectName(QStringLiteral("workspaceBody"));
+    auto* outer = new QHBoxLayout(page);
+    outer->setContentsMargins(24, 24, 24, 24);
+
+    auto* content = new QWidget;
+    content->setMaximumWidth(800);
+    auto* col = new QVBoxLayout(content);
+    col->setContentsMargins(0, 0, 0, 0);
+    col->setSpacing(24);
+
+    col->addWidget(lbl(tr("General"), QString(), 20, true));
+    col->addWidget(lbl(tr("Startup, project defaults, and app behaviour."), QStringLiteral("mute"), 13));
+
+    // "Show setup guide" maps to the onboarding/completed flag (inverted): ticking
+    // it clears the flag so the first-run wizard runs again next launch.
+    auto* onboardingCheck = new QCheckBox;
+    onboardingCheck->setChecked(!QSettings().value(QStringLiteral("onboarding/completed"), false).toBool());
+    connect(onboardingCheck, &QCheckBox::toggled, this, [](bool on) {
+        QSettings().setValue(QStringLiteral("onboarding/completed"), !on);
+    });
+
+    col->addWidget(settingsBlock(tr("Startup"), {
+        {tr("Restore last project on launch"),
+         tr("Reopen the project you had open when you last quit."),
+         prefCheck(QStringLiteral("app/restoreLastProject"), false)},
+        {tr("Show setup guide on next launch"),
+         tr("Re-run the first-run onboarding wizard the next time MalloyStudio starts."),
+         onboardingCheck},
+    }));
+
+    col->addWidget(settingsBlock(tr("Projects"), {
+        {tr("Default project folder"),
+         tr("Where new projects are saved unless you choose otherwise."),
+         folderRow(QStringLiteral("app/defaultProjectDir"),
+                   QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation))},
+        {tr("Confirm before exit"),
+         tr("Warn if there are unsaved changes when you close the app."),
+         prefCheck(QStringLiteral("app/confirmExit"), true)},
+    }));
+
+    col->addStretch();
     outer->addWidget(content, 1);
     scroll->setWidget(page);
     return scroll;
@@ -249,6 +374,17 @@ void SettingsWorkspace::loadRecordingSettings() {
             o.container == QLatin1String("mov") ? 2 : o.container == QLatin1String("mp4") ? 1 : 0);
     if (m_crfEdit) m_crfEdit->setText(QString::number(o.crf));
     if (m_replayCheck) m_replayCheck->setChecked(o.replayBufferSeconds > 0);
+
+    QSettings s;
+    if (m_folderEdit)
+        m_folderEdit->setText(s.value(QStringLiteral("recording/lastDir"),
+            QStandardPaths::writableLocation(QStandardPaths::MoviesLocation)).toString());
+    if (m_filenameEdit)
+        m_filenameEdit->setText(s.value(QStringLiteral("recording/filenamePattern"),
+            QStringLiteral("{project} — {date} {time}")).toString());
+    if (m_autoStart) m_autoStart->setChecked(s.value(QStringLiteral("recording/autoStart"),        false).toBool());
+    if (m_autoStop)  m_autoStop->setChecked( s.value(QStringLiteral("recording/autoStop"),         true ).toBool());
+    if (m_saveClip)  m_saveClip->setChecked( s.value(QStringLiteral("recording/saveClipOnHotkey"), true ).toBool());
 }
 
 void SettingsWorkspace::applyRecordingSettings() {
@@ -270,5 +406,15 @@ void SettingsWorkspace::applyRecordingSettings() {
     }
     if (m_replayCheck) o.replayBufferSeconds = m_replayCheck->isChecked() ? 30 : 0;
     o.save();
+
+    QSettings s;
+    if (m_folderEdit && !m_folderEdit->text().trimmed().isEmpty())
+        s.setValue(QStringLiteral("recording/lastDir"), m_folderEdit->text().trimmed());
+    if (m_filenameEdit && !m_filenameEdit->text().trimmed().isEmpty())
+        s.setValue(QStringLiteral("recording/filenamePattern"), m_filenameEdit->text().trimmed());
+    if (m_autoStart) s.setValue(QStringLiteral("recording/autoStart"),        m_autoStart->isChecked());
+    if (m_autoStop)  s.setValue(QStringLiteral("recording/autoStop"),         m_autoStop->isChecked());
+    if (m_saveClip)  s.setValue(QStringLiteral("recording/saveClipOnHotkey"), m_saveClip->isChecked());
+
     emit recordingSettingsApplied();
 }

@@ -455,9 +455,28 @@ void MainWindow::connectModelSignals() {
         const QString lastDir = settings.value(
             QStringLiteral("recording/lastDir"),
             QStandardPaths::writableLocation(QStandardPaths::MoviesLocation)).toString();
-        const QString suggested = QDir(lastDir).filePath(
-            QStringLiteral("MalloyStudio-%1.mp4").arg(
-                QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss"))));
+        // Expand the filename pattern from Settings ▸ Recording ▸ Storage.
+        // Tokens: {project} {scene} {date} {time}; illegal filename chars stripped.
+        const QDateTime nowTs = QDateTime::currentDateTime();
+        QString base = settings.value(QStringLiteral("recording/filenamePattern"),
+                                      QStringLiteral("{project} — {date} {time}")).toString();
+        base.replace(QStringLiteral("{project}"),
+                     m_projectPath.isEmpty() ? tr("Untitled")
+                                             : QFileInfo(m_projectPath).completeBaseName());
+        base.replace(QStringLiteral("{scene}"),
+                     (m_scenes && m_scenes->currentScene()) ? m_scenes->currentScene()->name()
+                                                            : tr("Scene"));
+        base.replace(QStringLiteral("{date}"), nowTs.toString(QStringLiteral("yyyyMMdd")));
+        base.replace(QStringLiteral("{time}"), nowTs.toString(QStringLiteral("HHmmss")));
+        for (QChar bad : {QChar('<'), QChar('>'), QChar(':'), QChar('"'),
+                          QChar('/'), QChar('\\'), QChar('|'), QChar('?'), QChar('*')})
+            base.remove(bad);
+        base = base.trimmed();
+        if (base.isEmpty())
+            base = QStringLiteral("MalloyStudio-%1").arg(nowTs.toString(QStringLiteral("yyyyMMdd-HHmmss")));
+        const QString ext = m_outputSettings.container.isEmpty()
+            ? QStringLiteral("mp4") : m_outputSettings.container;
+        const QString suggested = QDir(lastDir).filePath(base + QChar('.') + ext);
 
         const QString path = QFileDialog::getSaveFileName(
             this, tr("Save Recording"), suggested,

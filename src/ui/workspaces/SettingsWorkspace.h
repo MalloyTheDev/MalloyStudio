@@ -23,6 +23,7 @@ signals:
 
 private:
     QWidget* buildRecordingPage();
+    QWidget* buildGeneralPage();
     QWidget* buildGenericPage(const QString& title);
     void loadRecordingSettings();
     void applyRecordingSettings();
@@ -36,4 +37,9 @@ private:
     QComboBox* m_containerCombo = nullptr;
     QLineEdit* m_crfEdit = nullptr;
     QCheckBox* m_replayCheck = nullptr;
+    QLineEdit* m_folderEdit = nullptr;     // recording output dir (recording/lastDir)
+    QLineEdit* m_filenameEdit = nullptr;   // filename pattern (recording/filenamePattern)
+    QCheckBox* m_autoStart = nullptr;
+    QCheckBox* m_autoStop = nullptr;
+    QCheckBox* m_saveClip = nullptr;
 };
