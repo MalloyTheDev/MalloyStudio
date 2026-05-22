@@ -129,37 +129,22 @@ void AudioMixerPanel::onAddMicrophoneClicked() {
 AudioMixerPanel::Strip AudioMixerPanel::makeStrip(const QString& id, const AudioInput& in) {
     Strip s;
     s.root = new QWidget(this);
-    auto* row = new QHBoxLayout(s.root);
-    row->setContentsMargins(4, 2, 4, 2);
-    row->setSpacing(8);
+    // Two-row strip. A single row of name + meter + volume + pan + mute needs
+    // ~300px, but this mixer lives in a ~280px-wide sidebar (360px column minus
+    // panel/layout padding), so a one-row QHBoxLayout compressed past its
+    // minimums and the sliders overlapped the name. Stack instead: name + mute
+    // on top, meter + volume + pan below — fits at any sidebar width.
+    auto* col = new QVBoxLayout(s.root);
+    col->setContentsMargins(6, 4, 6, 4);
+    col->setSpacing(4);
 
+    auto* topRow = new QHBoxLayout();
+    topRow->setSpacing(8);
     s.name = new QLabel(in.name, s.root);
-    s.name->setMinimumWidth(100);
     QFont f = s.name->font();
     f.setBold(true);
     s.name->setFont(f);
-
-    s.meter = new VuMeter(s.root);
-    // Compact minimums: this strip lives in a ~340px-wide sidebar rail, so the
-    // widths must sum to less than that or the QHBoxLayout compresses past the
-    // minimums and the sliders overlap the name label. The meter/volume stretch
-    // to fill whatever space remains, so they still grow on a wider layout.
-    s.meter->setMinimumWidth(36);
-
-    s.volume = new QSlider(Qt::Horizontal, s.root);
-    s.volume->setRange(0, 150); // 0..150 maps to 0.0..1.5
-    s.volume->setValue(static_cast<int>(in.volume * 100.0f));
-    s.volume->setMinimumWidth(48);
-    s.volume->setToolTip(tr("Volume (0–150 %)"));
-
-    // Pan: -100..+100 maps to -1.0..+1.0; tick at center.
-    s.pan = new QSlider(Qt::Horizontal, s.root);
-    s.pan->setRange(-100, 100);
-    s.pan->setValue(static_cast<int>(in.pan * 100.0f));
-    s.pan->setFixedWidth(52);
-    s.pan->setToolTip(tr("Pan  ◄ L──C──R ►"));
-    s.pan->setTickPosition(QSlider::TicksBelow);
-    s.pan->setTickInterval(100);
+    topRow->addWidget(s.name, 1);
 
     s.mute = new QToolButton(s.root);
     s.mute->setText(tr("M"));
@@ -167,12 +152,32 @@ AudioMixerPanel::Strip AudioMixerPanel::makeStrip(const QString& id, const Audio
     s.mute->setChecked(in.muted);
     s.mute->setToolTip(tr("Mute"));
     s.mute->setFixedWidth(28);
+    topRow->addWidget(s.mute);
+    col->addLayout(topRow);
 
-    row->addWidget(s.name);
-    row->addWidget(s.meter, 1);
-    row->addWidget(s.volume, 1);
-    row->addWidget(s.pan);
-    row->addWidget(s.mute);
+    auto* botRow = new QHBoxLayout();
+    botRow->setSpacing(8);
+    s.meter = new VuMeter(s.root);
+    s.meter->setMinimumWidth(40);
+    botRow->addWidget(s.meter, 2);
+
+    s.volume = new QSlider(Qt::Horizontal, s.root);
+    s.volume->setRange(0, 150); // 0..150 maps to 0.0..1.5
+    s.volume->setValue(static_cast<int>(in.volume * 100.0f));
+    s.volume->setMinimumWidth(56);
+    s.volume->setToolTip(tr("Volume (0–150 %)"));
+    botRow->addWidget(s.volume, 2);
+
+    // Pan: -100..+100 maps to -1.0..+1.0; tick at center.
+    s.pan = new QSlider(Qt::Horizontal, s.root);
+    s.pan->setRange(-100, 100);
+    s.pan->setValue(static_cast<int>(in.pan * 100.0f));
+    s.pan->setMinimumWidth(40);
+    s.pan->setToolTip(tr("Pan  ◄ L──C──R ►"));
+    s.pan->setTickPosition(QSlider::TicksBelow);
+    s.pan->setTickInterval(100);
+    botRow->addWidget(s.pan, 1);
+    col->addLayout(botRow);
 
     connect(s.volume, &QSlider::valueChanged, this, [this, id](int v) {
         m_controller->setVolume(id, static_cast<float>(v) / 100.0f);
