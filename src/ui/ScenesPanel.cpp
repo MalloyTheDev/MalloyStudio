@@ -4,6 +4,7 @@
 
 #include <QLabel>
 #include <QListWidget>
+#include <QMenu>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QPushButton>
@@ -48,6 +49,20 @@ ScenesPanel::ScenesPanel(SceneCollection* scenes, QWidget* parent)
     connect(renameBtn, &QPushButton::clicked, this, &ScenesPanel::onRenameClicked);
     connect(m_list, &QListWidget::itemChanged,         this, &ScenesPanel::onItemChanged);
     connect(m_list, &QListWidget::itemSelectionChanged, this, &ScenesPanel::onSelectionChanged);
+
+    // Right-click context menu (mirrors the buttons; the design's ⋯ overflow).
+    m_list->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_list, &QListWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
+        QMenu menu(this);
+        menu.addAction(tr("Add Scene"), this, &ScenesPanel::onAddClicked);
+        if (QListWidgetItem* item = m_list->itemAt(pos)) {
+            m_list->setCurrentItem(item);
+            menu.addAction(tr("Rename"), this, &ScenesPanel::onRenameClicked);
+            menu.addSeparator();
+            menu.addAction(tr("Remove"), this, &ScenesPanel::onRemoveClicked);
+        }
+        menu.exec(m_list->viewport()->mapToGlobal(pos));
+    });
 
     auto* f2 = new QShortcut(QKeySequence(Qt::Key_F2), this);
     connect(f2, &QShortcut::activated, this, &ScenesPanel::onRenameClicked);

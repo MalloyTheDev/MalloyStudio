@@ -10,6 +10,7 @@
 
 #include <QAbstractItemModel>
 #include <QListWidget>
+#include <QMenu>
 #include <QShortcut>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -81,6 +82,24 @@ SourcesPanel::SourcesPanel(SceneCollection* scenes, AudioController* audio, QWid
     connect(downBtn,   &QPushButton::clicked, this, &SourcesPanel::onMoveDown);
     connect(m_list, &QListWidget::itemSelectionChanged, this, &SourcesPanel::onSelectionChanged);
     connect(m_list, &QListWidget::itemDoubleClicked, this, &SourcesPanel::onItemDoubleClicked);
+
+    // Right-click context menu (mirrors the buttons; the design's ⋯ overflow).
+    m_list->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_list, &QListWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
+        QMenu menu(this);
+        menu.addAction(tr("Add Source…"), this, &SourcesPanel::onAddClicked);
+        if (QListWidgetItem* item = m_list->itemAt(pos)) {
+            m_list->setCurrentItem(item);
+            menu.addAction(tr("Rename"), this, [this, item] { onItemDoubleClicked(item); });
+            menu.addAction(tr("Duplicate"), this, &SourcesPanel::onDuplicateClicked);
+            menu.addSeparator();
+            menu.addAction(tr("Move Toward Front"), this, &SourcesPanel::onMoveUp);
+            menu.addAction(tr("Move Toward Back"),  this, &SourcesPanel::onMoveDown);
+            menu.addSeparator();
+            menu.addAction(tr("Remove"), this, &SourcesPanel::onRemoveClicked);
+        }
+        menu.exec(m_list->viewport()->mapToGlobal(pos));
+    });
 
     // F2: rename the currently selected layer (mirrors ScenesPanel's F2 behavior).
     auto* f2 = new QShortcut(QKeySequence(Qt::Key_F2), this);
