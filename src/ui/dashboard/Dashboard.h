@@ -28,6 +28,10 @@ signals:
     void recordRequested();
     void streamRequested();
 
+protected:
+    void showEvent(QShowEvent* event) override;   // run meter animation only while visible
+    void hideEvent(QHideEvent* event) override;
+
 private:
     QWidget* buildHero();
     QWidget* buildQuickActions();

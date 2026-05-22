@@ -25,6 +25,10 @@ public:
 signals:
     void goLiveRequested();
 
+protected:
+    void showEvent(QShowEvent* event) override;   // run meters only while visible
+    void hideEvent(QHideEvent* event) override;
+
 private:
     QWidget* buildCenter();
     QWidget* buildRail();

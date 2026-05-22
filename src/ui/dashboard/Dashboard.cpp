@@ -115,10 +115,20 @@ Dashboard::Dashboard(RenderQueue* renderQueue, QWidget* parent)
     m_meterTimer = new QTimer(this);
     m_meterTimer->setInterval(60);
     connect(m_meterTimer, &QTimer::timeout, this, &Dashboard::tickMeters);
-    m_meterTimer->start();
+    // started in showEvent so it only runs while the dashboard is the visible page
 
     if (m_renderQueue)
         connect(m_renderQueue, &RenderQueue::changed, this, &Dashboard::refreshRenderQueue);
+}
+
+void Dashboard::showEvent(QShowEvent* event) {
+    QWidget::showEvent(event);
+    if (m_meterTimer) m_meterTimer->start();
+}
+
+void Dashboard::hideEvent(QHideEvent* event) {
+    QWidget::hideEvent(event);
+    if (m_meterTimer) m_meterTimer->stop();
 }
 
 void Dashboard::setProjectName(const QString& name) {

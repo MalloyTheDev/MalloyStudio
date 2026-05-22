@@ -53,9 +53,19 @@ StreamingWorkspace::StreamingWorkspace(QWidget* parent) : QWidget(parent) {
     m_timer = new QTimer(this);
     m_timer->setInterval(100);
     connect(m_timer, &QTimer::timeout, this, &StreamingWorkspace::tick);
-    m_timer->start();
+    // started in showEvent so meters only animate while this workspace is visible
 
     setLive(false);
+}
+
+void StreamingWorkspace::showEvent(QShowEvent* event) {
+    QWidget::showEvent(event);
+    if (m_timer) m_timer->start();
+}
+
+void StreamingWorkspace::hideEvent(QHideEvent* event) {
+    QWidget::hideEvent(event);
+    if (m_timer) m_timer->stop();
 }
 
 namespace {
