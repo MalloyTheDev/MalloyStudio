@@ -443,6 +443,10 @@ void MainWindow::connectModelSignals() {
             m_preview, &PreviewWidget::updateWindowFrame);
     connect(m_captureController, &CaptureController::windowFrameCleared,
             m_preview, &PreviewWidget::clearWindowFrame);
+    connect(m_captureController, &CaptureController::cameraFrameReady,
+            m_preview, &PreviewWidget::updateCameraFrame);
+    connect(m_captureController, &CaptureController::cameraFrameCleared,
+            m_preview, &PreviewWidget::clearCameraFrame);
     // Staged preview also needs live frames so the user can see what they're staging.
     connect(m_captureController, &CaptureController::frameReady,
             m_stagePreview, &PreviewWidget::updateFrame);
@@ -452,6 +456,10 @@ void MainWindow::connectModelSignals() {
             m_stagePreview, &PreviewWidget::updateWindowFrame);
     connect(m_captureController, &CaptureController::windowFrameCleared,
             m_stagePreview, &PreviewWidget::clearWindowFrame);
+    connect(m_captureController, &CaptureController::cameraFrameReady,
+            m_stagePreview, &PreviewWidget::updateCameraFrame);
+    connect(m_captureController, &CaptureController::cameraFrameCleared,
+            m_stagePreview, &PreviewWidget::clearCameraFrame);
     connect(m_captureController, &CaptureController::statusChanged,
             this, [this](const QString& summary) {
         m_captureStatus = summary;

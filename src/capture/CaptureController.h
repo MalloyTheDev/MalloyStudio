@@ -44,6 +44,7 @@ class CaptureController : public QObject {
 public:
     using SessionFactory       = std::function<CaptureSession*(int adapterIndex, int outputIndex, QObject* parent)>;
     using WindowSessionFactory = std::function<CaptureSession*(quintptr hwnd, QObject* parent)>;
+    using CameraSessionFactory = std::function<CaptureSession*(const QString& deviceId, QObject* parent)>;
 
     explicit CaptureController(SceneCollection* scenes, QObject* parent = nullptr);
     CaptureController(SceneCollection* scenes, SessionFactory factory, QObject* parent = nullptr);
@@ -73,6 +74,10 @@ signals:
     void windowFrameReady(quintptr hwnd, QImage frame);
     void windowFrameCleared(quintptr hwnd);
 
+    // Camera capture signals (keyed by MF device id).
+    void cameraFrameReady(QString deviceId, QImage frame);
+    void cameraFrameCleared(QString deviceId);
+
 private:
     struct ActiveSession {
         int adapterIndex = -1;
@@ -84,19 +89,27 @@ private:
         quintptr        hwnd    = 0;
         CaptureSession* session = nullptr;
     };
+    struct ActiveCameraSession {
+        QString         deviceId;
+        CaptureSession* session = nullptr;
+    };
 
     void startSession(int adapterIndex, int outputIndex);
     void stopSession(const QString& key, bool setIdleStatus = true);
     void startWindowSession(quintptr hwnd);
     void stopWindowSession(const QString& key);
+    void startCameraSession(const QString& deviceId);
+    void stopCameraSession(const QString& deviceId);
     void setSummary(const QString& summary);
     void setMonitorStatus(const QString& key, const QString& status);
 
     SceneCollection*  m_scenes = nullptr;
     SessionFactory    m_factory;
     WindowSessionFactory m_windowFactory;
+    CameraSessionFactory m_cameraFactory;
     QHash<QString, ActiveSession>       m_sessions;
     QHash<QString, ActiveWindowSession> m_windowSessions;
+    QHash<QString, ActiveCameraSession> m_cameraSessions;
     QHash<QString, QString> m_lastStatus;
     QSet<QString> m_blockedErrorKeys;
     QString m_statusSummary = QStringLiteral("Idle");

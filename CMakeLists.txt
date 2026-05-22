@@ -33,6 +33,8 @@ set(MALLOY_CORE_SOURCES
     src/capture/WasapiCapture.h
     src/capture/CameraCapture.cpp
     src/capture/CameraCapture.h
+    src/capture/CameraCaptureSession.cpp
+    src/capture/CameraCaptureSession.h
     src/audio/AudioController.cpp
     src/audio/AudioController.h
     src/audio/AudioInput.h

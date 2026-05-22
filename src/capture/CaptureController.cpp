@@ -1,6 +1,7 @@
 #include "CaptureController.h"
 #include "DxgiCapture.h"
 #include "WindowCaptureSession.h"
+#include "CameraCaptureSession.h"
 #include "model/Scene.h"
 #include "model/SceneCollection.h"
 #include "model/SceneItem.h"
@@ -45,7 +46,8 @@ CaptureController::CaptureController(SceneCollection* scenes, QObject* parent)
 
 CaptureController::CaptureController(SceneCollection* scenes, SessionFactory factory, QObject* parent)
     : QObject(parent), m_scenes(scenes), m_factory(std::move(factory)),
-      m_windowFactory([](quintptr hwnd, QObject* p){ return new WindowCaptureSession(hwnd, p); })
+      m_windowFactory([](quintptr hwnd, QObject* p){ return new WindowCaptureSession(hwnd, p); }),
+      m_cameraFactory([](const QString& id, QObject* p){ return new CameraCaptureSession(id, p); })
 {
     connect(m_scenes, &SceneCollection::currentChanged, this, &CaptureController::reconcile);
     connect(m_scenes, &SceneCollection::itemsChanged, this, &CaptureController::reconcile);
@@ -74,6 +76,7 @@ QString CaptureController::monitorStatus(int adapterIndex, int outputIndex) cons
 void CaptureController::reconcile() {
     QSet<QString> required;
     QSet<QString> requiredWindows;
+    QSet<QString> requiredCameras;
 
     if (Scene* scene = m_scenes ? m_scenes->currentScene() : nullptr) {
         for (int i = 0; i < scene->itemCount(); ++i) {
@@ -85,6 +88,8 @@ void CaptureController::reconcile() {
                 required.insert(keyFor(source->adapterIndex(), source->outputIndex()));
             } else if (source->type() == Source::Type::WindowCapture && source->hasWindowConfig()) {
                 requiredWindows.insert(keyForWindow(source->windowHandle()));
+            } else if (source->type() == Source::Type::Camera && source->hasCameraConfig()) {
+                requiredCameras.insert(source->cameraDeviceId());
             }
         }
     }
@@ -129,7 +134,16 @@ void CaptureController::reconcile() {
         if (ok && hwnd) startWindowSession(hwnd);
     }
 
-    const int total = m_sessions.size() + m_windowSessions.size();
+    // --- Camera sessions (keyed directly by device id) ---
+    const QList<QString> activeCameraKeys = m_cameraSessions.keys();
+    for (const QString& key : activeCameraKeys) {
+        if (!requiredCameras.contains(key)) stopCameraSession(key);
+    }
+    for (const QString& deviceId : requiredCameras) {
+        if (!m_cameraSessions.contains(deviceId)) startCameraSession(deviceId);
+    }
+
+    const int total = m_sessions.size() + m_windowSessions.size() + m_cameraSessions.size();
     if (total == 0) {
         setSummary(blockedRequired ? QStringLiteral("Capture error") : QStringLiteral("Idle"));
     } else {
@@ -144,6 +158,8 @@ void CaptureController::stopAll() {
     for (const QString& key : keys) stopSession(key);
     const QList<QString> windowKeys = m_windowSessions.keys();
     for (const QString& key : windowKeys) stopWindowSession(key);
+    const QList<QString> cameraKeys = m_cameraSessions.keys();
+    for (const QString& key : cameraKeys) stopCameraSession(key);
     m_blockedErrorKeys.clear();
     setSummary(QStringLiteral("Idle"));
 }
@@ -215,6 +231,33 @@ void CaptureController::stopWindowSession(const QString& key) {
         active.session->deleteLater();
     }
     emit windowFrameCleared(active.hwnd);
+}
+
+void CaptureController::startCameraSession(const QString& deviceId) {
+    CaptureSession* session = m_cameraFactory(deviceId, this);
+    m_cameraSessions.insert(deviceId, ActiveCameraSession{deviceId, session});
+
+    connect(session, &CaptureSession::frameReady, this, [this, deviceId](QImage frame) {
+        emit cameraFrameReady(deviceId, std::move(frame));
+    });
+    connect(session, &CaptureSession::captureError, this, [this, deviceId](const QString& /*msg*/) {
+        stopCameraSession(deviceId);   // device error — drop it; reconcile may retry
+    });
+
+    session->startCapture();
+}
+
+void CaptureController::stopCameraSession(const QString& deviceId) {
+    auto it = m_cameraSessions.find(deviceId);
+    if (it == m_cameraSessions.end()) return;
+
+    ActiveCameraSession active = it.value();
+    m_cameraSessions.erase(it);
+    if (active.session) {
+        active.session->stopCapture();
+        active.session->deleteLater();
+    }
+    emit cameraFrameCleared(deviceId);
 }
 
 void CaptureController::setSummary(const QString& summary) {
