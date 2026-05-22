@@ -27,23 +27,11 @@ QFrame* card(QWidget* parent = nullptr) {
 }
 
 QLabel* mono(const QString& text, const QString& tone = QStringLiteral("mute"), int px = 11) {
-    auto* l = new QLabel(text);
-    l->setProperty("mono", true);
-    if (!tone.isEmpty()) l->setProperty("tone", tone);
-    QFont f = l->font();
-    f.setPixelSize(px);
-    l->setFont(f);
-    return l;
+    return Theme::label(text, tone, px, false, true);
 }
 
 QLabel* text(const QString& s, const QString& tone = QString(), int px = 13, bool bold = false) {
-    auto* l = new QLabel(s);
-    if (!tone.isEmpty()) l->setProperty("tone", tone);
-    QFont f = l->font();
-    f.setPixelSize(px);
-    if (bold) f.setWeight(QFont::DemiBold);
-    l->setFont(f);
-    return l;
+    return Theme::label(s, tone, px, bold);
 }
 
 QFrame* iconChip(const QString& name, const QColor& color, int chip = 32, int ic = 16) {

@@ -58,4 +58,11 @@ QLabel* makeTag(const QString& text, const QString& tone = QString(), QWidget* p
 QLabel* makeKbd(const QString& text, QWidget* parent = nullptr);
 QLabel* makeSectionHeader(const QString& text, QWidget* parent = nullptr);
 
+// Canonical label factory — consolidates the per-workspace lbl/text/mono helpers
+// so font/tone/mono/wrap policy lives in one place. wrap defaults OFF; opt in
+// explicitly for multi-line copy. tone is a "tone" property (dim/mute/…); mono
+// switches to the monospace family.
+QLabel* label(const QString& text, const QString& tone = QString(), int px = 13,
+              bool bold = false, bool mono = false, bool wrap = false);
+
 } // namespace Theme

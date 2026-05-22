@@ -104,4 +104,16 @@ QLabel* makeSectionHeader(const QString& text, QWidget* parent) {
     return l;
 }
 
+QLabel* label(const QString& text, const QString& tone, int px, bool bold, bool mono, bool wrap) {
+    auto* l = new QLabel(text);
+    if (!tone.isEmpty()) l->setProperty("tone", tone);
+    if (mono) l->setProperty("mono", true);
+    QFont f = l->font();
+    f.setPixelSize(px);
+    if (bold) f.setWeight(QFont::DemiBold);
+    l->setFont(f);
+    l->setWordWrap(wrap);
+    return l;
+}
+
 } // namespace Theme

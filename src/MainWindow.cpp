@@ -20,7 +20,6 @@
 #include "ui/workspaces/AILabWorkspace.h"
 #include "ui/workspaces/EditorWorkspace.h"
 #include "ui/workspaces/LibraryWorkspaces.h"
-#include "ui/workspaces/PlaceholderWorkspace.h"
 #include "ui/dashboard/Dashboard.h"
 #include "audio/AudioController.h"
 #include "input/HotkeyManager.h"

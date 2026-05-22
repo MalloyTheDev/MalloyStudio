@@ -19,11 +19,7 @@
 namespace {
 
 QLabel* lbl(const QString& s, const QString& tone = QString(), int px = 13, bool bold = false) {
-    auto* l = new QLabel(s);
-    if (!tone.isEmpty()) l->setProperty("tone", tone);
-    QFont f = l->font(); f.setPixelSize(px); if (bold) f.setWeight(QFont::DemiBold);
-    l->setFont(f);
-    return l;
+    return Theme::label(s, tone, px, bold);
 }
 
 struct Item { QString label; QString hint; QWidget* control; };

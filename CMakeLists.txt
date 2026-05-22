@@ -113,8 +113,6 @@ set(MALLOY_UI_SOURCES
     src/ui/workspaces/EditorWorkspace.h
     src/ui/workspaces/LibraryWorkspaces.cpp
     src/ui/workspaces/LibraryWorkspaces.h
-    src/ui/workspaces/PlaceholderWorkspace.cpp
-    src/ui/workspaces/PlaceholderWorkspace.h
     src/ui/dashboard/Dashboard.cpp
     src/ui/dashboard/Dashboard.h
     src/ui/ControlsBar.cpp
