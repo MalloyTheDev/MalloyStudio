@@ -5,6 +5,7 @@
 class QCheckBox;
 class QComboBox;
 class QLineEdit;
+class QListWidget;
 class QStackedWidget;
 
 // Settings workspace (secondary.jsx SettingsScreen): a two-pane screen with a
@@ -20,16 +21,27 @@ signals:
     // Emitted when the user applies Recording settings (persisted to
     // OutputSettings); MainWindow reloads and re-applies live state.
     void recordingSettingsApplied();
+    // Master-bus limiter changed in Settings ▸ Audio. MainWindow applies it to
+    // the live AudioController. thresholdDb is in dBFS (e.g. -3.0).
+    void audioLimiterChanged(bool enabled, double thresholdDb);
+
+protected:
+    void showEvent(QShowEvent* event) override;   // focus the section list on entry
 
 private:
     QWidget* buildRecordingPage();
     QWidget* buildGeneralPage();
+    QWidget* buildStreamingPage();
+    QWidget* buildVideoPage();
+    QWidget* buildAudioPage();
+    QWidget* buildStoragePage();
     QWidget* buildGenericPage(const QString& title);
     void loadRecordingSettings();
     void applyRecordingSettings();
     void updateEncoderDerived();   // rate-control/CRF follow the chosen encoder
 
     QStackedWidget* m_stack = nullptr;
+    QListWidget* m_nav = nullptr;
     QComboBox* m_encoderCombo = nullptr;
     QComboBox* m_rateCombo = nullptr;
     QComboBox* m_resCombo = nullptr;

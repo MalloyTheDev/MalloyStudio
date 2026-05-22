@@ -200,6 +200,22 @@ void MainWindow::setupUi() {
         m_audio->setReplayBufferSeconds(secs);
         flash(tr("Recording settings applied"), 2500);
     });
+    // Settings ▸ Audio drives the live master-bus limiter.
+    connect(m_settings, &SettingsWorkspace::audioLimiterChanged, this,
+            [this](bool enabled, double thresholdDb) {
+        if (m_audio) {
+            m_audio->setLimiterEnabled(enabled);
+            m_audio->setLimiterThresholdDb(static_cast<float>(thresholdDb));
+        }
+    });
+    // Apply the persisted limiter state on launch so it survives restarts.
+    if (m_audio) {
+        QSettings limiterSettings;
+        m_audio->setLimiterEnabled(
+            limiterSettings.value(QStringLiteral("audio/limiterEnabled"), false).toBool());
+        m_audio->setLimiterThresholdDb(static_cast<float>(
+            limiterSettings.value(QStringLiteral("audio/limiterThresholdDb"), -3.0).toDouble()));
+    }
     m_shell->addWorkspace(QStringLiteral("settings"), m_settings);
 
     setCentralWidget(m_shell);

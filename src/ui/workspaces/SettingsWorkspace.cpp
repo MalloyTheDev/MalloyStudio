@@ -2,6 +2,7 @@
 #include "ui/IconFactory.h"
 #include "ui/Theme.h"
 #include "recording/OutputSettings.h"
+#include "recording/StreamSettings.h"
 #include "recording/EncoderRegistry.h"
 
 #include <QCheckBox>
@@ -15,8 +16,11 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSettings>
+#include <QShowEvent>
+#include <QSpinBox>
 #include <QStackedWidget>
 #include <QStandardPaths>
+#include <QStorageInfo>
 #include <QVBoxLayout>
 
 namespace {
@@ -117,6 +121,30 @@ QWidget* folderRow(const QString& key, const QString& def, int w = 260) {
     return host;
 }
 
+// Page scaffold: a scrollable, centered max-800 column with a title + subtitle.
+// Returns the content column to append settingsBlock()s to; sets *scrollOut to
+// the QScrollArea the caller returns.
+QVBoxLayout* makePage(QWidget** scrollOut, const QString& title, const QString& sub) {
+    auto* scroll = new QScrollArea;
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    auto* page = new QWidget;
+    page->setObjectName(QStringLiteral("workspaceBody"));
+    auto* outer = new QHBoxLayout(page);
+    outer->setContentsMargins(24, 24, 24, 24);
+    auto* content = new QWidget;
+    content->setMaximumWidth(800);
+    auto* col = new QVBoxLayout(content);
+    col->setContentsMargins(0, 0, 0, 0);
+    col->setSpacing(24);
+    col->addWidget(lbl(title, QString(), 20, true));
+    if (!sub.isEmpty()) col->addWidget(lbl(sub, QStringLiteral("mute"), 13));
+    outer->addWidget(content, 1);
+    scroll->setWidget(page);
+    *scrollOut = scroll;
+    return col;
+}
+
 } // namespace
 
 SettingsWorkspace::SettingsWorkspace(QWidget* parent) : QWidget(parent) {
@@ -126,6 +154,7 @@ SettingsWorkspace::SettingsWorkspace(QWidget* parent) : QWidget(parent) {
 
     // Left group list
     auto* nav = new QListWidget(this);
+    m_nav = nav;
     nav->setObjectName(QStringLiteral("settingsNav"));
     nav->setFixedWidth(240);
     nav->setFrameShape(QFrame::NoFrame);
@@ -154,15 +183,24 @@ SettingsWorkspace::SettingsWorkspace(QWidget* parent) : QWidget(parent) {
     m_stack = new QStackedWidget(this);
     for (const G& g : groups) {
         QWidget* page = nullptr;
-        if (g.label == tr("Recording"))    page = buildRecordingPage();
-        else if (g.label == tr("General")) page = buildGeneralPage();
-        else                               page = buildGenericPage(g.label);
+        if (g.label == tr("Recording"))      page = buildRecordingPage();
+        else if (g.label == tr("General"))   page = buildGeneralPage();
+        else if (g.label == tr("Streaming")) page = buildStreamingPage();
+        else if (g.label == tr("Video"))     page = buildVideoPage();
+        else if (g.label == tr("Audio"))     page = buildAudioPage();
+        else if (g.label == tr("Storage"))   page = buildStoragePage();
+        else                                 page = buildGenericPage(g.label);
         m_stack->addWidget(page);
     }
     row->addWidget(m_stack, 1);
 
     connect(nav, &QListWidget::currentRowChanged, m_stack, &QStackedWidget::setCurrentIndex);
     nav->setCurrentRow(1);  // Recording
+}
+
+void SettingsWorkspace::showEvent(QShowEvent* event) {
+    QWidget::showEvent(event);
+    if (m_nav) m_nav->setFocus();   // so Up/Down navigate sections immediately
 }
 
 QWidget* SettingsWorkspace::buildRecordingPage() {
@@ -322,6 +360,226 @@ QWidget* SettingsWorkspace::buildGeneralPage() {
     col->addStretch();
     outer->addWidget(content, 1);
     scroll->setWidget(page);
+    return scroll;
+}
+
+QWidget* SettingsWorkspace::buildStreamingPage() {
+    QWidget* scroll = nullptr;
+    auto* col = makePage(&scroll, tr("Streaming"),
+                         tr("Where you go live and how the RTMP push is configured."));
+
+    const StreamSettings st = StreamSettings::load();
+
+    auto* service = new QComboBox;
+    service->addItems({tr("Twitch"), tr("YouTube Live"), tr("Custom RTMP")});
+    service->setFixedWidth(220);
+    service->setCurrentIndex(st.service == StreamSettings::Service::YouTube ? 1
+                           : st.service == StreamSettings::Service::Custom  ? 2 : 0);
+
+    auto* customUrl = new QLineEdit(st.customUrl);
+    customUrl->setFixedWidth(320);
+    customUrl->setEnabled(service->currentIndex() == 2);
+
+    // Persist directly to the stream/* QSettings keys StreamSettings::load()
+    // reads — never call StreamSettings::save() here, which would needlessly
+    // re-write the stream key to the Windows Credential Manager.
+    connect(service, &QComboBox::currentIndexChanged, this, [customUrl](int i) {
+        const char* svc = i == 1 ? "youtube" : i == 2 ? "custom" : "twitch";
+        QSettings().setValue(QStringLiteral("stream/service"), QString::fromLatin1(svc));
+        customUrl->setEnabled(i == 2);
+    });
+    connect(customUrl, &QLineEdit::editingFinished, customUrl, [customUrl] {
+        QSettings().setValue(QStringLiteral("stream/customUrl"), customUrl->text());
+    });
+
+    auto* bitrate = new QSpinBox;
+    bitrate->setRange(1000, 12000);
+    bitrate->setSingleStep(250);
+    bitrate->setSuffix(tr(" kbps"));
+    bitrate->setValue(st.bitrateKbps);
+    bitrate->setFixedWidth(140);
+    connect(bitrate, &QSpinBox::valueChanged, this,
+            [](int v) { QSettings().setValue(QStringLiteral("stream/bitrateKbps"), v); });
+
+    auto* keyframe = new QComboBox;
+    keyframe->addItems({tr("1 s"), tr("2 s"), tr("3 s"), tr("4 s")});
+    keyframe->setFixedWidth(120);
+    keyframe->setCurrentIndex(qBound(0, st.keyframeSec - 1, 3));
+    connect(keyframe, &QComboBox::currentIndexChanged, this,
+            [](int i) { QSettings().setValue(QStringLiteral("stream/keyframeSec"), i + 1); });
+
+    auto* keyStatus = lbl(st.streamKey.isEmpty()
+                              ? tr("Not set — add it in Edit ▸ Stream Settings")
+                              : tr("Configured (stored securely)"),
+                          st.streamKey.isEmpty() ? QStringLiteral("warn")
+                                                 : QStringLiteral("success"), 13);
+
+    col->addWidget(settingsBlock(tr("Destination"), {
+        {tr("Service"), tr("Twitch and YouTube use fixed ingest URLs; Custom lets you set your own."),
+         service},
+        {tr("Custom server URL"), tr("RTMP template; {key} is replaced with your stream key."),
+         customUrl},
+        {tr("Stream key"), tr("Sensitive — kept in the Windows Credential Manager, never in plain settings."),
+         keyStatus},
+    }));
+
+    col->addWidget(settingsBlock(tr("Encoding"), {
+        {tr("Stream bitrate"), tr("1080p60 sits around 6000 kbps; 720p around 4500."), bitrate},
+        {tr("Keyframe interval"), tr("Twitch and YouTube require 4 seconds or less."), keyframe},
+    }));
+
+    col->addStretch();
+    return scroll;
+}
+
+QWidget* SettingsWorkspace::buildVideoPage() {
+    QWidget* scroll = nullptr;
+    auto* col = makePage(&scroll, tr("Video"),
+                         tr("Encoder tuning shared by recording and streaming."));
+
+    const OutputSettings o = OutputSettings::load();
+
+    const QStringList presets = {QStringLiteral("ultrafast"), QStringLiteral("superfast"),
+                                 QStringLiteral("veryfast"),  QStringLiteral("faster"),
+                                 QStringLiteral("fast"),      QStringLiteral("medium"),
+                                 QStringLiteral("slow")};
+    auto* preset = new QComboBox;
+    preset->addItems(presets);
+    preset->setFixedWidth(220);
+    { const int i = presets.indexOf(o.preset); preset->setCurrentIndex(i >= 0 ? i : 2); }
+    connect(preset, &QComboBox::currentTextChanged, this, [](const QString& p) {
+        OutputSettings v = OutputSettings::load(); v.preset = p; v.save();
+    });
+
+    auto* bitrate = new QSpinBox;
+    bitrate->setRange(1000, 50000);
+    bitrate->setSingleStep(500);
+    bitrate->setSuffix(tr(" kbps"));
+    bitrate->setValue(o.bitrateKbps);
+    bitrate->setFixedWidth(140);
+    connect(bitrate, &QSpinBox::valueChanged, this, [](int val) {
+        OutputSettings v = OutputSettings::load(); v.bitrateKbps = val; v.save();
+    });
+
+    auto* keyframe = new QComboBox;
+    keyframe->addItems({tr("Auto"), tr("1 s"), tr("2 s"), tr("4 s")});
+    keyframe->setFixedWidth(120);
+    keyframe->setCurrentIndex(o.keyframeSec <= 0 ? 0 : o.keyframeSec == 1 ? 1 : o.keyframeSec == 2 ? 2 : 3);
+    connect(keyframe, &QComboBox::currentIndexChanged, this, [](int i) {
+        const int secs = i == 0 ? 0 : i == 1 ? 1 : i == 2 ? 2 : 4;
+        OutputSettings v = OutputSettings::load(); v.keyframeSec = secs; v.save();
+    });
+
+    col->addWidget(settingsBlock(tr("Encoder tuning"), {
+        {tr("x264 preset"), tr("Faster presets use less CPU but need more bitrate for the same quality."),
+         preset},
+        {tr("Target bitrate"), tr("Used by hardware encoders (CBR) and streaming; x264 file uses CRF."),
+         bitrate},
+        {tr("Keyframe interval"), tr("Auto lets the encoder decide; streaming needs 4 s or less."), keyframe},
+    }));
+
+    col->addStretch();
+    return scroll;
+}
+
+QWidget* SettingsWorkspace::buildAudioPage() {
+    QWidget* scroll = nullptr;
+    auto* col = makePage(&scroll, tr("Audio"), tr("Mix format and the master-bus limiter."));
+
+    const OutputSettings o = OutputSettings::load();
+    QSettings s;
+    const bool   limOn = s.value(QStringLiteral("audio/limiterEnabled"), false).toBool();
+    const double limDb = s.value(QStringLiteral("audio/limiterThresholdDb"), -3.0).toDouble();
+
+    auto* sampleRate = combo({QStringLiteral("48 kHz")}, 140); sampleRate->setEnabled(false);
+    auto* channels   = combo({tr("Stereo")}, 140);            channels->setEnabled(false);
+
+    auto* acodec = new QComboBox;
+    acodec->addItems({QStringLiteral("AAC"), QStringLiteral("Opus")});
+    acodec->setFixedWidth(140);
+    acodec->setCurrentIndex(o.audioCodec.contains(QLatin1String("opus"), Qt::CaseInsensitive) ? 1 : 0);
+    connect(acodec, &QComboBox::currentIndexChanged, this, [](int i) {
+        OutputSettings v = OutputSettings::load();
+        v.audioCodec = i == 1 ? QStringLiteral("libopus") : QStringLiteral("aac");
+        v.save();
+    });
+
+    auto* abitrate = new QComboBox;
+    abitrate->addItems({QStringLiteral("128 kbps"), QStringLiteral("192 kbps"),
+                        QStringLiteral("256 kbps"), QStringLiteral("320 kbps")});
+    abitrate->setFixedWidth(140);
+    abitrate->setCurrentIndex(o.audioBitratekbps >= 320 ? 3 : o.audioBitratekbps >= 256 ? 2
+                            : o.audioBitratekbps >= 192 ? 1 : 0);
+    connect(abitrate, &QComboBox::currentIndexChanged, this, [](int i) {
+        static const int br[4] = {128, 192, 256, 320};
+        OutputSettings v = OutputSettings::load(); v.audioBitratekbps = br[qBound(0, i, 3)]; v.save();
+    });
+
+    auto* limiter = new QCheckBox; limiter->setChecked(limOn);
+    auto* thresh = new QComboBox;
+    thresh->addItems({QStringLiteral("0 dB"), QStringLiteral("-3 dB"), QStringLiteral("-6 dB"),
+                      QStringLiteral("-9 dB"), QStringLiteral("-12 dB")});
+    thresh->setFixedWidth(120);
+    thresh->setCurrentIndex(qBound(0, static_cast<int>(qRound(-limDb / 3.0)), 4));
+    // Persist + push live to the AudioController via MainWindow.
+    auto emitLimiter = [this, limiter, thresh] {
+        const double db = -3.0 * thresh->currentIndex();
+        QSettings s2;
+        s2.setValue(QStringLiteral("audio/limiterEnabled"), limiter->isChecked());
+        s2.setValue(QStringLiteral("audio/limiterThresholdDb"), db);
+        emit audioLimiterChanged(limiter->isChecked(), db);
+    };
+    connect(limiter, &QCheckBox::toggled,            this, [emitLimiter](bool) { emitLimiter(); });
+    connect(thresh,  &QComboBox::currentIndexChanged, this, [emitLimiter](int)  { emitLimiter(); });
+
+    col->addWidget(settingsBlock(tr("Format"), {
+        {tr("Sample rate"), tr("Fixed at 48 kHz to match the capture pipeline."), sampleRate},
+        {tr("Channels"), tr("The program bus is stereo."), channels},
+        {tr("Audio codec"), tr("AAC is most compatible; Opus is more efficient."), acodec},
+        {tr("Audio bitrate"), tr("192 kbps is transparent for most content."), abitrate},
+    }));
+
+    col->addWidget(settingsBlock(tr("Master bus"), {
+        {tr("Limiter"), tr("Soft-knee brickwall limiter on the mixed output."), limiter},
+        {tr("Threshold"), tr("Ceiling the limiter clamps peaks to."), thresh},
+    }));
+
+    col->addStretch();
+    return scroll;
+}
+
+QWidget* SettingsWorkspace::buildStoragePage() {
+    QWidget* scroll = nullptr;
+    auto* col = makePage(&scroll, tr("Storage"),
+                         tr("Where recordings, clips, and projects live on disk."));
+
+    QSettings s;
+    const QString recDir = s.value(QStringLiteral("recording/lastDir"),
+        QStandardPaths::writableLocation(QStandardPaths::MoviesLocation)).toString();
+    const QString dataDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+
+    auto valueLabel = [](const QString& text) {
+        auto* l = lbl(text, QStringLiteral("dim"), 12);
+        l->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        return l;
+    };
+
+    QString freeText = tr("Unknown");
+    QStorageInfo info(recDir);
+    if (info.isValid() && info.isReady()) {
+        const double freeGb  = info.bytesAvailable() / (1024.0 * 1024.0 * 1024.0);
+        const double totalGb = info.bytesTotal()     / (1024.0 * 1024.0 * 1024.0);
+        freeText = tr("%1 GB free of %2 GB").arg(freeGb, 0, 'f', 0).arg(totalGb, 0, 'f', 0);
+    }
+
+    col->addWidget(settingsBlock(tr("Locations"), {
+        {tr("Recording folder"), tr("Change it in the Recording section."), valueLabel(recDir)},
+        {tr("Free space"), tr("Available on the recording drive right now."), valueLabel(freeText)},
+        {tr("Clips & app data"), tr("Replay clips, the render queue, and app state live here."),
+         valueLabel(dataDir)},
+    }));
+
+    col->addStretch();
     return scroll;
 }
 
