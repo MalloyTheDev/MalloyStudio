@@ -167,7 +167,7 @@ void MainWindow::setupUi() {
         m_scenesPanel, m_sourcesPanel, m_studioContainer, m_controlsBar,
         m_mixerPanel, m_inspectorPanel);
 
-    m_dashboard = new Dashboard(this);
+    m_dashboard = new Dashboard(m_renderQueue, this);
     connect(m_dashboard, &Dashboard::navigateTo, this,
             [this](const QString& id) { m_shell->setCurrentWorkspace(id); });
     connect(m_dashboard, &Dashboard::recordRequested, this, [this] { m_controlsBar->toggleRecord(); });

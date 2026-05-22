@@ -4,9 +4,11 @@
 #include <QWidget>
 
 class MeterBar;
+class RenderQueue;
 class QLabel;
 class QPushButton;
 class QTimer;
+class QVBoxLayout;
 
 // Project-hub home screen (dashboard.jsx): hero, quick actions, now-playing
 // meters, recent recordings/projects/clips, render queue, and system status.
@@ -15,7 +17,7 @@ class QTimer;
 class Dashboard : public QWidget {
     Q_OBJECT
 public:
-    explicit Dashboard(QWidget* parent = nullptr);
+    explicit Dashboard(RenderQueue* renderQueue, QWidget* parent = nullptr);
 
     void setProjectName(const QString& name);
     void setRecording(bool on);
@@ -32,6 +34,7 @@ private:
     QWidget* buildNowPlaying();
     QWidget* buildRecentRecordings();
     QWidget* buildRenderQueue();
+    void refreshRenderQueue();
     QWidget* buildRecentProjects();
     QWidget* buildRecentClips();
     QWidget* buildSystemStatus();
@@ -48,6 +51,10 @@ private:
     QLabel*   m_micDb = nullptr;
     QLabel*   m_deskDb = nullptr;
     QTimer*   m_meterTimer = nullptr;
+
+    RenderQueue*  m_renderQueue = nullptr;
+    QLabel*       m_renderMeta = nullptr;        // header "N active · M pending"
+    QVBoxLayout*  m_renderBodyLayout = nullptr;  // rebuilt on queue change
 
     double m_micL = 0.4, m_micP = 0.4, m_deskL = 0.55, m_deskP = 0.55;
 };

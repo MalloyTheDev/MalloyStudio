@@ -4,6 +4,7 @@
 #include "ui/components/Placeholder.h"
 #include "ui/IconFactory.h"
 #include "ui/Theme.h"
+#include "recording/RenderQueue.h"
 
 #include <QFrame>
 #include <QGridLayout>
@@ -67,7 +68,8 @@ QString dbText(double v) {
 
 } // namespace
 
-Dashboard::Dashboard(QWidget* parent) : QWidget(parent) {
+Dashboard::Dashboard(RenderQueue* renderQueue, QWidget* parent)
+    : QWidget(parent), m_renderQueue(renderQueue) {
     auto* outer = new QVBoxLayout(this);
     outer->setContentsMargins(0, 0, 0, 0);
 
@@ -114,6 +116,9 @@ Dashboard::Dashboard(QWidget* parent) : QWidget(parent) {
     m_meterTimer->setInterval(60);
     connect(m_meterTimer, &QTimer::timeout, this, &Dashboard::tickMeters);
     m_meterTimer->start();
+
+    if (m_renderQueue)
+        connect(m_renderQueue, &RenderQueue::changed, this, &Dashboard::refreshRenderQueue);
 }
 
 void Dashboard::setProjectName(const QString& name) {
@@ -311,19 +316,38 @@ QWidget* Dashboard::buildRecentRecordings() {
 
 QWidget* Dashboard::buildRenderQueue() {
     auto* panel = new PanelFrame(tr("Render queue"), QStringLiteral("render"));
-    panel->addHeaderWidget(mono(tr("2 active · 1 pending")));
+    m_renderMeta = mono(QString());
+    panel->addHeaderWidget(m_renderMeta);
 
     auto* body = new QWidget;
-    auto* v = new QVBoxLayout(body);
-    v->setContentsMargins(12, 12, 12, 12);
-    v->setSpacing(12);
-    struct J { QString name, meta; int pct; bool active; };
-    const QVector<J> jobs = {
-        {tr("Ep 14 — Highlights.mp4"),   QStringLiteral("64% · ETA 3:42"), 64, true},
-        {tr("Ep 14 — Full episode.mp4"), QStringLiteral("12% · ETA —"),    12, false},
-        {tr("Vlog — Intro reroll.mp4"),  tr("queued"),                      0,  false},
-    };
-    for (const J& j : jobs) {
+    m_renderBodyLayout = new QVBoxLayout(body);
+    m_renderBodyLayout->setContentsMargins(12, 12, 12, 12);
+    m_renderBodyLayout->setSpacing(12);
+    panel->bodyLayout()->addWidget(body);
+
+    refreshRenderQueue();   // populate from the live queue (or empty state)
+    return panel;
+}
+
+void Dashboard::refreshRenderQueue() {
+    if (!m_renderBodyLayout) return;
+    // Clear previous content.
+    while (QLayoutItem* it = m_renderBodyLayout->takeAt(0)) {
+        if (it->widget()) it->widget()->deleteLater();
+        delete it;
+    }
+
+    using S = RenderJob::State;
+    const QVector<RenderJob> all = m_renderQueue ? m_renderQueue->jobs() : QVector<RenderJob>{};
+    if (m_renderMeta && m_renderQueue) {
+        m_renderMeta->setText(tr("%1 active · %2 pending")
+            .arg(m_renderQueue->countOfState(S::Active))
+            .arg(m_renderQueue->countOfState(S::Pending)));
+    }
+
+    // Show active + pending jobs (up to 4), newest-relevant first.
+    int shown = 0;
+    auto addJob = [&](const RenderJob& j, bool active) {
         auto* w = new QWidget;
         auto* jv = new QVBoxLayout(w);
         jv->setContentsMargins(0, 0, 0, 0);
@@ -331,20 +355,27 @@ QWidget* Dashboard::buildRenderQueue() {
         auto* hr = new QHBoxLayout;
         hr->addWidget(text(j.name, QString(), 12));
         hr->addStretch();
-        hr->addWidget(mono(j.meta));
+        hr->addWidget(mono(active ? tr("%1%").arg(j.progress) : tr("queued")));
         jv->addLayout(hr);
         auto* bar = new QProgressBar;
         bar->setRange(0, 100);
-        bar->setValue(j.pct);
+        bar->setValue(j.progress);
         bar->setTextVisible(false);
         bar->setFixedHeight(4);
-        if (!j.active) bar->setProperty("tone", "idle");
+        if (!active) bar->setProperty("tone", "idle");
         jv->addWidget(bar);
-        v->addWidget(w);
+        m_renderBodyLayout->addWidget(w);
+    };
+    for (const RenderJob& j : all) { if (j.state == S::Active)  { addJob(j, true);  ++shown; } }
+    for (const RenderJob& j : all) { if (shown >= 4) break; if (j.state == S::Pending) { addJob(j, false); ++shown; } }
+
+    if (shown == 0) {
+        auto* empty = text(tr("No renders queued — start one from the Render Queue."),
+                           QStringLiteral("mute"), 12);
+        empty->setWordWrap(true);
+        m_renderBodyLayout->addWidget(empty);
     }
-    v->addStretch();
-    panel->bodyLayout()->addWidget(body);
-    return panel;
+    m_renderBodyLayout->addStretch();
 }
 
 QWidget* Dashboard::buildRecentProjects() {
