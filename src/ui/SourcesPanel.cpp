@@ -7,6 +7,7 @@
 #include "model/Scene.h"
 #include "model/SceneItem.h"
 #include "model/Source.h"
+#include "capture/CameraCapture.h"
 
 #include <QAbstractItemModel>
 #include <QListWidget>
@@ -25,6 +26,7 @@
 #include <QFormLayout>
 #include <QInputDialog>
 #include <QColorDialog>
+#include <QMessageBox>
 #include <QFileDialog>
 
 SourcesPanel::SourcesPanel(SceneCollection* scenes, AudioController* audio, QWidget* parent)
@@ -258,6 +260,7 @@ void SourcesPanel::onAddClicked() {
     typeCombo->addItem(tr("Color Block"),     static_cast<int>(Source::Type::ColorBlock));
     typeCombo->addItem(tr("Browser"),         static_cast<int>(Source::Type::Browser));
     typeCombo->addItem(tr("Microphone"),      static_cast<int>(Source::Type::AudioInput));
+    typeCombo->addItem(tr("Camera"),          static_cast<int>(Source::Type::Camera));
 
     auto* nameEdit = new QLineEdit(&dlg);
     auto updateDefaultName = [&] {
@@ -322,6 +325,27 @@ void SourcesPanel::onAddClicked() {
             resolved.startsWith(tr("Audio Input")))
             resolved = pick.second;
         m_scenes->addAudioInputToCurrent(resolved, pick.first);
+        return;
+    }
+
+    // ── Camera: pick a MediaFoundation video device up-front (like Window).
+    if (t == Source::Type::Camera) {
+        const QList<CameraCapture::Device> cams = CameraCapture::availableDevices();
+        if (cams.isEmpty()) {
+            QMessageBox::information(this, tr("No Cameras"),
+                tr("No webcam or capture device was found."));
+            return;
+        }
+        QStringList names;
+        for (const CameraCapture::Device& c : cams) names << c.name;
+        bool ok = false;
+        const QString chosen = QInputDialog::getItem(
+            this, tr("Choose Camera"), tr("Device:"), names, 0, false, &ok);
+        if (!ok) return;
+        const CameraCapture::Device dev = cams.at(qMax(0, names.indexOf(chosen)));
+        QString resolved = name;
+        if (resolved.startsWith(tr("Camera"))) resolved = dev.name;
+        m_scenes->addCameraToCurrent(resolved, dev.id, dev.name);
         return;
     }
 

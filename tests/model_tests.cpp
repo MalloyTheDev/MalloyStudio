@@ -104,6 +104,7 @@ private slots:
     // fires audioInputsChanged so reconcileInputs starts a worker, and
     // contributes to gatherVisibleAudioIds() the way MainWindow expects.
     void addAudioInputFromUiCreatesScopedSource();
+    void addCameraCreatesScopedSourceAndRoundTrips();
     void addingAudioInputTriggersAudioInputsChanged();
     void togglingAudioInputVisibilityChangesGatherList();
     // v7 Tier 3: per-filter visibility toggle and the ffmpeg progress parser.
@@ -1076,6 +1077,47 @@ void MalloyModelTests::addAudioInputFromUiCreatesScopedSource() {
     undo.undo();
     QCOMPARE(scenes.sourceCount(), 0);
     QCOMPARE(scenes.currentScene()->itemCount(), 0);
+    undo.redo();
+    QCOMPARE(scenes.sourceCount(), 1);
+}
+
+void MalloyModelTests::addCameraCreatesScopedSourceAndRoundTrips() {
+    // Mirrors the SourcesPanel → Camera flow: pick a device, call
+    // addCameraToCurrent(name, deviceId, deviceName). The source must carry the
+    // Camera type + device id/name, survive a JSON round-trip, and undo cleanly.
+    SceneCollection scenes;
+    QUndoStack undo;
+    scenes.setUndoStack(&undo);
+    scenes.addScene(QStringLiteral("Scene"));
+
+    const QString devId   = QStringLiteral("\\\\?\\usb#vid_046d&pid_0825#mf");
+    const QString devName = QStringLiteral("HD Pro Webcam C920");
+    SceneItem* item = scenes.addCameraToCurrent(QStringLiteral("Face cam"), devId, devName);
+    QVERIFY(item != nullptr);
+
+    Source* src = scenes.sourceById(item->sourceId());
+    QVERIFY(src != nullptr);
+    QCOMPARE(src->type(),            Source::Type::Camera);
+    QCOMPARE(src->name(),            QStringLiteral("Face cam"));
+    QCOMPARE(src->cameraDeviceId(),  devId);
+    QCOMPARE(src->cameraName(),      devName);
+    QVERIFY(src->hasCameraConfig());
+
+    // JSON round-trip preserves the camera binding.
+    const QJsonObject root = scenes.toJson();
+    SceneCollection loaded;
+    QString err;
+    QVERIFY2(loaded.loadFromJson(root, &err), qPrintable(err));
+    Source* reloaded = nullptr;
+    for (Source* s : loaded.sources())
+        if (s->type() == Source::Type::Camera) { reloaded = s; break; }
+    QVERIFY(reloaded != nullptr);
+    QCOMPARE(reloaded->cameraDeviceId(), devId);
+    QCOMPARE(reloaded->cameraName(),     devName);
+
+    // Undo removes the source cleanly.
+    undo.undo();
+    QCOMPARE(scenes.sourceCount(), 0);
     undo.redo();
     QCOMPARE(scenes.sourceCount(), 1);
 }

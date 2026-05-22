@@ -79,6 +79,8 @@ private:
     QPushButton* m_pickWindow  = nullptr;   // WindowCapture: "Change Window…"
     QLabel*      m_audioLabel  = nullptr;   // AudioInput: label
     QComboBox*   m_audioDevice = nullptr;   // AudioInput: device picker
+    QLabel*      m_cameraLabel  = nullptr;  // Camera: label
+    QComboBox*   m_cameraDevice = nullptr;  // Camera: device picker
     QLabel*      m_browserUrlLabel    = nullptr;  // Browser: URL label
     QLineEdit*   m_browserUrlEdit     = nullptr;  // Browser: URL edit
     QLabel*      m_browserHzLabel     = nullptr;  // Browser: refresh rate label

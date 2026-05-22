@@ -3,6 +3,7 @@
 #include "WindowPickerDialog.h"
 #include "audio/AudioController.h"
 #include "capture/CaptureController.h"
+#include "capture/CameraCapture.h"
 #include "model/Canvas.h"
 #include "model/FilterEffect.h"
 #include "model/SceneCollection.h"
@@ -137,6 +138,9 @@ InspectorPanel::InspectorPanel(SceneCollection* scenes,
     m_audioLabel  = new QLabel(tr("Capture device:"), inner);
     m_audioDevice = new QComboBox(inner);
     m_audioDevice->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_cameraLabel  = new QLabel(tr("Camera:"), inner);
+    m_cameraDevice = new QComboBox(inner);
+    m_cameraDevice->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     m_browserUrlLabel = new QLabel(tr("URL:"), inner);
     m_browserUrlEdit  = new QLineEdit(inner);
     m_browserUrlEdit->setPlaceholderText(QStringLiteral("https://example.com"));
@@ -156,6 +160,7 @@ InspectorPanel::InspectorPanel(SceneCollection* scenes,
     form->addRow(tr("Window"),  m_windowLabel);
     form->addRow(QString(),     m_pickWindow);
     form->addRow(m_audioLabel,  m_audioDevice);
+    form->addRow(m_cameraLabel, m_cameraDevice);
     form->addRow(m_browserUrlLabel, m_browserUrlEdit);
     form->addRow(m_browserHzLabel,  m_browserRefreshHz);
 
@@ -330,6 +335,14 @@ InspectorPanel::InspectorPanel(SceneCollection* scenes,
         const QString id = m_audioDevice->currentData().toString();
         if (!id.isEmpty())
             m_scenes->setCurrentSourceAudioDevice(m_scenes->currentItemIndex(), id);
+    });
+
+    connect(m_cameraDevice, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int) {
+        if (m_updating) return;
+        const QString id = m_cameraDevice->currentData().toString();
+        if (!id.isEmpty())
+            m_scenes->setCurrentSourceCamera(m_scenes->currentItemIndex(), id,
+                                             m_cameraDevice->currentText());
     });
 
     connect(m_browserUrlEdit, &QLineEdit::textEdited, this, [this](const QString& url) {
@@ -517,6 +530,7 @@ void InspectorPanel::rebuild() {
     const bool isImage   = source->type() == Source::Type::Image;
     const bool isWindow  = source->type() == Source::Type::WindowCapture;
     const bool isAudio   = source->type() == Source::Type::AudioInput;
+    const bool isCamera  = source->type() == Source::Type::Camera;
     const bool isBrowser = source->type() == Source::Type::Browser;
 
     m_text->setVisible(isText);
@@ -529,6 +543,8 @@ void InspectorPanel::rebuild() {
     m_pickWindow->setVisible(isWindow);
     m_audioLabel->setVisible(isAudio);
     m_audioDevice->setVisible(isAudio);
+    m_cameraLabel->setVisible(isCamera);
+    m_cameraDevice->setVisible(isCamera);
     m_browserUrlLabel->setVisible(isBrowser);
     m_browserUrlEdit->setVisible(isBrowser);
     m_browserHzLabel->setVisible(isBrowser);
@@ -568,6 +584,25 @@ void InspectorPanel::rebuild() {
                 break;
             }
         }
+    }
+
+    if (isCamera) {
+        QSignalBlocker sb(m_cameraDevice);
+        m_cameraDevice->clear();
+        for (const CameraCapture::Device& c : CameraCapture::availableDevices())
+            m_cameraDevice->addItem(c.name, c.id);
+        // Select the stored device. If it isn't currently enumerated (e.g.
+        // unplugged), add it anyway so the binding isn't silently lost.
+        int sel = -1;
+        for (int i = 0; i < m_cameraDevice->count(); ++i)
+            if (m_cameraDevice->itemData(i).toString() == source->cameraDeviceId()) { sel = i; break; }
+        if (sel < 0 && !source->cameraDeviceId().isEmpty()) {
+            m_cameraDevice->addItem(
+                source->cameraName().isEmpty() ? tr("(current device)") : source->cameraName(),
+                source->cameraDeviceId());
+            sel = m_cameraDevice->count() - 1;
+        }
+        if (sel >= 0) m_cameraDevice->setCurrentIndex(sel);
     }
 
     if (isBrowser) {
@@ -860,6 +895,7 @@ void InspectorPanel::setControlsEnabled(bool enabled) {
                        static_cast<QWidget*>(m_imagePath),   static_cast<QWidget*>(m_browseImage),
                        static_cast<QWidget*>(m_windowLabel), static_cast<QWidget*>(m_pickWindow),
                        static_cast<QWidget*>(m_audioLabel),  static_cast<QWidget*>(m_audioDevice),
+                       static_cast<QWidget*>(m_cameraLabel), static_cast<QWidget*>(m_cameraDevice),
                        static_cast<QWidget*>(m_browserUrlLabel), static_cast<QWidget*>(m_browserUrlEdit),
                        static_cast<QWidget*>(m_browserHzLabel),  static_cast<QWidget*>(m_browserRefreshHz),
                        static_cast<QWidget*>(m_fit),   static_cast<QWidget*>(m_fill),

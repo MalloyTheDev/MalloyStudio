@@ -67,6 +67,11 @@ QJsonObject sourceToJson(const Source* source) {
     if (!source->audioDeviceId().isEmpty())
         sourceJson.insert(QStringLiteral("audioDeviceId"), source->audioDeviceId());
 
+    if (source->hasCameraConfig()) {
+        sourceJson.insert(QStringLiteral("cameraDeviceId"), source->cameraDeviceId());
+        sourceJson.insert(QStringLiteral("cameraName"),     source->cameraName());
+    }
+
     if (source->hasBrowserConfig()) {
         sourceJson.insert(QStringLiteral("browserUrl"),       source->browserUrl());
         sourceJson.insert(QStringLiteral("browserRefreshHz"), source->browserRefreshHz());
@@ -367,6 +372,10 @@ bool SceneCollection::loadFromJson(const QJsonObject& root, QString* error) {
 
             const QString audioDeviceId = sourceObject.value(QStringLiteral("audioDeviceId")).toString();
             if (!audioDeviceId.isEmpty()) source->setAudioDeviceId(audioDeviceId);
+
+            const QString cameraDeviceId = sourceObject.value(QStringLiteral("cameraDeviceId")).toString();
+            if (!cameraDeviceId.isEmpty())
+                source->setCamera(cameraDeviceId, sourceObject.value(QStringLiteral("cameraName")).toString());
 
             const QString browserUrl = sourceObject.value(QStringLiteral("browserUrl")).toString();
             if (!browserUrl.isEmpty()) {
@@ -743,6 +752,16 @@ void SceneCollection::setCurrentSourceAudioDevice(int index, const QString& devi
     emit audioInputsChanged();
 }
 
+void SceneCollection::setCurrentSourceCamera(int index, const QString& deviceId,
+                                             const QString& name, bool recordUndo) {
+    Source* source = sourceForCurrentItem(index);
+    if (!source || source->cameraDeviceId() == deviceId) return;
+    QJsonObject before;
+    if (recordUndo) before = snapshot();
+    source->setCamera(deviceId, name);
+    if (recordUndo) recordCommand(QStringLiteral("Change Camera Device"), before);
+}
+
 void SceneCollection::setCurrentSourceBrowserUrl(int index, const QString& url, bool recordUndo) {
     Source* source = sourceForCurrentItem(index);
     if (!source || source->browserUrl() == url) return;
@@ -770,6 +789,21 @@ SceneItem* SceneCollection::addWindowCaptureToCurrent(const QString& name, quint
     source->setWindow(hwnd, windowTitle);
     SceneItem* item = addItemToScene(scene, source->id());
     recordCommand(QStringLiteral("Add Window Capture"), before);
+    return item;
+}
+
+SceneItem* SceneCollection::addCameraToCurrent(const QString& name, const QString& deviceId,
+                                               const QString& deviceName) {
+    Scene* scene = currentScene();
+    if (!scene) return nullptr;
+    const QJsonObject before = snapshot();
+    const QString displayName = name.trimmed().isEmpty()
+        ? (deviceName.isEmpty() ? Source::typeToString(Source::Type::Camera) : deviceName)
+        : name.trimmed();
+    Source* source = createSourceInternal(allocateSourceId(), displayName, Source::Type::Camera);
+    source->setCamera(deviceId, deviceName);
+    SceneItem* item = addItemToScene(scene, source->id());
+    recordCommand(QStringLiteral("Add Camera"), before);
     return item;
 }
 

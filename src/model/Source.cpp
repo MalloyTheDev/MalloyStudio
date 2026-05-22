@@ -63,6 +63,13 @@ void Source::setAudioDeviceId(const QString& id) {
     emit settingsChanged();
 }
 
+void Source::setCamera(const QString& deviceId, const QString& name) {
+    if (m_cameraDeviceId == deviceId && m_cameraName == name) return;
+    m_cameraDeviceId = deviceId;
+    m_cameraName = name;
+    emit settingsChanged();
+}
+
 void Source::setBrowserUrl(const QString& url) {
     if (m_browserUrl == url) return;
     m_browserUrl = url;
@@ -85,6 +92,7 @@ QString Source::typeToString(Type t) {
         case Type::Browser:        return QStringLiteral("Browser");
         case Type::WindowCapture:  return QStringLiteral("Window Capture");
         case Type::AudioInput:     return QStringLiteral("Audio Input");
+        case Type::Camera:         return QStringLiteral("Camera");
     }
     return QStringLiteral("Unknown");
 }
@@ -98,6 +106,7 @@ QString Source::typeToId(Type t) {
         case Type::Browser:        return QStringLiteral("browser");
         case Type::WindowCapture:  return QStringLiteral("window_capture");
         case Type::AudioInput:     return QStringLiteral("audio_input");
+        case Type::Camera:         return QStringLiteral("camera");
     }
     return QStringLiteral("unknown");
 }
@@ -112,6 +121,7 @@ Source::Type Source::typeFromId(const QString& id, bool* ok) {
     if (normalized == QStringLiteral("browser")) return Type::Browser;
     if (normalized == QStringLiteral("window_capture")) return Type::WindowCapture;
     if (normalized == QStringLiteral("audio_input")) return Type::AudioInput;
+    if (normalized == QStringLiteral("camera")) return Type::Camera;
     if (ok) *ok = false;
     return Type::ColorBlock;
 }

@@ -85,12 +85,14 @@ public:
     void setCurrentSourceImagePath(int index, const QString& path, bool recordUndo = true);
     void setCurrentSourceWindow(int index, quintptr hwnd, const QString& title, bool recordUndo = true);
     void setCurrentSourceAudioDevice(int index, const QString& deviceId, bool recordUndo = true);
+    void setCurrentSourceCamera(int index, const QString& deviceId, const QString& name, bool recordUndo = true);
     void setCurrentSourceBrowserUrl(int index, const QString& url, bool recordUndo = true);
     void setCurrentSourceBrowserRefreshHz(int index, int hz, bool recordUndo = true);
 
-    // Overloads for WindowCapture and AudioInput source creation.
+    // Overloads for WindowCapture, AudioInput, and Camera source creation.
     SceneItem* addWindowCaptureToCurrent(const QString& name, quintptr hwnd, const QString& windowTitle);
     SceneItem* addAudioInputToCurrent(const QString& name, const QString& deviceId);
+    SceneItem* addCameraToCurrent(const QString& name, const QString& deviceId, const QString& deviceName);
 
     // Returns device IDs of visible AudioInput sources in the current scene.
     QStringList gatherVisibleAudioIds() const;

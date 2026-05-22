@@ -57,6 +57,8 @@ public slots:
     void clearFrames();
     void updateWindowFrame(quintptr hwnd, QImage frame);
     void clearWindowFrame(quintptr hwnd);
+    void updateCameraFrame(QString deviceId, QImage frame);
+    void clearCameraFrame(QString deviceId);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -93,7 +95,8 @@ private:
     QString m_sceneName;
     QHash<QString, QImage> m_frames;       // Display capture frames (keyed by "adapter:output")
     QHash<quintptr, QImage> m_windowFrames; // Window capture frames (keyed by HWND)
-    QMutex m_frameMutex;                   // Guards both frame caches
+    QHash<QString, QImage> m_cameraFrames;  // Camera frames (keyed by MF device id)
+    QMutex m_frameMutex;                   // Guards all frame caches
     DragMode m_dragMode = DragMode::None;
     int m_dragIndex = -1;
     QPointF m_dragStartCanvas;

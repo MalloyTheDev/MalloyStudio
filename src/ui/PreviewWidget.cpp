@@ -72,6 +72,7 @@ void PreviewWidget::clearFrames() {
     QMutexLocker lock(&m_frameMutex);
     m_frames.clear();
     m_windowFrames.clear();
+    m_cameraFrames.clear();
     lock.unlock();
     update();
 }
@@ -86,6 +87,20 @@ void PreviewWidget::updateWindowFrame(quintptr hwnd, QImage frame) {
 void PreviewWidget::clearWindowFrame(quintptr hwnd) {
     QMutexLocker lock(&m_frameMutex);
     m_windowFrames.remove(hwnd);
+    lock.unlock();
+    update();
+}
+
+void PreviewWidget::updateCameraFrame(QString deviceId, QImage frame) {
+    QMutexLocker lock(&m_frameMutex);
+    m_cameraFrames.insert(deviceId, std::move(frame));
+    lock.unlock();
+    update();
+}
+
+void PreviewWidget::clearCameraFrame(QString deviceId) {
+    QMutexLocker lock(&m_frameMutex);
+    m_cameraFrames.remove(deviceId);
     lock.unlock();
     update();
 }
@@ -304,6 +319,9 @@ void PreviewWidget::drawSourceDirect(QPainter& painter, Source* source, const QR
     const QImage windowFrame = (source->type() == Source::Type::WindowCapture)
         ? m_windowFrames.value(source->windowHandle())
         : QImage{};
+    const QImage cameraFrame = (source->type() == Source::Type::Camera)
+        ? m_cameraFrames.value(source->cameraDeviceId())
+        : QImage{};
     lock.unlock();
 
     switch (source->type()) {
@@ -327,6 +345,17 @@ void PreviewWidget::drawSourceDirect(QPainter& painter, Source* source, const QR
                 painter.drawText(rect, Qt::AlignCenter, source->hasWindowConfig()
                     ? QStringLiteral("\xF4\xB0\x8D\xBB %1").arg(source->windowTitle())  // 🖻 glyph
                     : QStringLiteral("Window Capture — pick a window in Inspector"));
+            }
+            break;
+        case Source::Type::Camera:
+            if (!cameraFrame.isNull()) {
+                painter.drawImage(rect, cameraFrame);
+            } else {
+                painter.fillRect(rect, QColor(16, 20, 30));
+                painter.setPen(QColor(130, 170, 225));
+                painter.drawText(rect, Qt::AlignCenter, source->hasCameraConfig()
+                    ? QStringLiteral("\xF0\x9F\x93\xB7 %1").arg(source->cameraName())  // 📷
+                    : QStringLiteral("Camera — pick a device in Inspector"));
             }
             break;
         case Source::Type::AudioInput:

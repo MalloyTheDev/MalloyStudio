@@ -31,6 +31,8 @@ set(MALLOY_CORE_SOURCES
     src/capture/WindowCaptureSession.h
     src/capture/WasapiCapture.cpp
     src/capture/WasapiCapture.h
+    src/capture/CameraCapture.cpp
+    src/capture/CameraCapture.h
     src/audio/AudioController.cpp
     src/audio/AudioController.h
     src/audio/AudioInput.h
@@ -171,6 +173,10 @@ target_link_libraries(MalloyStudio PRIVATE
     avrt
     user32
     gdi32
+    mfplat
+    mf
+    mfreadwrite
+    mfuuid
 )
 
 enable_testing()
@@ -197,6 +203,10 @@ target_link_libraries(MalloyStudioTests PRIVATE
     avrt
     user32
     gdi32
+    mfplat
+    mf
+    mfreadwrite
+    mfuuid
 )
 
 add_test(NAME MalloyStudioTests COMMAND MalloyStudioTests)

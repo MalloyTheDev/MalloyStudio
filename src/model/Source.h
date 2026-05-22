@@ -16,6 +16,7 @@ public:
         Browser,
         WindowCapture,  // Captures a specific application window (HWND via PrintWindow/BitBlt)
         AudioInput,     // Audio-only source; links a device to the AudioController mixing bus
+        Camera,         // Webcam / capture-card video via MediaFoundation IMFSourceReader
     };
     Q_ENUM(Type)
 
@@ -53,6 +54,13 @@ public:
     QString audioDeviceId() const { return m_audioDeviceId; }
     void    setAudioDeviceId(const QString& id);
 
+    // Only meaningful when type == Camera. deviceId is the MediaFoundation
+    // symbolic link; name is the friendly device name (for display).
+    QString cameraDeviceId() const { return m_cameraDeviceId; }
+    QString cameraName()     const { return m_cameraName; }
+    void    setCamera(const QString& deviceId, const QString& name);
+    bool    hasCameraConfig() const { return !m_cameraDeviceId.isEmpty(); }
+
     // Only meaningful when type == Browser.
     // Qt6::WebEngineWidgets is required for actual rendering; when it is
     // unavailable the source displays a blank frame.
@@ -87,6 +95,8 @@ private:
     quintptr m_hwnd = 0;
     QString  m_windowTitle;
     QString  m_audioDeviceId;
+    QString  m_cameraDeviceId;
+    QString  m_cameraName;
     QString  m_browserUrl;
     int      m_browserRefreshHz = 10;
 };
