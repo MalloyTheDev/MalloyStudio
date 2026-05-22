@@ -41,6 +41,7 @@ class MediaRegistry : public QObject {
     Q_OBJECT
 public:
     explicit MediaRegistry(QObject* parent = nullptr);
+    ~MediaRegistry() override;
 
     void setSearchDirs(const QStringList& dirs);   // tests: settings-free
     void addSearchDir(const QString& dir);         // persists + rescans
@@ -59,6 +60,7 @@ private:
     void loadDirs();
     void saveDirs() const;
     void probeNext(int generation);   // async ffprobe walk
+    void killProbe();                 // stop the in-flight ffprobe cleanly
     void emitChangedCoalesced();      // throttle probe-driven updates
 
     QStringList m_dirs;
@@ -68,5 +70,6 @@ private:
     bool m_ffprobe = false;   // ffprobe available on PATH
     int  m_probeGen = 0;      // bumped each rescan to drop stale probe results
     int  m_probeIndex = 0;
+    QProcess* m_proc = nullptr;   // the single in-flight ffprobe (chain is sequential)
     QTimer* m_coalesce = nullptr;
 };

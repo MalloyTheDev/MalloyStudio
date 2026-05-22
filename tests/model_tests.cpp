@@ -20,8 +20,11 @@
 #include "recording/EncoderRegistry.h"
 
 #include <QCoreApplication>
+#include <QDir>
 #include <QEventLoop>
+#include <QFile>
 #include <QJsonArray>
+#include <QJsonDocument>
 #include <QJsonObject>
 #include <QSettings>
 #include <QSignalSpy>
@@ -124,6 +127,17 @@ private slots:
     void mediaRegistryClassifiesByExtension();
     // Render queue: promotes, progresses, completes, persists.
     void renderQueueProcessesAndPersists();
+    // Render queue control surface: retry (Failed→Pending), cancel (drops
+    // Active/Pending, ignores Completed/Failed), clearCompleted.
+    void renderQueueRetryCancelClear();
+    // Render queue pause gates promotion: paused queues hold Pending jobs.
+    void renderQueuePauseHoldsPendingJobs();
+    // ProjectDocument v3: editor timeline round-trips inside .malloy.json and
+    // older files (no "timeline" key) load with an empty timeline.
+    void projectDocumentV3TimelineRoundTrips();
+    // Registries degrade gracefully: missing/corrupt stores load empty, ops on
+    // unknown ids no-op, scans of empty/nonexistent dirs yield nothing.
+    void registriesDegradeGracefullyOnBadInput();
 };
 
 void MalloyModelTests::initTestCase() {
@@ -1380,6 +1394,219 @@ void MalloyModelTests::renderQueueProcessesAndPersists() {
     q2.setStorePath(store);
     QCOMPARE(q2.jobs().size(), 2);
     QCOMPARE(q2.countOfState(RenderJob::Completed), 1);
+}
+
+void MalloyModelTests::renderQueueRetryCancelClear() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString store = dir.filePath(QStringLiteral("rq.json"));
+
+    // The simulated worker only ever *completes* jobs — it never fails one. To
+    // exercise retry() we seed the store with a Failed job (state 3) plus a
+    // Completed one (state 2), then load it. State enum: Pending=0, Active=1,
+    // Completed=2, Failed=3.
+    auto seed = [&](const QString& id, int state, int progress) {
+        QJsonObject o;
+        o.insert(QStringLiteral("id"), id);
+        o.insert(QStringLiteral("name"), id);
+        o.insert(QStringLiteral("state"), state);
+        o.insert(QStringLiteral("progress"), progress);
+        if (state == 3) o.insert(QStringLiteral("error"), QStringLiteral("boom"));
+        return o;
+    };
+    {
+        QFile f(store);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        QJsonArray arr;
+        arr.append(seed(QStringLiteral("fail-1"), 3, 40));
+        arr.append(seed(QStringLiteral("done-1"), 2, 100));
+        f.write(QJsonDocument(arr).toJson());
+        f.close();
+    }
+
+    RenderQueue q;
+    q.setStorePath(store);
+    QCOMPARE(q.jobs().size(), 2);
+    QCOMPARE(q.countOfState(RenderJob::Failed), 1);
+    QCOMPARE(q.countOfState(RenderJob::Completed), 1);
+    QCOMPARE(q.countOfState(RenderJob::Active), 0);   // nothing pending to promote
+
+    // cancel() only removes Active/Pending jobs — Completed and Failed are
+    // history and must be left intact.
+    q.cancel(QStringLiteral("done-1"));
+    q.cancel(QStringLiteral("fail-1"));
+    QCOMPARE(q.jobs().size(), 2);
+
+    // clearCompleted() drops only the Completed job.
+    q.clearCompleted();
+    QCOMPARE(q.countOfState(RenderJob::Completed), 0);
+    QCOMPARE(q.jobs().size(), 1);
+
+    // retry() flips Failed→Pending, clears the error, and promotes it (no other
+    // job is active) so it lands Active. A QTimer drives progress, but no event
+    // loop runs in this test body, so the state stays Active deterministically.
+    QSignalSpy spy(&q, &RenderQueue::changed);
+    q.retry(QStringLiteral("fail-1"));
+    QVERIFY(spy.count() >= 1);
+    QCOMPARE(q.countOfState(RenderJob::Failed), 0);
+    QCOMPARE(q.countOfState(RenderJob::Active), 1);
+    QVERIFY(q.jobs().first().error.isEmpty());
+
+    // retry() on an unknown id is a no-op (no crash, no state change).
+    q.retry(QStringLiteral("ghost"));
+    QCOMPARE(q.countOfState(RenderJob::Active), 1);
+
+    // cancel() now removes the (Active) job, emptying the queue.
+    q.cancel(QStringLiteral("fail-1"));
+    QCOMPARE(q.jobs().size(), 0);
+}
+
+void MalloyModelTests::renderQueuePauseHoldsPendingJobs() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString store = dir.filePath(QStringLiteral("rq_pause.json"));
+
+    RenderQueue q;
+    q.setStorePath(store);
+    QVERIFY(!q.paused());
+
+    // Pause, then enqueue: startNext() must NOT promote while paused, so both
+    // jobs stay Pending.
+    q.setPaused(true);
+    QVERIFY(q.paused());
+    q.enqueue(QStringLiteral("a.mp4"), QStringLiteral("1080p60"), QStringLiteral("Proj"));
+    q.enqueue(QStringLiteral("b.mp4"), QStringLiteral("1080p60"), QStringLiteral("Proj"));
+    QCOMPARE(q.countOfState(RenderJob::Active), 0);
+    QCOMPARE(q.countOfState(RenderJob::Pending), 2);
+
+    // Ticking while paused with no active job is a harmless no-op.
+    q.advanceForTest();
+    QCOMPARE(q.countOfState(RenderJob::Pending), 2);
+
+    // Resuming promotes exactly one Pending job to Active.
+    q.setPaused(false);
+    QVERIFY(!q.paused());
+    QCOMPARE(q.countOfState(RenderJob::Active), 1);
+    QCOMPARE(q.countOfState(RenderJob::Pending), 1);
+}
+
+void MalloyModelTests::projectDocumentV3TimelineRoundTrips() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    SceneCollection scenes;
+    scenes.addScene(QStringLiteral("Scene"));
+
+    // A timeline array mirroring EditorWorkspace's clip schema.
+    QJsonArray timeline;
+    timeline.append(QJsonObject{
+        {QStringLiteral("track"), 0}, {QStringLiteral("start"), 0.0},
+        {QStringLiteral("dur"), 8.0}, {QStringLiteral("label"), QStringLiteral("Intro")},
+        {QStringLiteral("tag"), QStringLiteral("IMG")},
+        {QStringLiteral("color"), QStringLiteral("#9678d2")}, {QStringLiteral("audio"), false}});
+    timeline.append(QJsonObject{
+        {QStringLiteral("track"), 3}, {QStringLiteral("start"), 8.0},
+        {QStringLiteral("dur"), 280.0}, {QStringLiteral("label"), QStringLiteral("Mic")},
+        {QStringLiteral("tag"), QStringLiteral("AUD")},
+        {QStringLiteral("color"), QStringLiteral("#5fbe82")}, {QStringLiteral("audio"), true}});
+
+    QString err;
+    const QString path = dir.filePath(QStringLiteral("v3.malloy.json"));
+    QVERIFY2(ProjectDocument::saveToFile(scenes, timeline, path, &err), qPrintable(err));
+
+    // (1) The on-disk file carries a 2-element "timeline" array.
+    {
+        QFile f(path);
+        QVERIFY(f.open(QIODevice::ReadOnly));
+        const QJsonObject root = QJsonDocument::fromJson(f.readAll()).object();
+        QVERIFY(root.contains(QStringLiteral("timeline")));
+        QCOMPARE(root.value(QStringLiteral("timeline")).toArray().size(), 2);
+    }
+
+    // (2) loadFromFile restores the same timeline values and the scene data.
+    SceneCollection loaded;
+    QJsonArray loadedTimeline;
+    QVERIFY2(ProjectDocument::loadFromFile(loaded, &loadedTimeline, path, &err), qPrintable(err));
+    QCOMPARE(loaded.sceneCount(), 1);
+    QCOMPARE(loadedTimeline.size(), 2);
+    QCOMPARE(loadedTimeline.at(0).toObject().value(QStringLiteral("label")).toString(),
+             QStringLiteral("Intro"));
+    QCOMPARE(loadedTimeline.at(1).toObject().value(QStringLiteral("audio")).toBool(), true);
+    QCOMPARE(loadedTimeline.at(1).toObject().value(QStringLiteral("dur")).toDouble(), 280.0);
+
+    // (3) Back-compat: the legacy 2-arg save writes NO "timeline" key, and the
+    //     timeline-aware load of such a file yields an empty timeline. Older
+    //     v1/v2 projects therefore stay byte-identical and load unchanged.
+    const QString v2path = dir.filePath(QStringLiteral("v2.malloy.json"));
+    QVERIFY2(ProjectDocument::saveToFile(scenes, v2path, &err), qPrintable(err));
+    {
+        QFile f(v2path);
+        QVERIFY(f.open(QIODevice::ReadOnly));
+        const QJsonObject root = QJsonDocument::fromJson(f.readAll()).object();
+        QVERIFY(!root.contains(QStringLiteral("timeline")));
+    }
+    SceneCollection v2loaded;
+    QJsonArray v2timeline;
+    QVERIFY2(ProjectDocument::loadFromFile(v2loaded, &v2timeline, v2path, &err), qPrintable(err));
+    QVERIFY(v2timeline.isEmpty());
+
+    // (4) Saving with an EMPTY timeline must also omit the key — this guards the
+    //     `!timeline.isEmpty()` insert so a project with a cleared timeline does
+    //     not start emitting an empty array that diffs against older files.
+    const QString emptyPath = dir.filePath(QStringLiteral("empty.malloy.json"));
+    QVERIFY2(ProjectDocument::saveToFile(scenes, QJsonArray{}, emptyPath, &err), qPrintable(err));
+    {
+        QFile f(emptyPath);
+        QVERIFY(f.open(QIODevice::ReadOnly));
+        const QJsonObject root = QJsonDocument::fromJson(f.readAll()).object();
+        QVERIFY(!root.contains(QStringLiteral("timeline")));
+    }
+}
+
+void MalloyModelTests::registriesDegradeGracefullyOnBadInput() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    // (1) ClipsRegistry: a missing store loads empty and setFavorite on an
+    //     unknown id is a harmless no-op.
+    {
+        ClipsRegistry reg;
+        reg.setStorePath(dir.filePath(QStringLiteral("missing.json")));
+        QCOMPARE(reg.count(), 0);
+        reg.setFavorite(QStringLiteral("no-such-id"), true);
+        QCOMPARE(reg.count(), 0);
+    }
+    // (2) ClipsRegistry: a corrupt JSON store loads empty rather than crashing.
+    {
+        const QString corrupt = dir.filePath(QStringLiteral("corrupt.json"));
+        QFile f(corrupt);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write("{ this is not valid json ]]]");
+        f.close();
+        ClipsRegistry reg;
+        reg.setStorePath(corrupt);
+        QCOMPARE(reg.count(), 0);
+    }
+
+    // (3) ProjectRegistry: nonexistent and empty search-dir sets yield nothing.
+    {
+        ProjectRegistry reg;
+        reg.setSearchDirs({dir.filePath(QStringLiteral("nope_projects"))});
+        QCOMPARE(reg.count(), 0);
+        reg.setSearchDirs({});
+        QCOMPARE(reg.count(), 0);
+    }
+
+    // (4) MediaRegistry: an empty dir and a nonexistent dir both yield nothing.
+    {
+        const QString emptyDir = dir.filePath(QStringLiteral("empty_media"));
+        QVERIFY(QDir().mkpath(emptyDir));
+        MediaRegistry reg;
+        reg.setSearchDirs({emptyDir});
+        QCOMPARE(reg.count(), 0);
+        reg.setSearchDirs({dir.filePath(QStringLiteral("nonexistent_media"))});
+        QCOMPARE(reg.count(), 0);
+    }
 }
 
 QTEST_MAIN(MalloyModelTests)

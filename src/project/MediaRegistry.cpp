@@ -96,6 +96,23 @@ MediaRegistry::MediaRegistry(QObject* parent) : QObject(parent) {
     rescan();
 }
 
+MediaRegistry::~MediaRegistry() {
+    killProbe();
+}
+
+void MediaRegistry::killProbe() {
+    if (!m_proc) return;
+    // Drop the finished handler so it can't fire (and re-spawn the chain) while
+    // we tear the process down, then stop and reap it.
+    m_proc->disconnect(this);
+    if (m_proc->state() != QProcess::NotRunning) {
+        m_proc->kill();
+        m_proc->waitForFinished(1000);
+    }
+    m_proc->deleteLater();
+    m_proc = nullptr;
+}
+
 void MediaRegistry::emitChangedCoalesced() {
     if (m_coalesce && !m_coalesce->isActive()) m_coalesce->start();
 }
@@ -159,7 +176,10 @@ void MediaRegistry::rescan() {
               [](const MediaInfo& a, const MediaInfo& b) { return a.modified > b.modified; });
     emit changed();
 
-    // Kick off async metadata probing for this scan generation.
+    // Kick off async metadata probing for this scan generation. Stop any
+    // in-flight probe from the previous generation first, so we never run two
+    // ffprobe chains at once nor leak one when a rescan supersedes it.
+    killProbe();
     ++m_probeGen;
     m_probeIndex = 0;
     probeNext(m_probeGen);
@@ -175,9 +195,11 @@ void MediaRegistry::probeNext(int generation) {
     const int idx = m_probeIndex;
     const QString path = m_media[idx].filePath;
     auto* proc = new QProcess(this);
+    m_proc = proc;
     connect(proc, &QProcess::finished, this,
             [this, proc, generation, idx](int code, QProcess::ExitStatus status) {
         const QByteArray out = proc->readAllStandardOutput();
+        if (m_proc == proc) m_proc = nullptr;
         proc->deleteLater();
         if (generation != m_probeGen) return;        // a newer rescan superseded us
         if (status == QProcess::NormalExit && code == 0 && idx < m_media.size()) {
