@@ -25,6 +25,7 @@ class AppShell;
 class Dashboard;
 class StreamingWorkspace;
 class SettingsWorkspace;
+class EditorWorkspace;
 class CommandPalette;
 class OnboardingOverlay;
 class QAction;
@@ -71,6 +72,7 @@ private:
     Dashboard*         m_dashboard         = nullptr;
     StreamingWorkspace* m_streamStudio     = nullptr;
     SettingsWorkspace* m_settings          = nullptr;
+    EditorWorkspace*   m_editor            = nullptr;
     CommandPalette*    m_palette           = nullptr;
     OnboardingOverlay* m_onboarding        = nullptr;
     PreviewWidget*     m_preview           = nullptr;  // Program (TimedFrameSource)

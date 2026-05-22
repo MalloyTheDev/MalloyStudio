@@ -2,17 +2,28 @@
 #include "model/SceneCollection.h"
 
 #include <QFile>
+#include <QJsonArray>
 #include <QJsonDocument>
+#include <QJsonObject>
 #include <QSaveFile>
 
 bool ProjectDocument::saveToFile(const SceneCollection& scenes, const QString& filePath, QString* error) {
+    return saveToFile(scenes, QJsonArray{}, filePath, error);
+}
+
+bool ProjectDocument::saveToFile(const SceneCollection& scenes, const QJsonArray& timeline,
+                                 const QString& filePath, QString* error) {
     QSaveFile file(filePath);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         if (error) *error = file.errorString();
         return false;
     }
 
-    const QJsonDocument doc(scenes.toJson());
+    QJsonObject obj = scenes.toJson();
+    if (!timeline.isEmpty())
+        obj.insert(QStringLiteral("timeline"), timeline);   // v3 editor timeline
+
+    const QJsonDocument doc(obj);
     file.write(doc.toJson(QJsonDocument::Indented));
     if (!file.commit()) {
         if (error) *error = file.errorString();
@@ -24,6 +35,11 @@ bool ProjectDocument::saveToFile(const SceneCollection& scenes, const QString& f
 }
 
 bool ProjectDocument::loadFromFile(SceneCollection& scenes, const QString& filePath, QString* error) {
+    return loadFromFile(scenes, nullptr, filePath, error);
+}
+
+bool ProjectDocument::loadFromFile(SceneCollection& scenes, QJsonArray* timeline,
+                                   const QString& filePath, QString* error) {
     QFile file(filePath);
     if (!file.open(QIODevice::ReadOnly)) {
         if (error) *error = file.errorString();
@@ -42,5 +58,8 @@ bool ProjectDocument::loadFromFile(SceneCollection& scenes, const QString& fileP
         return false;
     }
 
-    return scenes.loadFromJson(doc.object(), error);
+    const QJsonObject obj = doc.object();
+    if (timeline)
+        *timeline = obj.value(QStringLiteral("timeline")).toArray();   // empty for v1/v2 files
+    return scenes.loadFromJson(obj, error);
 }

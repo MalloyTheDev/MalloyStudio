@@ -5,23 +5,17 @@
 #include "ui/Theme.h"
 
 #include <QButtonGroup>
-#include <QDir>
-#include <QFile>
-#include <QFileInfo>
 #include <QHBoxLayout>
 #include <QJsonArray>
-#include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPushButton>
-#include <QSaveFile>
 #include <QScrollArea>
 #include <QSlider>
 #include <QSplitter>
-#include <QStandardPaths>
 #include <QTabWidget>
 #include <QVBoxLayout>
 
@@ -92,11 +86,6 @@ Clip clipFromJson(const QJsonObject& o) {
     c.audio = o.value(QStringLiteral("audio")).toBool();
     return c;
 }
-QString timelineStorePath() {
-    const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-    return QDir(dir).filePath(QStringLiteral("editor_timeline.json"));
-}
-
 struct Marker { double t; QColor color; };
 const QVector<Marker>& markers() {
     static const QVector<Marker> m = {
@@ -114,7 +103,7 @@ class TimelineCanvas : public QWidget {
 public:
     explicit TimelineCanvas(QWidget* parent = nullptr) : QWidget(parent) {
         setMouseTracking(true);
-        loadClips();   // persisted edits, or the seed timeline on first run
+        m_clips = clips();   // seed; the active project replaces it via setClips()
         updateSize();
     }
     void setZoom(double z) { m_zoom = z; updateSize(); update(); }
@@ -125,6 +114,20 @@ public:
         setCursor(t == Tool::Razor ? Qt::SplitHCursor : Qt::ArrowCursor);
     }
     void setSnap(bool on) { m_snap = on; }
+
+    // Project timeline serialization (persisted inside the .malloy.json).
+    QJsonArray toJson() const {
+        QJsonArray a;
+        for (const Clip& c : m_clips) a.append(clipToJson(c));
+        return a;
+    }
+    void setClips(const QJsonArray& arr) {
+        m_clips.clear();
+        for (const auto& v : arr) m_clips.push_back(clipFromJson(v.toObject()));
+        m_selected = -1;
+        m_drag = -1;
+        update();
+    }
 
 protected:
     QSize sizeHint() const override { return minimumSize(); }
@@ -283,7 +286,6 @@ protected:
 
     void mouseReleaseEvent(QMouseEvent*) override {
         m_scrubbing = false;
-        if (m_drag >= 0) saveClips();   // persist a completed move/trim
         m_drag = -1;
     }
 
@@ -358,31 +360,6 @@ private:
         m_clips[i] = a;
         m_clips.insert(i + 1, b);
         m_selected = i + 1;
-        saveClips();
-    }
-
-    void loadClips() {
-        QFile f(timelineStorePath());
-        if (f.open(QIODevice::ReadOnly)) {
-            const QJsonArray arr = QJsonDocument::fromJson(f.readAll()).array();
-            if (!arr.isEmpty()) {
-                m_clips.clear();
-                for (const auto& v : arr) m_clips.push_back(clipFromJson(v.toObject()));
-                return;
-            }
-        }
-        m_clips = clips();   // first run: start from the seed timeline
-    }
-
-    void saveClips() const {
-        const QString path = timelineStorePath();
-        QDir().mkpath(QFileInfo(path).absolutePath());
-        QJsonArray arr;
-        for (const Clip& c : m_clips) arr.append(clipToJson(c));
-        QSaveFile f(path);
-        if (!f.open(QIODevice::WriteOnly)) return;
-        f.write(QJsonDocument(arr).toJson(QJsonDocument::Indented));
-        f.commit();
     }
 
     double m_zoom = 60.0;     // px/sec
@@ -616,6 +593,7 @@ EditorWorkspace::EditorWorkspace(QWidget* parent) : QWidget(parent) {
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     auto* canvas = new TimelineCanvas(scroll);
+    m_timelineCanvas = canvas;
     scroll->setWidget(canvas);
     bh->addWidget(scroll, 1);
 
@@ -631,4 +609,13 @@ EditorWorkspace::EditorWorkspace(QWidget* parent) : QWidget(parent) {
     connect(snapBtn, &QPushButton::toggled, canvas, [canvas](bool on) { canvas->setSnap(on); });
 
     col->addWidget(bottom, 45);
+}
+
+QJsonArray EditorWorkspace::timelineJson() const {
+    // m_timelineCanvas is always a TimelineCanvas we created (no Q_OBJECT → static_cast).
+    return m_timelineCanvas ? static_cast<TimelineCanvas*>(m_timelineCanvas)->toJson() : QJsonArray{};
+}
+
+void EditorWorkspace::setTimelineJson(const QJsonArray& timeline) {
+    if (m_timelineCanvas) static_cast<TimelineCanvas*>(m_timelineCanvas)->setClips(timeline);
 }

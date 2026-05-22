@@ -40,6 +40,7 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QHBoxLayout>
+#include <QJsonArray>
 #include <QLabel>
 #include <QMenuBar>
 #include <QMessageBox>
@@ -178,7 +179,8 @@ void MainWindow::setupUi() {
     connect(m_streamStudio, &StreamingWorkspace::goLiveRequested,
             this, [this] { m_controlsBar->toggleStream(); });
     m_shell->addWorkspace(QStringLiteral("stream"), m_streamStudio);
-    m_shell->addWorkspace(QStringLiteral("editor"), new EditorWorkspace(this));
+    m_editor = new EditorWorkspace(this);
+    m_shell->addWorkspace(QStringLiteral("editor"), m_editor);
     m_shell->addWorkspace(QStringLiteral("clips"), new ClipsWorkspace(m_clipsRegistry, this));
     m_shell->addWorkspace(QStringLiteral("media"), new MediaWorkspace(m_mediaRegistry, this));
     auto* projects = new ProjectsWorkspace(m_projectRegistry, this);
@@ -645,6 +647,7 @@ void MainWindow::newProject() {
     if (!maybeSave()) return;
     m_captureController->stopAll();
     m_scenes->clear();
+    if (m_editor) m_editor->setTimelineJson({});
     m_projectPath.clear();
     m_undoStack->clear();
     m_undoStack->setClean();
@@ -666,7 +669,9 @@ bool MainWindow::saveProject() {
     if (m_projectPath.isEmpty()) return saveProjectAs();
 
     QString error;
-    if (!ProjectDocument::saveToFile(*m_scenes, m_projectPath, &error)) {
+    if (!ProjectDocument::saveToFile(*m_scenes,
+                                     m_editor ? m_editor->timelineJson() : QJsonArray{},
+                                     m_projectPath, &error)) {
         QMessageBox::warning(this, tr("Save Failed"), error);
         return false;
     }
@@ -693,10 +698,12 @@ bool MainWindow::loadProject(const QString& filePath) {
     m_captureController->stopAll();
 
     QString error;
-    if (!ProjectDocument::loadFromFile(*m_scenes, filePath, &error)) {
+    QJsonArray timeline;
+    if (!ProjectDocument::loadFromFile(*m_scenes, &timeline, filePath, &error)) {
         QMessageBox::warning(this, tr("Open Failed"), error);
         return false;
     }
+    if (m_editor) m_editor->setTimelineJson(timeline);
 
     m_projectPath = filePath;
     m_undoStack->clear();
