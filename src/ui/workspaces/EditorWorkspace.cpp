@@ -819,21 +819,28 @@ EditorWorkspace::EditorWorkspace(MediaRegistry* media, QWidget* parent)
     auto* rowsHost = new QWidget;
     auto* rowsLayout = new QVBoxLayout(rowsHost);
     rowsLayout->setContentsMargins(0, 0, 0, 0); rowsLayout->setSpacing(2);
+    rowsLayout->addStretch();   // ONLY a trailing stretch in rowsLayout — the
+                                // wipe loop in rebuildBin preserves this single
+                                // item, and rows are inserted ahead of it.
+    bv->addWidget(rowsHost, 1);
+    // emptyHint deliberately lives in bv (the parent), NOT in rowsLayout.
+    // Keeping it outside the wipe target means rebuildBin physically cannot
+    // schedule it for deleteLater (which would dangle the captured pointer).
     auto* emptyHint = lbl(
         tr("No media found. Add a folder in the Media workspace."),
         QStringLiteral("mute"), 12);
     emptyHint->setWordWrap(true);
     emptyHint->setAlignment(Qt::AlignCenter);
-    rowsLayout->addWidget(emptyHint);
-    rowsLayout->addStretch();
-    bv->addWidget(rowsHost, 1);
+    bv->addWidget(emptyHint);
     bin->bodyLayout()->addWidget(binBody);
     topSplit->addWidget(bin);
 
     // Rebuild bin rows from the registry, filtered by the search input.
     auto rebuildBin = [this, rowsLayout, emptyHint, countTag, search]() {
-        // Wipe existing rows (everything before the trailing stretch + emptyHint).
-        while (rowsLayout->count() > 0) {
+        // Wipe rows but keep the trailing stretch (last item). Without this
+        // count()>1 guard, the next rebuild would have no stretch and the rows
+        // would stack to the top of an unbounded layout.
+        while (rowsLayout->count() > 1) {
             QLayoutItem* it = rowsLayout->takeAt(0);
             if (QWidget* w = it->widget()) w->deleteLater();
             delete it;
@@ -858,13 +865,12 @@ EditorWorkspace::EditorWorkspace(MediaRegistry* media, QWidget* parent)
                 h->addLayout(tv); h->addStretch();
                 if (!QFile::exists(mi.filePath))
                     h->addWidget(Theme::makeTag(QStringLiteral("missing"), QStringLiteral("warn")));
-                rowsLayout->addWidget(w);
+                // Insert ahead of the trailing stretch (which is the last item).
+                rowsLayout->insertWidget(rowsLayout->count() - 1, w);
                 ++shown;
             }
         }
         emptyHint->setVisible(shown == 0);
-        rowsLayout->addWidget(emptyHint);
-        rowsLayout->addStretch();
         countTag->setText(QString::number(shown));
     };
     if (m_media) {
