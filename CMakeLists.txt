@@ -186,6 +186,20 @@ enable_testing()
 qt_add_executable(MalloyStudioTests
     tests/model_tests.cpp
     ${MALLOY_CORE_SOURCES}
+    # UI sources needed by the Editor JSON round-trip tests. EditorWorkspace
+    # transitively depends on PanelFrame / Placeholder / IconFactory / Theme;
+    # adding them lets tests instantiate the widget without dragging the rest
+    # of the UI layer into the test binary.
+    src/ui/workspaces/EditorWorkspace.cpp
+    src/ui/workspaces/EditorWorkspace.h
+    src/ui/components/PanelFrame.cpp
+    src/ui/components/PanelFrame.h
+    src/ui/components/Placeholder.cpp
+    src/ui/components/Placeholder.h
+    src/ui/IconFactory.cpp
+    src/ui/IconFactory.h
+    src/ui/Theme.cpp
+    src/ui/Theme.h
 )
 
 # Force console subsystem so CTest captures stdout test output
@@ -195,6 +209,7 @@ target_include_directories(MalloyStudioTests PRIVATE src)
 
 target_link_libraries(MalloyStudioTests PRIVATE
     Qt6::Widgets
+    Qt6::Svg
     Qt6::Test
     d3d11
     dxgi

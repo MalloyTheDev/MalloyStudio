@@ -179,7 +179,7 @@ void MainWindow::setupUi() {
     connect(m_streamStudio, &StreamingWorkspace::goLiveRequested,
             this, [this] { m_controlsBar->toggleStream(); });
     m_shell->addWorkspace(QStringLiteral("stream"), m_streamStudio);
-    m_editor = new EditorWorkspace(this);
+    m_editor = new EditorWorkspace(m_mediaRegistry, this);
     m_shell->addWorkspace(QStringLiteral("editor"), m_editor);
     m_shell->addWorkspace(QStringLiteral("clips"), new ClipsWorkspace(m_clipsRegistry, this));
     m_shell->addWorkspace(QStringLiteral("media"), new MediaWorkspace(m_mediaRegistry, this));

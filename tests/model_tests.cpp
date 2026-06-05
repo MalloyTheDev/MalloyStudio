@@ -18,6 +18,7 @@
 #include "recording/StreamSettings.h"
 #include "recording/StreamingPipeline.h"
 #include "recording/EncoderRegistry.h"
+#include "ui/workspaces/EditorWorkspace.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -105,6 +106,8 @@ private slots:
     // contributes to gatherVisibleAudioIds() the way MainWindow expects.
     void addAudioInputFromUiCreatesScopedSource();
     void addCameraCreatesScopedSourceAndRoundTrips();
+    void editorClipRoundTripPreservesV4Fields();
+    void editorClipFromLegacyV3JsonAppliesDefaults();
     void addingAudioInputTriggersAudioInputsChanged();
     void togglingAudioInputVisibilityChangesGatherList();
     // v7 Tier 3: per-filter visibility toggle and the ffmpeg progress parser.
@@ -1138,6 +1141,106 @@ void MalloyModelTests::addingAudioInputTriggersAudioInputsChanged() {
                                   QStringLiteral("{fake-guid}"));
     QVERIFY2(spy.count() >= 1,
              qPrintable(QStringLiteral("audioInputsChanged was not emitted")));
+}
+
+// ---------------------------------------------------------------------------
+// v8 — Editor per-clip inspector properties (transform/audio/speed)
+// ---------------------------------------------------------------------------
+
+void MalloyModelTests::editorClipRoundTripPreservesV4Fields() {
+    // Building a clip JSON with all v4 fields and round-tripping it through
+    // EditorWorkspace's timelineJson() must preserve every numeric value
+    // bit-for-bit. (clipToJson always writes the new nested objects.)
+    EditorWorkspace editor(nullptr);
+    QJsonArray in;
+    QJsonObject c;
+    c.insert(QStringLiteral("track"), 1);
+    c.insert(QStringLiteral("start"), 12.5);
+    c.insert(QStringLiteral("dur"),   33.25);
+    c.insert(QStringLiteral("label"), QStringLiteral("Take 2"));
+    c.insert(QStringLiteral("tag"),   QStringLiteral("VID"));
+    c.insert(QStringLiteral("color"), QStringLiteral("#5a96cd"));
+    c.insert(QStringLiteral("audio"), false);
+    QJsonObject xf;
+    xf.insert(QStringLiteral("x"), 64);
+    xf.insert(QStringLiteral("y"), -32);
+    xf.insert(QStringLiteral("scale"), 87.5);
+    xf.insert(QStringLiteral("rotation"), -12.5);
+    xf.insert(QStringLiteral("opacity"), 78);
+    c.insert(QStringLiteral("transform"), xf);
+    QJsonObject ap;
+    ap.insert(QStringLiteral("gainDb"), -6);
+    ap.insert(QStringLiteral("pan"), 25);
+    ap.insert(QStringLiteral("channels"), 1);
+    c.insert(QStringLiteral("audioParams"), ap);
+    QJsonObject sp;
+    sp.insert(QStringLiteral("factor"), 1.75);
+    c.insert(QStringLiteral("speed"), sp);
+    in.append(c);
+
+    editor.setTimelineJson(in);
+    const QJsonArray out = editor.timelineJson();
+    QCOMPARE(out.size(), 1);
+    const QJsonObject got = out.at(0).toObject();
+    QCOMPARE(got.value(QStringLiteral("track")).toInt(),    1);
+    QCOMPARE(got.value(QStringLiteral("start")).toDouble(), 12.5);
+    QCOMPARE(got.value(QStringLiteral("dur")).toDouble(),   33.25);
+    QCOMPARE(got.value(QStringLiteral("label")).toString(), QStringLiteral("Take 2"));
+    const QJsonObject gotXf = got.value(QStringLiteral("transform")).toObject();
+    QCOMPARE(gotXf.value(QStringLiteral("x")).toInt(),          64);
+    QCOMPARE(gotXf.value(QStringLiteral("y")).toInt(),         -32);
+    QCOMPARE(gotXf.value(QStringLiteral("scale")).toDouble(),    87.5);
+    QCOMPARE(gotXf.value(QStringLiteral("rotation")).toDouble(),-12.5);
+    QCOMPARE(gotXf.value(QStringLiteral("opacity")).toInt(),    78);
+    const QJsonObject gotAp = got.value(QStringLiteral("audioParams")).toObject();
+    QCOMPARE(gotAp.value(QStringLiteral("gainDb")).toInt(),     -6);
+    QCOMPARE(gotAp.value(QStringLiteral("pan")).toInt(),        25);
+    QCOMPARE(gotAp.value(QStringLiteral("channels")).toInt(),    1);
+    const QJsonObject gotSp = got.value(QStringLiteral("speed")).toObject();
+    QCOMPARE(gotSp.value(QStringLiteral("factor")).toDouble(), 1.75);
+}
+
+void MalloyModelTests::editorClipFromLegacyV3JsonAppliesDefaults() {
+    // A v3 .malloy.json (written before the Editor deep pass) has flat clip
+    // entries with only track/start/dur/label/tag/color/audio — no transform /
+    // audioParams / speed sub-objects. Loading it must NOT lose data, and a
+    // subsequent save must materialize the new sub-objects with sane defaults
+    // (x=0, scale=100%, opacity=100%, gainDb=0, factor=1.0). This is the
+    // back-compat guarantee the new clipFromJson defaults exist to provide.
+    EditorWorkspace editor(nullptr);
+    QJsonArray in;
+    QJsonObject c;
+    c.insert(QStringLiteral("track"), 0);
+    c.insert(QStringLiteral("start"), 0.0);
+    c.insert(QStringLiteral("dur"),   8.0);
+    c.insert(QStringLiteral("label"), QStringLiteral("Intro card"));
+    c.insert(QStringLiteral("tag"),   QStringLiteral("IMG"));
+    c.insert(QStringLiteral("color"), QStringLiteral("#966ed2"));
+    c.insert(QStringLiteral("audio"), false);
+    // Deliberately NO "transform", "audioParams", "speed".
+    in.append(c);
+
+    editor.setTimelineJson(in);
+    const QJsonArray out = editor.timelineJson();
+    QCOMPARE(out.size(), 1);
+    const QJsonObject got = out.at(0).toObject();
+    // Legacy fields preserved as-is.
+    QCOMPARE(got.value(QStringLiteral("label")).toString(), QStringLiteral("Intro card"));
+    QCOMPARE(got.value(QStringLiteral("dur")).toDouble(),   8.0);
+    // New sub-objects materialized with their documented defaults.
+    const QJsonObject gotXf = got.value(QStringLiteral("transform")).toObject();
+    QVERIFY(!gotXf.isEmpty());
+    QCOMPARE(gotXf.value(QStringLiteral("x")).toInt(),       0);
+    QCOMPARE(gotXf.value(QStringLiteral("y")).toInt(),       0);
+    QCOMPARE(gotXf.value(QStringLiteral("scale")).toDouble(),  100.0);
+    QCOMPARE(gotXf.value(QStringLiteral("rotation")).toDouble(), 0.0);
+    QCOMPARE(gotXf.value(QStringLiteral("opacity")).toInt(), 100);
+    const QJsonObject gotAp = got.value(QStringLiteral("audioParams")).toObject();
+    QCOMPARE(gotAp.value(QStringLiteral("gainDb")).toInt(),  0);
+    QCOMPARE(gotAp.value(QStringLiteral("pan")).toInt(),     0);
+    QCOMPARE(gotAp.value(QStringLiteral("channels")).toInt(),0);
+    const QJsonObject gotSp = got.value(QStringLiteral("speed")).toObject();
+    QCOMPARE(gotSp.value(QStringLiteral("factor")).toDouble(), 1.0);
 }
 
 // ---------------------------------------------------------------------------
