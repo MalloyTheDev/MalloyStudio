@@ -238,6 +238,7 @@ void AudioController::setVolume(const QString& id, float volume) {
     if (m_inputs[i].volume == volume) return;
     m_inputs[i].volume = volume;
     persist(m_inputs[i]);
+    emit inputControlChanged(id);
 }
 
 void AudioController::setMuted(const QString& id, bool muted) {
@@ -245,6 +246,7 @@ void AudioController::setMuted(const QString& id, bool muted) {
     if (i < 0 || m_inputs[i].muted == muted) return;
     m_inputs[i].muted = muted;
     persist(m_inputs[i]);
+    emit inputControlChanged(id);
 }
 
 void AudioController::setPan(const QString& id, float pan) {
@@ -254,6 +256,7 @@ void AudioController::setPan(const QString& id, float pan) {
     if (m_inputs[i].pan == pan) return;
     m_inputs[i].pan = pan;
     persist(m_inputs[i]);
+    emit inputControlChanged(id);
 }
 
 void AudioController::setLimiterEnabled(bool enabled) {

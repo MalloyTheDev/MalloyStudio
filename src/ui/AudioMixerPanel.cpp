@@ -95,6 +95,8 @@ AudioMixerPanel::AudioMixerPanel(AudioController* controller,
             this, &AudioMixerPanel::onLevels);
     connect(m_controller, &AudioController::inputConnectionChanged,
             this, &AudioMixerPanel::onConnectionChanged);
+    connect(m_controller, &AudioController::inputControlChanged,
+            this, &AudioMixerPanel::onInputControlChanged);
 
     rebuild();
 }
@@ -208,4 +210,23 @@ void AudioMixerPanel::onConnectionChanged(const QString& id, bool connected) {
     it.value().name->setStyleSheet(connected
         ? QString()
         : QStringLiteral("color: #70737a; font-style: italic;"));
+}
+
+void AudioMixerPanel::onInputControlChanged(const QString& id) {
+    // Another view on the same AudioController (e.g. Streaming Mix) changed
+    // volume/pan/muted for this input. Re-seed our widgets to match — block
+    // their change signals so this re-seed doesn't re-fire setVolume/setMuted
+    // back into the controller (which would no-op-skip anyway, but the cycle
+    // is cleaner avoided).
+    auto it = m_strips.find(id);
+    if (it == m_strips.end()) return;
+    for (const AudioInput& in : m_controller->inputs()) {
+        if (in.id != id) continue;
+        const Strip& s = it.value();
+        const QSignalBlocker bv(s.volume), bp(s.pan), bm(s.mute);
+        s.volume->setValue(static_cast<int>(in.volume * 100.0f));
+        s.pan->setValue(static_cast<int>(in.pan * 100.0f));
+        s.mute->setChecked(in.muted);
+        return;
+    }
 }

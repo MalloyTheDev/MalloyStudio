@@ -66,6 +66,11 @@ signals:
     void levelsUpdated(QString id, float peakL, float peakR);
     // Per-input connectivity (e.g. device unplugged).
     void inputConnectionChanged(QString id, bool connected);
+    // Emitted when setVolume/setMuted/setPan changes the stored value (no-op
+    // skipped). UI views observing the same controller (e.g. Recording mixer
+    // and Streaming Mix) re-seed their per-id sliders/buttons from here so the
+    // two views stay symmetric when the user moves a control in one of them.
+    void inputControlChanged(QString id);
     // pcmReady(QByteArray pcm) — inherited from TimedPcmSource.
     // Program bus output: interleaved s16le 48kHz stereo PCM. Emitted ~50 Hz.
 

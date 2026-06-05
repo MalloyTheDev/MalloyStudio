@@ -1,9 +1,11 @@
 #include "ui/workspaces/StreamingWorkspace.h"
-#include "ui/components/MeterBar.h"
 #include "ui/components/PanelFrame.h"
 #include "ui/components/Placeholder.h"
+#include "ui/VuMeter.h"
 #include "ui/IconFactory.h"
 #include "ui/Theme.h"
+#include "audio/AudioController.h"
+#include "audio/AudioInput.h"
 
 #include <QComboBox>
 #include <QGridLayout>
@@ -12,7 +14,10 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QRandomGenerator>
+#include <QSignalBlocker>
+#include <QSlider>
 #include <QTimer>
+#include <QToolButton>
 #include <QVBoxLayout>
 
 namespace {
@@ -38,12 +43,29 @@ QWidget* metricTile(const QString& label, QLabel** valueOut, const QString& tone
 
 } // namespace
 
-StreamingWorkspace::StreamingWorkspace(QWidget* parent) : QWidget(parent) {
+StreamingWorkspace::StreamingWorkspace(AudioController* audio, QWidget* parent)
+    : QWidget(parent), m_audio(audio)
+{
+    Q_ASSERT_X(m_audio, "StreamingWorkspace",
+               "an AudioController is required so the Mix section can show real levels");
     auto* row = new QHBoxLayout(this);
     row->setContentsMargins(0, 0, 0, 0);
     row->setSpacing(0);
     row->addWidget(buildCenter(), 1);
     row->addWidget(buildRail());
+
+    // Mix wiring: same AudioController the Recording sidebar mixer observes.
+    // Qt::AutoConnection delivers directly on the main thread, so changes made
+    // here are immediately reflected in the Recording view (and vice versa).
+    connect(m_audio, &AudioController::inputsChanged,
+            this, &StreamingWorkspace::rebuildMixStrips);
+    connect(m_audio, &AudioController::levelsUpdated,
+            this, &StreamingWorkspace::onMixLevels);
+    connect(m_audio, &AudioController::inputConnectionChanged,
+            this, &StreamingWorkspace::onMixConnectionChanged);
+    connect(m_audio, &AudioController::inputControlChanged,
+            this, &StreamingWorkspace::onMixControlChanged);
+    rebuildMixStrips();
 
     loadMeta();
     connect(m_titleEdit, &QLineEdit::editingFinished, this, &StreamingWorkspace::persistMeta);
@@ -277,22 +299,23 @@ QWidget* StreamingWorkspace::buildRail() {
     alerts->bodyLayout()->addWidget(abody);
     v->addWidget(alerts);
 
-    // Mix
+    // Mix (real, AudioController-driven). One channel strip per input — the
+    // strip set is populated/refreshed by rebuildMixStrips() in response to
+    // AudioController::inputsChanged. An empty-state hint covers the
+    // (defensive) case where loopback:default fails to add.
     auto* mix = new PanelFrame(tr("Mix"), QStringLiteral("speaker"));
     auto* mbody = new QWidget;
     auto* mv = new QVBoxLayout(mbody);
     mv->setContentsMargins(10, 10, 10, 10);
     mv->setSpacing(8);
-    auto addMeter = [&](const QString& name, MeterBar** out) {
-        auto* h = new QHBoxLayout; h->setSpacing(8);
-        auto* l = lbl(name, QStringLiteral("dim"), 11); l->setFixedWidth(60);
-        h->addWidget(l);
-        auto* m = new MeterBar; h->addWidget(m, 1);
-        mv->addLayout(h);
-        if (out) *out = m;
-    };
-    addMeter(tr("Mic"), &m_micMeter);
-    addMeter(tr("Desktop"), &m_deskMeter);
+    m_mixLanes = new QVBoxLayout;
+    m_mixLanes->setContentsMargins(0, 0, 0, 0);
+    m_mixLanes->setSpacing(6);
+    mv->addLayout(m_mixLanes);
+    m_mixEmpty = lbl(tr("No audio inputs detected."), QStringLiteral("mute"), 11);
+    m_mixEmpty->setAlignment(Qt::AlignCenter);
+    m_mixEmpty->setVisible(false);
+    mv->addWidget(m_mixEmpty);
     mix->bodyLayout()->addWidget(mbody);
     v->addWidget(mix);
 
@@ -327,16 +350,10 @@ void StreamingWorkspace::setLive(bool live) {
 }
 
 void StreamingWorkspace::tick() {
+    // Mix levels are driven by AudioController::levelsUpdated; this tick only
+    // animates the SIMULATED live-stream telemetry (viewers/bitrate/dropped/
+    // ping/fps). The previous m_micL/m_deskL random walk is gone.
     auto* rng = QRandomGenerator::global();
-    auto step = [&](double& level, double& peak, double base, double variance) {
-        const double target = qBound(0.05, base + (rng->generateDouble() - 0.5) * variance * 2, 0.95);
-        level += (target - level) * 0.35;
-        peak = (level > peak) ? level : qMax(level, peak - 0.01);
-    };
-    step(m_micL, m_micP, 0.45, 0.22);
-    step(m_deskL, m_deskP, 0.55, 0.18);
-    if (m_micMeter) m_micMeter->setValues(m_micL, m_micP);
-    if (m_deskMeter) m_deskMeter->setValues(m_deskL, m_deskP);
 
     if (m_live) {
         m_viewers = qBound(800, m_viewers + int((rng->generateDouble() - 0.35) * 80), 8000);
@@ -346,5 +363,120 @@ void StreamingWorkspace::tick() {
         m_mDropped->setText(QString::number(m_dropped));
         m_mPing->setText(QStringLiteral("%1 ms").arg(22 + int(rng->generateDouble() * 18)));
         m_mFps->setText(QStringLiteral("59.8"));
+    }
+}
+
+// ── Mix: AudioController-driven channel strips ─────────────────────────────
+
+StreamingWorkspace::Strip StreamingWorkspace::makeMixStrip(const QString& id, const AudioInput& in) {
+    // Two-row compact strip:
+    //   top:    [name (stretch)]  [M mute]
+    //   bottom: [VuMeter]         [volume slider]
+    // No pan — the streaming bus rarely needs per-input pan, and the rail is
+    // narrower than the Recording sidebar. Pan can still be adjusted from the
+    // Recording mixer if needed (the controller is shared).
+    Strip s;
+    s.root = new QWidget(this);
+    auto* col = new QVBoxLayout(s.root);
+    col->setContentsMargins(6, 4, 6, 4);
+    col->setSpacing(4);
+
+    auto* topRow = new QHBoxLayout;
+    topRow->setSpacing(8);
+    s.name = new QLabel(in.name, s.root);
+    QFont f = s.name->font(); f.setBold(true); s.name->setFont(f);
+    topRow->addWidget(s.name, 1);
+
+    s.mute = new QToolButton(s.root);
+    s.mute->setText(tr("M"));
+    s.mute->setCheckable(true);
+    s.mute->setChecked(in.muted);
+    s.mute->setToolTip(tr("Mute"));
+    s.mute->setFixedWidth(28);
+    topRow->addWidget(s.mute);
+    col->addLayout(topRow);
+
+    auto* botRow = new QHBoxLayout;
+    botRow->setSpacing(8);
+    s.meter = new VuMeter(s.root);
+    s.meter->setMinimumWidth(40);
+    botRow->addWidget(s.meter, 2);
+
+    s.volume = new QSlider(Qt::Horizontal, s.root);
+    s.volume->setRange(0, 150);   // matches AudioMixerPanel: 0..150 → 0.0..1.5
+    s.volume->setValue(static_cast<int>(in.volume * 100.0f));
+    s.volume->setMinimumWidth(56);
+    s.volume->setToolTip(tr("Volume (0–150 %)"));
+    botRow->addWidget(s.volume, 2);
+    col->addLayout(botRow);
+
+    // Connectivity styling (matches the Recording mixer's pattern).
+    s.meter->setEnabled(in.connected);
+    s.volume->setEnabled(in.connected);
+    s.mute->setEnabled(in.connected);
+    if (!in.connected)
+        s.name->setStyleSheet(QStringLiteral("color: #70737a; font-style: italic;"));
+
+    // Push UI changes back to the controller. Capture id by value so the
+    // lambda remains valid even after rebuildMixStrips() destroys the strip
+    // and reuses the same id later.
+    connect(s.volume, &QSlider::valueChanged, this, [this, id](int v) {
+        m_audio->setVolume(id, float(v) / 100.0f);
+    });
+    connect(s.mute, &QToolButton::toggled, this, [this, id](bool m) {
+        m_audio->setMuted(id, m);
+    });
+
+    return s;
+}
+
+void StreamingWorkspace::rebuildMixStrips() {
+    if (!m_mixLanes) return;
+    // Wipe existing strips wholesale — re-seeding via setValue would re-fire
+    // the volume/mute lambdas, and recreating is also the simplest way to
+    // handle an input being removed.
+    for (auto it = m_mixStrips.begin(); it != m_mixStrips.end(); ++it)
+        if (it.value().root) it.value().root->deleteLater();
+    m_mixStrips.clear();
+
+    const QList<AudioInput>& inputs = m_audio->inputs();
+    for (const AudioInput& in : inputs) {
+        Strip s = makeMixStrip(in.id, in);
+        m_mixLanes->addWidget(s.root);
+        m_mixStrips.insert(in.id, s);
+    }
+    if (m_mixEmpty) m_mixEmpty->setVisible(inputs.isEmpty());
+}
+
+void StreamingWorkspace::onMixLevels(const QString& id, float peakL, float peakR) {
+    auto it = m_mixStrips.find(id);
+    if (it == m_mixStrips.end()) return;
+    it.value().meter->setLevels(peakL, peakR);
+}
+
+void StreamingWorkspace::onMixConnectionChanged(const QString& id, bool connected) {
+    auto it = m_mixStrips.find(id);
+    if (it == m_mixStrips.end()) return;
+    it.value().meter->setEnabled(connected);
+    it.value().volume->setEnabled(connected);
+    it.value().mute->setEnabled(connected);
+    it.value().name->setStyleSheet(connected
+        ? QString()
+        : QStringLiteral("color: #70737a; font-style: italic;"));
+}
+
+void StreamingWorkspace::onMixControlChanged(const QString& id) {
+    // Mirror onInputControlChanged in AudioMixerPanel: re-seed our slider/mute
+    // from the controller when the other view changed them. QSignalBlocker
+    // prevents this re-seed from firing the controller's setters again.
+    auto it = m_mixStrips.find(id);
+    if (it == m_mixStrips.end()) return;
+    for (const AudioInput& in : m_audio->inputs()) {
+        if (in.id != id) continue;
+        const Strip& s = it.value();
+        const QSignalBlocker bv(s.volume), bm(s.mute);
+        s.volume->setValue(static_cast<int>(in.volume * 100.0f));
+        s.mute->setChecked(in.muted);
+        return;
     }
 }

@@ -175,7 +175,7 @@ void MainWindow::setupUi() {
     connect(m_dashboard, &Dashboard::streamRequested, this, [this] { m_controlsBar->toggleStream(); });
     m_shell->addWorkspace(QStringLiteral("dashboard"), m_dashboard);
     m_shell->addWorkspace(QStringLiteral("record"), recording);
-    m_streamStudio = new StreamingWorkspace(this);
+    m_streamStudio = new StreamingWorkspace(m_audio, this);
     connect(m_streamStudio, &StreamingWorkspace::goLiveRequested,
             this, [this] { m_controlsBar->toggleStream(); });
     m_shell->addWorkspace(QStringLiteral("stream"), m_streamStudio);

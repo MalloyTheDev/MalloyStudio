@@ -35,6 +35,9 @@ private slots:
     void onLevels(const QString& id, float peakL, float peakR);
     void onConnectionChanged(const QString& id, bool connected);
     void onAddMicrophoneClicked();
+    // Re-seed this strip's volume/pan/mute widgets after another view on the
+    // same AudioController changed one of those fields (Streaming Mix ⇄ here).
+    void onInputControlChanged(const QString& id);
 
 private:
     struct Strip {

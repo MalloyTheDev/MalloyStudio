@@ -108,6 +108,7 @@ private slots:
     void addCameraCreatesScopedSourceAndRoundTrips();
     void editorClipRoundTripPreservesV4Fields();
     void editorClipFromLegacyV3JsonAppliesDefaults();
+    void audioControllerEmitsInputControlChangedOnValueChange();
     void addingAudioInputTriggersAudioInputsChanged();
     void togglingAudioInputVisibilityChangesGatherList();
     // v7 Tier 3: per-filter visibility toggle and the ffmpeg progress parser.
@@ -1241,6 +1242,61 @@ void MalloyModelTests::editorClipFromLegacyV3JsonAppliesDefaults() {
     QCOMPARE(gotAp.value(QStringLiteral("channels")).toInt(),0);
     const QJsonObject gotSp = got.value(QStringLiteral("speed")).toObject();
     QCOMPARE(gotSp.value(QStringLiteral("factor")).toDouble(), 1.0);
+}
+
+void MalloyModelTests::audioControllerEmitsInputControlChangedOnValueChange() {
+    // The Streaming Mix + Recording AudioMixerPanel both observe one shared
+    // AudioController. When a user moves a slider in one panel, the other's
+    // slider knob must re-seed to match — driven by AudioController emitting
+    // inputControlChanged(id) from setVolume/setMuted/setPan. The signal MUST
+    // skip the no-op path so it isn't spammy.
+    AudioController ac;
+    const QString id = ac.inputs().first().id;   // loopback:default is auto-added
+
+    // Drive each control to a known anchor first, then attach the spy. Other
+    // tests in this suite persist volume/mute/pan via QSettings, so the
+    // controller's starting values aren't fixed; the anchor + spy.clear()
+    // pattern keeps this case robust to whatever state was inherited.
+    ac.setVolume(id, 0.40f);
+    ac.setMuted (id, false);
+    ac.setPan   (id, 0.00f);
+
+    QSignalSpy spy(&ac, &AudioController::inputControlChanged);
+    QVERIFY(spy.isValid());
+
+    // setVolume: real change → emits exactly once with the right id.
+    ac.setVolume(id, 0.85f);
+    QCOMPARE(spy.count(), 1);
+    QCOMPARE(spy.takeFirst().at(0).toString(), id);
+
+    // setVolume to same value → silent no-op-skip in the setter.
+    ac.setVolume(id, 0.85f);
+    QCOMPARE(spy.count(), 0);
+
+    // setMuted real change → emits; same value → silent.
+    ac.setMuted(id, true);
+    QCOMPARE(spy.count(), 1);
+    spy.clear();
+    ac.setMuted(id, true);
+    QCOMPARE(spy.count(), 0);
+
+    // setPan real change → emits; same value → silent.
+    ac.setPan(id, 0.5f);
+    QCOMPARE(spy.count(), 1);
+    spy.clear();
+    ac.setPan(id, 0.5f);
+    QCOMPARE(spy.count(), 0);
+
+    // Unknown id → no-op + no emit (defensive).
+    ac.setVolume(QStringLiteral("does-not-exist"), 0.5f);
+    QCOMPARE(spy.count(), 0);
+
+    // Reset to defaults so we don't poison later tests that share QSettings —
+    // audioMuteActionIdTogglesInput, for instance, asserts muted == false on
+    // a fresh controller, and AudioInput's persisted values are global.
+    ac.setVolume(id, 1.0f);
+    ac.setMuted (id, false);
+    ac.setPan   (id, 0.0f);
 }
 
 // ---------------------------------------------------------------------------
