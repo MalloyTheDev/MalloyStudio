@@ -154,11 +154,36 @@ private slots:
     // can resolve them. The schema has to round-trip, older projects have to
     // load as unlinked, and the trim/split arithmetic has to keep the timeline
     // and the source in step.
+    // ADR-0002: a job carries the settings and the timeline snapshot it renders
+    // with, so a queued render is reproducible and a retry re-renders the same
+    // thing. Jobs from before the schema cannot run and are retired on sight.
+    void outputSettingsJsonRoundTrips();
+    void renderJobCarriesSettingsAndSnapshot();
+    void renderQueueRetiresJobsWithoutASnapshot();
+    void renderQueueRejectsUnrenderableRequests();
     void editorClipRoundTripPreservesSourceReference();
     void editorLegacyClipLoadsAsUnlinked();
     void timelineTrimKeepsSourceInSync();
     void timelineSplitDerivesRightHandSourceIn();
 };
+
+// A render request that passes enqueue validation: a one-clip timeline, default
+// encoder settings and an output file inside an existing directory.
+static RenderRequest makeRenderRequest(const QString& outputPath) {
+    RenderRequest r;
+    r.name        = QFileInfo(outputPath).fileName();
+    r.project     = QStringLiteral("Proj");
+    r.projectPath = QStringLiteral("C:/proj/proj.malloy.json");
+    r.outputPath  = outputPath;
+    QJsonObject clip;
+    clip.insert(QStringLiteral("track"), 0);
+    clip.insert(QStringLiteral("start"), 0.0);
+    clip.insert(QStringLiteral("dur"),   5.0);
+    clip.insert(QStringLiteral("sourcePath"), QStringLiteral("C:/media/a.mp4"));
+    clip.insert(QStringLiteral("sourceIn"),   0.0);
+    r.timeline = QJsonArray{clip};
+    return r;
+}
 
 void MalloyModelTests::initTestCase() {
     // Isolate QSettings writes from real user state.
@@ -1594,8 +1619,8 @@ void MalloyModelTests::renderQueueProcessesAndPersists() {
     q.setStorePath(store);
     QCOMPARE(q.jobs().size(), 0);
 
-    q.enqueue(QStringLiteral("a.mp4"), QStringLiteral("1080p60"), QStringLiteral("Proj"));
-    q.enqueue(QStringLiteral("b.mp4"), QStringLiteral("1080p60"), QStringLiteral("Proj"));
+    QVERIFY(!q.enqueue(makeRenderRequest(dir.filePath(QStringLiteral("a.mp4")))).isEmpty());
+    QVERIFY(!q.enqueue(makeRenderRequest(dir.filePath(QStringLiteral("b.mp4")))).isEmpty());
     QCOMPARE(q.jobs().size(), 2);
     QCOMPARE(q.countOfState(RenderJob::Active), 1);    // first promoted immediately
     QCOMPARE(q.countOfState(RenderJob::Pending), 1);
@@ -1610,6 +1635,14 @@ void MalloyModelTests::renderQueueProcessesAndPersists() {
     q2.setStorePath(store);
     QCOMPARE(q2.jobs().size(), 2);
     QCOMPARE(q2.countOfState(RenderJob::Completed), 1);
+    // The snapshot and settings survive the round-trip, which is what makes a
+    // reloaded job runnable at all.
+    for (const RenderJob& j : q2.jobs()) {
+        QCOMPARE(j.timeline.size(), 1);
+        QVERIFY(j.renderable());
+        QCOMPARE(j.output.width, OutputSettings{}.width);
+        QVERIFY(!j.target.isEmpty());
+    }
 }
 
 void MalloyModelTests::renderQueueRetryCancelClear() {
@@ -1628,6 +1661,12 @@ void MalloyModelTests::renderQueueRetryCancelClear() {
         o.insert(QStringLiteral("state"), state);
         o.insert(QStringLiteral("progress"), progress);
         if (state == 3) o.insert(QStringLiteral("error"), QStringLiteral("boom"));
+        // Seeded jobs carry a snapshot so they are retryable; a job without one
+        // is covered by renderQueueRetiresJobsWithoutASnapshot().
+        const RenderRequest r = makeRenderRequest(dir.filePath(id + QStringLiteral(".mp4")));
+        o.insert(QStringLiteral("outputPath"), r.outputPath);
+        o.insert(QStringLiteral("timeline"), r.timeline);
+        o.insert(QStringLiteral("output"), r.output.toJson());
         return o;
     };
     {
@@ -1690,8 +1729,8 @@ void MalloyModelTests::renderQueuePauseHoldsPendingJobs() {
     // jobs stay Pending.
     q.setPaused(true);
     QVERIFY(q.paused());
-    q.enqueue(QStringLiteral("a.mp4"), QStringLiteral("1080p60"), QStringLiteral("Proj"));
-    q.enqueue(QStringLiteral("b.mp4"), QStringLiteral("1080p60"), QStringLiteral("Proj"));
+    q.enqueue(makeRenderRequest(dir.filePath(QStringLiteral("a.mp4"))));
+    q.enqueue(makeRenderRequest(dir.filePath(QStringLiteral("b.mp4"))));
     QCOMPARE(q.countOfState(RenderJob::Active), 0);
     QCOMPARE(q.countOfState(RenderJob::Pending), 2);
 
@@ -1997,6 +2036,145 @@ void MalloyModelTests::timelineSplitDerivesRightHandSourceIn() {
     QCOMPARE(splitSourceIn(10.0, 30.0, 2.0, 16.0), 42.0);
     // A cut at the clip head is a no-op on the in-point.
     QCOMPARE(splitSourceIn(10.0, 30.0, 1.0, 10.0), 30.0);
+}
+
+void MalloyModelTests::outputSettingsJsonRoundTrips() {
+    OutputSettings in;
+    in.width = 2560; in.height = 1440; in.fps = 120;
+    in.videoCodec = QStringLiteral("h264_nvenc");
+    in.crf = 19; in.preset = QStringLiteral("p5");
+    in.audioCodec = QStringLiteral("opus"); in.audioBitratekbps = 256;
+    in.container = QStringLiteral("mkv"); in.bitrateKbps = 24000; in.keyframeSec = 2;
+
+    const OutputSettings out = OutputSettings::fromJson(in.toJson());
+    QCOMPARE(out.width, 2560);
+    QCOMPARE(out.height, 1440);
+    QCOMPARE(out.fps, 120);
+    QCOMPARE(out.videoCodec, QStringLiteral("h264_nvenc"));
+    QCOMPARE(out.crf, 19);
+    QCOMPARE(out.preset, QStringLiteral("p5"));
+    QCOMPARE(out.audioCodec, QStringLiteral("opus"));
+    QCOMPARE(out.audioBitratekbps, 256);
+    QCOMPARE(out.container, QStringLiteral("mkv"));
+    QCOMPARE(out.bitrateKbps, 24000);
+    QCOMPARE(out.keyframeSec, 2);
+
+    // An empty object yields the documented defaults rather than zeroes.
+    const OutputSettings defaults = OutputSettings::fromJson(QJsonObject{});
+    const OutputSettings expected;
+    QCOMPARE(defaults.width, expected.width);
+    QCOMPARE(defaults.videoCodec, expected.videoCodec);
+    QCOMPARE(defaults.crf, expected.crf);
+    QCOMPARE(defaults.container, expected.container);
+}
+
+void MalloyModelTests::renderJobCarriesSettingsAndSnapshot() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    RenderQueue q;
+    q.setStorePath(dir.filePath(QStringLiteral("rq.json")));
+
+    RenderRequest req = makeRenderRequest(dir.filePath(QStringLiteral("out.mp4")));
+    req.output.width = 1280;
+    req.output.height = 720;
+    req.output.fps = 30;
+    const QString id = q.enqueue(req);
+    QVERIFY(!id.isEmpty());
+    QCOMPARE(q.jobs().size(), 1);
+
+    const RenderJob& j = q.jobs().first();
+    QCOMPARE(j.output.width, 1280);
+    QCOMPARE(j.output.fps, 30);
+    QCOMPARE(j.timeline.size(), 1);
+    QCOMPARE(j.projectPath, QStringLiteral("C:/proj/proj.malloy.json"));
+    QVERIFY(j.renderable());
+    // The target string is derived from the settings, not passed in.
+    QCOMPARE(j.target, RenderQueue::describeTarget(req.output));
+    QVERIFY(j.target.contains(QStringLiteral("1280x720")));
+
+    // The snapshot is a copy: editing the timeline afterwards must not reach a
+    // job that is already queued.
+    req.timeline = QJsonArray{};
+    QCOMPARE(q.jobs().first().timeline.size(), 1);
+}
+
+void MalloyModelTests::renderQueueRetiresJobsWithoutASnapshot() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString store = dir.filePath(QStringLiteral("rq_legacy.json"));
+
+    // Schema 0: a bare array, jobs with no output settings and no timeline.
+    {
+        auto legacy = [](const QString& id, int state) {
+            QJsonObject o;
+            o.insert(QStringLiteral("id"), id);
+            o.insert(QStringLiteral("name"), id);
+            o.insert(QStringLiteral("state"), state);
+            return o;
+        };
+        QJsonArray arr;
+        arr.append(legacy(QStringLiteral("old-pending"), 0));
+        arr.append(legacy(QStringLiteral("old-done"), 2));
+        QFile f(store);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write(QJsonDocument(arr).toJson());
+        f.close();
+    }
+
+    RenderQueue q;
+    q.setStorePath(store);
+    QCOMPARE(q.jobs().size(), 2);
+    // The pending job is retired with a reason instead of being run.
+    QCOMPARE(q.countOfState(RenderJob::Failed), 1);
+    QCOMPARE(q.countOfState(RenderJob::Active), 0);
+    QCOMPARE(q.countOfState(RenderJob::Pending), 0);
+    // History is left alone.
+    QCOMPARE(q.countOfState(RenderJob::Completed), 1);
+
+    const RenderJob* retired = nullptr;
+    for (const RenderJob& j : q.jobs())
+        if (j.id == QLatin1String("old-pending")) retired = &j;
+    QVERIFY(retired);
+    QVERIFY(!retired->error.isEmpty());
+    QVERIFY(!retired->renderable());
+
+    // Retrying it does not put an unrunnable job back in the queue.
+    q.retry(QStringLiteral("old-pending"));
+    QCOMPARE(q.countOfState(RenderJob::Failed), 1);
+    QCOMPARE(q.countOfState(RenderJob::Active), 0);
+}
+
+void MalloyModelTests::renderQueueRejectsUnrenderableRequests() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    RenderQueue q;
+    q.setStorePath(dir.filePath(QStringLiteral("rq.json")));
+
+    QString error;
+    // No timeline.
+    RenderRequest empty = makeRenderRequest(dir.filePath(QStringLiteral("a.mp4")));
+    empty.timeline = QJsonArray{};
+    QVERIFY(q.enqueue(empty, &error).isEmpty());
+    QVERIFY(!error.isEmpty());
+
+    // No output file.
+    RenderRequest noOut = makeRenderRequest(dir.filePath(QStringLiteral("b.mp4")));
+    noOut.outputPath.clear();
+    QVERIFY(q.enqueue(noOut, &error).isEmpty());
+    QVERIFY(!error.isEmpty());
+
+    // Output directory does not exist: caught now rather than at render time.
+    RenderRequest badDir = makeRenderRequest(
+        dir.filePath(QStringLiteral("nope/deeper/c.mp4")));
+    QVERIFY(q.enqueue(badDir, &error).isEmpty());
+    QVERIFY(error.contains(QStringLiteral("does not exist")));
+
+    QCOMPARE(q.jobs().size(), 0);
+
+    // A well-formed request still succeeds and clears the error.
+    QVERIFY(!q.enqueue(makeRenderRequest(dir.filePath(QStringLiteral("d.mp4"))), &error).isEmpty());
+    QVERIFY(error.isEmpty());
+    QCOMPARE(q.jobs().size(), 1);
 }
 
 QTEST_MAIN(MalloyModelTests)

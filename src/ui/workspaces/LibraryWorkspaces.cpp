@@ -441,15 +441,10 @@ RenderWorkspace::RenderWorkspace(RenderQueue* queue, QWidget* parent)
         pause->setText(on ? tr("Resume queue") : tr("Pause queue"));
     });
     tb->addWidget(pause);
-    auto* neu = new QPushButton(Icons::icon(QStringLiteral("plus"), Theme::Text, 12), tr(" New render"));
-    connect(neu, &QPushButton::clicked, this, [this] {
-        if (!m_queue) return;
-        static int n = 1;
-        m_queue->enqueue(tr("Highlight reel %1.mp4").arg(n++),
-                         tr("1080p60 · NVENC · 24 Mb/s"), tr("Spire of the Hollow Sun"),
-                         QStringLiteral("D:\\Renders\\Spire\\"));
-    });
-    tb->addWidget(neu);
+    // The "New render" button used to fabricate a job from hardcoded strings.
+    // A job now has to carry the timeline and settings it renders with
+    // (docs/adr/0002-render-job-contract.md), which only the Editor can supply,
+    // so renders are queued from there and this workspace manages the queue.
     col->addWidget(toolbar);
     auto* div = new QFrame; div->setObjectName(QStringLiteral("divider")); div->setFixedHeight(1);
     col->addWidget(div);

@@ -1,12 +1,23 @@
 #pragma once
 
-// RenderQueue — background render job model (audit.html's RenderQueue). Holds
-// jobs with state + progress, persists them as JSON, and drives progress with a
-// simulated worker (one active job at a time) so the Render workspace is fully
-// functional ahead of the real EncoderPipeline integration. Completed/failed
-// jobs persist as history; active/pending resume as pending on next launch.
+// RenderQueue - background render job model. Holds jobs with state + progress,
+// persists them as JSON, and runs one at a time. Completed and failed jobs
+// persist as history; anything active at shutdown resumes as pending, because a
+// killed render leaves nothing to resume from.
+//
+// A job carries everything needed to render it: structured encoder settings and
+// a snapshot of the timeline taken when it was queued
+// (docs/adr/0002-render-job-contract.md). Editing the project afterwards does
+// not change what a queued job produces, and a retry re-renders the same thing
+// that failed.
+//
+// The worker is still simulated. Replacing it is
+// docs/adr/0003-render-worker-pipeline.md.
+
+#include "recording/OutputSettings.h"
 
 #include <QDateTime>
+#include <QJsonArray>
 #include <QObject>
 #include <QString>
 #include <QVector>
@@ -19,17 +30,36 @@ struct RenderJob {
 
     QString   id;
     QString   name;
-    QString   project;
-    QString   target;        // e.g. "1080p60 · NVENC · 24 Mb/s"
-    QString   outputPath;
+    QString   project;       // display name of the source project
+    QString   projectPath;   // .malloy.json it came from; informational
+    QString   target;        // display string derived from `output` at enqueue
+    QString   outputPath;    // full path of the file to write, not a directory
     QString   error;         // set when Failed
     State     state = Pending;
     int       progress = 0;  // 0..100
     QDateTime finishedAt;
 
+    OutputSettings output;   // encoder settings this job renders with
+    QJsonArray     timeline; // snapshot of the clips to render
+
+    // False for jobs written before the schema existed, which cannot be
+    // rendered because nothing recorded what they were rendering.
+    bool renderable() const { return !timeline.isEmpty() && !outputPath.isEmpty(); }
+
     QString stateText() const;
     QJsonObject toJson() const;
     static RenderJob fromJson(const QJsonObject& o);
+};
+
+// Everything needed to queue a render. Grouped so the call site reads as a
+// request rather than six positional strings.
+struct RenderRequest {
+    QString        name;
+    QString        project;
+    QString        projectPath;
+    QString        outputPath;
+    OutputSettings output;
+    QJsonArray     timeline;
 };
 
 class RenderQueue : public QObject {
@@ -43,8 +73,16 @@ public:
     int  countOfState(RenderJob::State s) const;
     bool hasActive() const;
 
-    QString enqueue(const QString& name, const QString& target,
-                    const QString& project, const QString& outputPath = QString());
+    // Returns the new job id, or an empty string with *error set when the
+    // request cannot produce a file: no timeline, no output path, or an output
+    // directory that does not exist. Failing here beats failing minutes later
+    // inside the encoder.
+    QString enqueue(const RenderRequest& request, QString* error = nullptr);
+
+    // Display string for a job's encoder settings, e.g.
+    // "1920x1080 60fps libx264 CRF 23". Public so the enqueue call sites and
+    // tests agree on one rendering of the same settings.
+    static QString describeTarget(const OutputSettings& output);
     void retry(const QString& id);   // Failed → Pending
     void cancel(const QString& id);  // Active/Pending → removed
     void clearCompleted();
