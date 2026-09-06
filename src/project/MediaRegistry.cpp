@@ -1,4 +1,5 @@
 #include "project/MediaRegistry.h"
+#include "project/ByteSize.h"
 
 #include <QDir>
 #include <QFileInfo>
@@ -34,10 +35,7 @@ const QStringList& imageExts() {
 } // namespace
 
 QString MediaInfo::sizeText() const {
-    const double mb = sizeBytes / (1024.0 * 1024.0);
-    if (mb >= 1024.0) return QStringLiteral("%1 GB").arg(mb / 1024.0, 0, 'f', 1);
-    if (mb >= 1.0)    return QStringLiteral("%1 MB").arg(mb, 0, 'f', 1);
-    return QStringLiteral("%1 KB").arg(sizeBytes / 1024.0, 0, 'f', 0);
+    return formatByteSize(sizeBytes);
 }
 
 QString MediaInfo::kindText() const {

@@ -11,6 +11,7 @@
 #include "project/ClipsRegistry.h"
 #include "project/ProjectRegistry.h"
 #include "project/MediaRegistry.h"
+#include "project/RecentRecordings.h"
 #include "recording/RenderQueue.h"
 #include "recording/OutputSettings.h"
 #include "recording/EncoderPipeline.h"
@@ -143,6 +144,11 @@ private slots:
     // Registries degrade gracefully: missing/corrupt stores load empty, ops on
     // unknown ids no-op, scans of empty/nonexistent dirs yield nothing.
     void registriesDegradeGracefullyOnBadInput();
+    // Recent recordings: the dashboard panel lists real capture files, so the
+    // scan must filter by extension, order newest first, honour the limit and
+    // tolerate a missing folder.
+    void recentRecordingsScanFiltersOrdersAndLimits();
+    void recentRecordingsRelativeTimeBuckets();
 };
 
 void MalloyModelTests::initTestCase() {
@@ -1808,6 +1814,77 @@ void MalloyModelTests::registriesDegradeGracefullyOnBadInput() {
         reg.setSearchDirs({dir.filePath(QStringLiteral("nonexistent_media"))});
         QCOMPARE(reg.count(), 0);
     }
+}
+
+// Helper: create `name` in `dir` with `bytes` of content and an explicit
+// modification time, so ordering does not depend on how fast the test runs.
+static QString makeTimedFile(const QString& dir, const QString& name,
+                             int bytes, const QDateTime& modified) {
+    const QString path = QDir(dir).filePath(name);
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly)) return QString();
+    f.write(QByteArray(bytes, 'x'));
+    f.close();
+    // setFileTime needs an open handle; reopen read-write for the timestamp.
+    if (!f.open(QIODevice::ReadWrite)) return QString();
+    f.setFileTime(modified, QFileDevice::FileModificationTime);
+    f.close();
+    return path;
+}
+
+void MalloyModelTests::recentRecordingsScanFiltersOrdersAndLimits() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    const QDateTime base = QDateTime::currentDateTime();
+    QVERIFY(!makeTimedFile(dir.path(), QStringLiteral("oldest.mkv"),
+                           3 * 1024 * 1024, base.addSecs(-7200)).isEmpty());
+    QVERIFY(!makeTimedFile(dir.path(), QStringLiteral("middle.mp4"),
+                           2 * 1024 * 1024, base.addSecs(-3600)).isEmpty());
+    QVERIFY(!makeTimedFile(dir.path(), QStringLiteral("newest.mp3"),
+                           1024 * 1024, base.addSecs(-60)).isEmpty());
+    // Not a recording container: must be ignored.
+    QVERIFY(!makeTimedFile(dir.path(), QStringLiteral("notes.txt"),
+                           1024, base).isEmpty());
+
+    const QVector<RecordingInfo> all = RecentRecordings::scan(dir.path(), 0);
+    QCOMPARE(all.size(), 3);
+    QCOMPARE(all.at(0).name, QStringLiteral("newest.mp3"));
+    QCOMPARE(all.at(1).name, QStringLiteral("middle.mp4"));
+    QCOMPARE(all.at(2).name, QStringLiteral("oldest.mkv"));
+    QCOMPARE(all.at(0).sizeBytes, static_cast<qint64>(1024 * 1024));
+    QCOMPARE(all.at(0).sizeText(), QStringLiteral("1.0 MB"));
+    QVERIFY(all.at(0).filePath.endsWith(QStringLiteral("newest.mp3")));
+
+    // The limit keeps the newest entries.
+    const QVector<RecordingInfo> limited = RecentRecordings::scan(dir.path(), 2);
+    QCOMPARE(limited.size(), 2);
+    QCOMPARE(limited.at(0).name, QStringLiteral("newest.mp3"));
+    QCOMPARE(limited.at(1).name, QStringLiteral("middle.mp4"));
+
+    // Missing and empty paths yield an empty list rather than failing.
+    QCOMPARE(RecentRecordings::scan(dir.filePath(QStringLiteral("nope")), 4).size(), 0);
+    QCOMPARE(RecentRecordings::scan(QString(), 4).size(), 0);
+}
+
+void MalloyModelTests::recentRecordingsRelativeTimeBuckets() {
+    const QDateTime now = QDateTime(QDate(2026, 3, 12), QTime(15, 0));
+    auto whenFor = [&now](const QDateTime& modified) {
+        RecordingInfo r;
+        r.modified = modified;
+        return r.relativeTimeText(now);
+    };
+
+    QCOMPARE(whenFor(now.addSecs(-30)), QStringLiteral("Just now"));
+    QCOMPARE(whenFor(now.addSecs(-15 * 60)), QStringLiteral("15 min ago"));
+    QCOMPARE(whenFor(now.addSecs(-3 * 3600)), QStringLiteral("3 hr ago"));
+    QCOMPARE(whenFor(now.addDays(-1)), QStringLiteral("Yesterday"));
+    QCOMPARE(whenFor(now.addDays(-3)), QDate(2026, 3, 9).toString(QStringLiteral("ddd")));
+    QCOMPARE(whenFor(now.addDays(-30)), QStringLiteral("Feb 10"));
+    QCOMPARE(whenFor(now.addDays(-400)), QStringLiteral("Feb 5 2025"));
+    // A future timestamp (clock skew) must not render as a negative age.
+    QCOMPARE(whenFor(now.addSecs(120)), QStringLiteral("Just now"));
+    QCOMPARE(whenFor(QDateTime()), QStringLiteral("Unknown"));
 }
 
 QTEST_MAIN(MalloyModelTests)

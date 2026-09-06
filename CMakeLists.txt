@@ -64,6 +64,9 @@ set(MALLOY_CORE_SOURCES
     src/project/ProjectRegistry.h
     src/project/MediaRegistry.cpp
     src/project/MediaRegistry.h
+    src/project/RecentRecordings.cpp
+    src/project/RecentRecordings.h
+    src/project/ByteSize.h
     src/recording/RenderQueue.cpp
     src/recording/RenderQueue.h
     src/model/Canvas.h
