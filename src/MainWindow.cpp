@@ -187,6 +187,12 @@ void MainWindow::setupUi() {
     m_shell->addWorkspace(QStringLiteral("stream"), m_streamStudio);
     m_editor = new EditorWorkspace(m_mediaRegistry, this);
     connect(m_editor, &EditorWorkspace::exportRequested, this, &MainWindow::exportTimeline);
+    connect(m_editor, &EditorWorkspace::timelineChanged, this, [this] {
+        // Timeline edits are not undo commands, so mark the stack dirty
+        // directly. This is what makes maybeSave() prompt for timeline work.
+        if (m_undoStack) m_undoStack->resetClean();
+        updateWindowTitle();
+    });
     m_shell->addWorkspace(QStringLiteral("editor"), m_editor);
     m_shell->addWorkspace(QStringLiteral("clips"), new ClipsWorkspace(m_clipsRegistry, this));
     m_shell->addWorkspace(QStringLiteral("media"), new MediaWorkspace(m_mediaRegistry, this));
@@ -757,6 +763,9 @@ void MainWindow::updateWindowTitle() {
         .arg(name));
     if (m_shell) m_shell->header()->setProjectName(name);
     if (m_dashboard) m_dashboard->setProjectName(name);
+    if (m_editor)
+        m_editor->setSaveState(!m_projectPath.isEmpty(),
+                               m_undoStack && !m_undoStack->isClean());
 }
 
 void MainWindow::updateStatusBar() {

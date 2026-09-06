@@ -1097,10 +1097,14 @@ EditorWorkspace::EditorWorkspace(MediaRegistry* media, QWidget* parent)
     tb->addWidget(zoom);
     auto* zoomVal = lbl(QStringLiteral("60px/s"), QStringLiteral("mute"), 10, false, true);
     tb->addWidget(zoomVal);
-    auto* dot = new QLabel; dot->setFixedSize(8, 8);
-    dot->setStyleSheet(QStringLiteral("background:%1;border-radius:4px;").arg(Theme::Success.name()));
-    tb->addWidget(dot);
-    tb->addWidget(lbl(tr("Autosaved · 14s ago"), QStringLiteral("mute"), 11, false, true));
+    // Save state. This used to read "Autosaved 14s ago", which was a fixed
+    // string with no autosave behind it: it told the user their work was safe
+    // when nothing had been written.
+    m_saveDot = new QLabel; m_saveDot->setFixedSize(8, 8);
+    tb->addWidget(m_saveDot);
+    m_saveLabel = lbl(QString(), QStringLiteral("mute"), 11, false, true);
+    tb->addWidget(m_saveLabel);
+    setSaveState(false, false);
     col->addWidget(toolbar);
 
     // ── Bottom half: timeline ───────────────────────────────────────────────
@@ -1165,6 +1169,10 @@ EditorWorkspace::EditorWorkspace(MediaRegistry* media, QWidget* parent)
     connect(nextFrameBtn, &QPushButton::clicked, canvas, [canvas]{ canvas->frameStep(+1); });
     connect(play,         &QPushButton::clicked, canvas, &TimelineCanvas::togglePlay);
     connect(splitBtn,     &QPushButton::clicked, canvas, &TimelineCanvas::splitAtPlayhead);
+
+    // Timeline edits are document changes: without this the project could be
+    // closed after an edit with no prompt, because nothing else marks it dirty.
+    connect(canvas, &TimelineCanvas::clipsChanged, this, &EditorWorkspace::timelineChanged);
 
     connect(canvas, &TimelineCanvas::playingChanged, play, [play](bool playing) {
         play->setIcon(Icons::icon(playing ? QStringLiteral("pause") : QStringLiteral("play"),
@@ -1255,6 +1263,27 @@ EditorWorkspace::EditorWorkspace(MediaRegistry* media, QWidget* parent)
     loadInspectorFromSelection();
 
     col->addWidget(bottom, 45);
+}
+
+void EditorWorkspace::setSaveState(bool hasFile, bool modified) {
+    if (!m_saveDot || !m_saveLabel) return;
+
+    QColor colour;
+    QString text;
+    if (modified) {
+        colour = Theme::Warn;
+        text = tr("Unsaved changes");
+    } else if (hasFile) {
+        colour = Theme::Success;
+        text = tr("Saved");
+    } else {
+        // Never written to disk, and nothing has been changed yet either.
+        colour = Theme::TextMute;
+        text = tr("Not saved yet");
+    }
+    m_saveDot->setStyleSheet(
+        QStringLiteral("background:%1;border-radius:4px;").arg(colour.name()));
+    m_saveLabel->setText(text);
 }
 
 QJsonArray EditorWorkspace::timelineJson() const {
