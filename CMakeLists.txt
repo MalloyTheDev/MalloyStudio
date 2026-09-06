@@ -15,7 +15,7 @@ if(NOT DEFINED Qt6_DIR AND NOT DEFINED CMAKE_PREFIX_PATH)
     endif()
 endif()
 
-find_package(Qt6 6.5 REQUIRED COMPONENTS Widgets Test Svg)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Widgets Test Svg Network)
 
 qt_standard_project_setup()
 
@@ -46,6 +46,8 @@ set(MALLOY_CORE_SOURCES
     src/recording/EncoderPipeline.h
     src/recording/StreamingPipeline.cpp
     src/recording/StreamingPipeline.h
+    src/recording/RtmpKeyRelay.cpp
+    src/recording/RtmpKeyRelay.h
     src/recording/StreamSettings.cpp
     src/recording/StreamSettings.h
     src/recording/MediaController.cpp
@@ -176,6 +178,7 @@ target_include_directories(MalloyStudio PRIVATE src)
 target_link_libraries(MalloyStudio PRIVATE
     Qt6::Widgets
     Qt6::Svg
+    Qt6::Network
     d3d11
     dxgi
     uuid
@@ -222,6 +225,7 @@ target_link_libraries(MalloyStudioTests PRIVATE
     Qt6::Widgets
     Qt6::Svg
     Qt6::Test
+    Qt6::Network
     d3d11
     dxgi
     uuid

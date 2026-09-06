@@ -99,6 +99,7 @@ StreamSettings StreamSettings::load() {
     o.title       = s.value(QStringLiteral("stream/title"),    o.title).toString();
     o.category    = s.value(QStringLiteral("stream/category"), o.category).toString();
     o.tags        = s.value(QStringLiteral("stream/tags"),     o.tags).toStringList();
+    o.useKeyRelay = s.value(QStringLiteral("stream/useKeyRelay"), o.useKeyRelay).toBool();
     o.streamKey   = loadStreamKey();
     return o;
 }
@@ -112,5 +113,6 @@ void StreamSettings::save() const {
     s.setValue(QStringLiteral("stream/title"),    title);
     s.setValue(QStringLiteral("stream/category"), category);
     s.setValue(QStringLiteral("stream/tags"),     tags);
+    s.setValue(QStringLiteral("stream/useKeyRelay"), useKeyRelay);
     saveStreamKey(streamKey);
 }

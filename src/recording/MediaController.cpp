@@ -1,8 +1,11 @@
 #include "MediaController.h"
+#include <QTimer>
+#include <QPointer>
 #include "recording/EncoderPipeline.h"
 #include "recording/RingTimedFrameSource.h"
 #include "recording/RingTimedPcmSource.h"
 #include "recording/StreamingPipeline.h"
+#include "recording/RtmpKeyRelay.h"
 
 #include <QStandardPaths>
 
@@ -64,6 +67,13 @@ void MediaController::stopRecording() {
     if (m_recorder) m_recorder->stop();
 }
 
+namespace {
+// How long to give the relay to prove it is substituting before the
+// stream is stopped. The RTMP handshake and publish exchange complete
+// well inside this.
+constexpr int kRelayCheckMs = 5000;
+}  // namespace
+
 bool MediaController::startStreaming(const StreamSettings& stream,
                                       const OutputSettings& output,
                                       QString* error) {
@@ -96,12 +106,60 @@ bool MediaController::startStreaming(const StreamSettings& stream,
     merged.bitrateKbps = stream.bitrateKbps;
     merged.keyframeSec = stream.keyframeSec;
 
+    // With the relay enabled, ffmpeg is given a loopback URL carrying a
+    // placeholder, and the key is substituted in this process on the way
+    // upstream, so it never appears in the child's command line.
+    QString publishUrl = url;
+    delete m_keyRelay;
+    m_keyRelay = nullptr;
+    if (stream.useKeyRelay) {
+        m_keyRelay = new RtmpKeyRelay(this);
+        connect(m_keyRelay, &RtmpKeyRelay::failed, this, [this](const QString& msg) {
+            emit errorOccurred(QStringLiteral("streaming"), msg);
+            stopStreaming();
+        });
+        QString relayError;
+        const QString relayUrl = m_keyRelay->start(url, &relayError);
+        if (relayUrl.isEmpty()) {
+            // Falling back to the direct URL would silently reinstate the leak
+            // the relay exists to prevent, so this stops instead.
+            delete m_keyRelay;
+            m_keyRelay = nullptr;
+            if (error) *error = relayError;
+            return false;
+        }
+        publishUrl = relayUrl;
+    }
+
     EncoderPipeline::Target target;
     target.kind        = EncoderPipeline::Target::Kind::Rtmp;
-    target.destination = url;
+    target.destination = publishUrl;
     target.output      = merged;
 
-    return m_streamer->start(target, m_frames, m_audio, error);
+    const bool started = m_streamer->start(target, m_frames, m_audio, error);
+    if (!started) {
+        delete m_keyRelay;
+        m_keyRelay = nullptr;
+        return false;
+    }
+
+    if (m_keyRelay) {
+        // A publishing handshake substitutes the placeholder several times
+        // (releaseStream, FCPublish, publish). If none of that happened by the
+        // time media should be flowing, the relay is not doing its job and the
+        // stream would be published under the placeholder, so stop rather than
+        // carry on in a state nobody asked for.
+        QPointer<RtmpKeyRelay> relay(m_keyRelay);
+        QTimer::singleShot(kRelayCheckMs, this, [this, relay] {
+            if (!relay || !isStreaming()) return;
+            if (relay->substitutions() > 0) return;
+            emit errorOccurred(QStringLiteral("streaming"),
+                               tr("The stream key relay did not engage, so the stream was "
+                                  "stopped rather than published under a placeholder."));
+            stopStreaming();
+        });
+    }
+    return true;
 }
 
 void MediaController::stopStreaming() {

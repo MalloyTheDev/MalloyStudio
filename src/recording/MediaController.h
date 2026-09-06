@@ -7,6 +7,7 @@
 #include <QQueue>
 #include <QString>
 
+class RtmpKeyRelay;
 class TimedFrameSource;
 class TimedPcmSource;
 class EncoderPipeline;
@@ -80,4 +81,5 @@ private:
     TimedPcmSource*   m_audio    = nullptr;
     EncoderPipeline*  m_recorder = nullptr;
     EncoderPipeline*  m_streamer = nullptr;
+    RtmpKeyRelay*      m_keyRelay = nullptr;   // owns the loopback publish path
 };

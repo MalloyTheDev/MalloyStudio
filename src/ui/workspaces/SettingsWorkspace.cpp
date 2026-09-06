@@ -437,6 +437,15 @@ QWidget* SettingsWorkspace::buildStreamingPage() {
         {tr("Keyframe interval"), tr("Twitch and YouTube require 4 seconds or less."), keyframe},
     }));
 
+    col->addWidget(settingsBlock(tr("Privacy"), {
+        {tr("Hide the key from the command line"),
+         tr("Publishes through a local relay so the stream key never appears in the "
+            "encoder's command line, where any program running as you can read it. "
+            "Verified against a local RTMP server, but not yet against Twitch or "
+            "YouTube: turn it on and check your stream starts before relying on it."),
+         prefCheck(QStringLiteral("stream/useKeyRelay"), false)},
+    }));
+
     col->addStretch();
     return scroll;
 }

@@ -20,6 +20,7 @@
 #include "recording/EncoderPipeline.h"
 #include "recording/RingTimedPcmSource.h"
 #include "recording/StreamSettings.h"
+#include "recording/RtmpKeyRelay.h"
 #include "recording/StreamingPipeline.h"
 #include "recording/EncoderRegistry.h"
 #include "ui/workspaces/EditorWorkspace.h"
@@ -192,6 +193,11 @@ private slots:
     // Regression: ffmpeg prints the destination URL on a failed connect even at
     // the production log level, and that tail is shown in an error dialog, so
     // the stream key could be screenshotted or pasted into a bug report.
+    // The relay keeps the stream key out of ffmpeg's command line by giving it a
+    // placeholder and substituting on the way upstream. The substitution has to
+    // be length-preserving, has to survive an occurrence split across two reads,
+    // and must not withhold bytes that will never be completed.
+    void rtmpRelaySubstitutesAcrossReadBoundaries();
     void encoderRedactsTheStreamKeyFromFfmpegOutput();
     void addingAConfiguredLayerIsOneUndoStep();
     void hotkeyManagerReportsRefusedBindings();
@@ -2867,6 +2873,93 @@ void MalloyModelTests::encoderRedactsTheStreamKeyFromFfmpegOutput() {
     const QString shortUrl = QStringLiteral("rtmp://example.com/live/ab");
     const QString text = QStringLiteral("ab is a common fragment, cabbage included");
     QVERIFY(EncoderPipeline::redactDestination(text, shortUrl).contains(QStringLiteral("cabbage")));
+}
+
+void MalloyModelTests::rtmpRelaySubstitutesAcrossReadBoundaries() {
+    const QByteArray placeholder = "PLACEHOLDERKEY0123456789";
+    const QByteArray secret      = "live_999999_REALSECRET01";
+    QCOMPARE(placeholder.size(), secret.size());   // the whole scheme rests on this
+
+    // A generated placeholder matches the key length exactly, which is what
+    // keeps every AMF string length and RTMP message length valid.
+    for (int len : {8, 24, 41}) {
+        const QString made = RtmpKeyRelay::makePlaceholder(len);
+        QCOMPARE(made.size(), len);
+        QCOMPARE(made.toUtf8().size(), len);       // must stay single-byte
+        QVERIFY(!made.contains(QLatin1Char('/')));
+    }
+    // Two placeholders should not be the same.
+    QVERIFY(RtmpKeyRelay::makePlaceholder(24) != RtmpKeyRelay::makePlaceholder(24));
+
+    // Every occurrence is replaced, and the buffer length does not change.
+    {
+        QByteArray data = "AAA" + placeholder + "BBB" + placeholder + "CCC";
+        const int before = data.size();
+        const int n = RtmpKeyRelay::substituteAll(data, placeholder, secret);
+        QCOMPARE(n, 2);
+        QCOMPARE(data.size(), before);
+        QVERIFY(!data.contains(placeholder));
+        QCOMPARE(data.count(secret), 2);
+    }
+
+    // Hold-back: a trailing PROPER prefix of the placeholder is withheld, so an
+    // occurrence split across two reads still gets substituted.
+    {
+        const QByteArray head = "xx" + placeholder.left(10);
+        const int hold = RtmpKeyRelay::holdBackLength(head, placeholder);
+        QCOMPARE(hold, 10);
+
+        QByteArray forward = head.left(head.size() - hold);
+        QByteArray pending = head.right(hold);
+        QCOMPARE(RtmpKeyRelay::substituteAll(forward, placeholder, secret), 0);
+
+        // Second read completes it.
+        pending += placeholder.mid(10) + "yy";
+        const int hold2 = RtmpKeyRelay::holdBackLength(pending, placeholder);
+        QByteArray forward2 = pending.left(pending.size() - hold2);
+        QCOMPARE(RtmpKeyRelay::substituteAll(forward2, placeholder, secret), 1);
+        QCOMPARE(forward + forward2 + pending.right(hold2), QByteArray("xx") + secret + "yy");
+    }
+
+    // The rule that matters most: a buffer containing no part of the
+    // placeholder must withhold NOTHING. Holding back a fixed
+    // placeholder.size()-1 bytes instead deadlocks the 1537-byte RTMP
+    // handshake, which carries no placeholder and so never completes it.
+    {
+        QByteArray handshake(1537, '\x03');
+        QCOMPARE(RtmpKeyRelay::holdBackLength(handshake, placeholder), 0);
+    }
+
+    // A trailing full match is not a partial one: it is substituted, not held.
+    {
+        const QByteArray data = "zz" + placeholder;
+        QCOMPARE(RtmpKeyRelay::holdBackLength(data, placeholder), 0);
+    }
+
+    // Byte-by-byte delivery, the worst case for a streaming substitution.
+    {
+        const QByteArray wire = "head" + placeholder + "tail" + placeholder;
+        QByteArray pending, out;
+        int count = 0;
+        for (char c : wire) {
+            pending.append(c);
+            const int hold = RtmpKeyRelay::holdBackLength(pending, placeholder);
+            QByteArray forward = pending.left(pending.size() - hold);
+            pending = pending.right(hold);
+            count += RtmpKeyRelay::substituteAll(forward, placeholder, secret);
+            out += forward;
+        }
+        out += pending;   // flush at end of stream
+        QCOMPARE(count, 2);
+        QCOMPARE(out, QByteArray("head") + secret + "tail" + secret);
+        QVERIFY(!out.contains(placeholder));
+    }
+
+    // Mismatched lengths are refused rather than corrupting the stream.
+    {
+        QByteArray data = "AAA" + placeholder;
+        QCOMPARE(RtmpKeyRelay::substituteAll(data, placeholder, QByteArray("short")), 0);
+    }
 }
 
 QTEST_MAIN(MalloyModelTests)

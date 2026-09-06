@@ -20,6 +20,12 @@ struct StreamSettings {
     int     bitrateKbps   = 4500;                 // 1080p60 sweet spot for Twitch
     int     keyframeSec   = 2;                    // Twitch/YouTube hard requirement: ≤4s
 
+    // Route the publish through a local relay so the stream key never appears in
+    // ffmpeg's command line (see RtmpKeyRelay). Off by default: the relay has
+    // been verified against a local RTMP server but not against Twitch or
+    // YouTube, and it changes the tcUrl the ingest sees.
+    bool    useKeyRelay   = false;
+
     // Broadcast metadata shown in the Streaming Studio (persisted, not yet sent
     // to any platform API — that integration is future work).
     QString     title;
