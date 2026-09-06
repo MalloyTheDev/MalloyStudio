@@ -2,10 +2,22 @@
 #include "model/SceneCollection.h"
 
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSaveFile>
+
+QString ProjectDocument::displayName(const QString& filePath) {
+    if (filePath.isEmpty()) return QString();
+    const QFileInfo fi(filePath);
+    QString name = fi.fileName();
+    if (name.endsWith(QStringLiteral(".malloy.json"), Qt::CaseInsensitive)) {
+        name.chop(int(sizeof(".malloy.json")) - 1);
+        return name;
+    }
+    return fi.completeBaseName();
+}
 
 bool ProjectDocument::saveToFile(const SceneCollection& scenes, const QString& filePath, QString* error) {
     return saveToFile(scenes, QJsonArray{}, filePath, error);

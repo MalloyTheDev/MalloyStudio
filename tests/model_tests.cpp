@@ -172,6 +172,10 @@ private slots:
     // Regression: the mixer summed each input's left and right together before
     // applying pan, so every stereo source reached the recording and the stream
     // as mono. Pan is a balance control on a stereo bus.
+    // Regression: project names kept a stray ".malloy" because
+    // QFileInfo::completeBaseName only strips the last suffix, so recordings
+    // and renders were named "project.malloy-20260906.mp4".
+    void projectDisplayNameStripsCompoundExtension();
     void mixerKeepsStereoSeparation();
     void blurHandlesImagesSmallerThanItsRadius();
     void timelineGraphPlacesTrimsAndScalesClips();
@@ -2512,6 +2516,26 @@ void MalloyModelTests::mixerKeepsStereoSeparation() {
     QCOMPARE(small.size(), size_t(2));
     QCOMPARE(small[0], 1000);
     QCOMPARE(small[1], -2000);
+}
+
+void MalloyModelTests::projectDisplayNameStripsCompoundExtension() {
+    QCOMPARE(ProjectDocument::displayName(QStringLiteral("C:/p/spire.malloy.json")),
+             QStringLiteral("spire"));
+    // Case is not significant on Windows paths.
+    QCOMPARE(ProjectDocument::displayName(QStringLiteral("C:/p/Spire.MALLOY.JSON")),
+             QStringLiteral("Spire"));
+    // A name that merely contains "malloy" keeps it.
+    QCOMPARE(ProjectDocument::displayName(QStringLiteral("C:/p/malloy-notes.malloy.json")),
+             QStringLiteral("malloy-notes"));
+    // Dots inside the name survive.
+    QCOMPARE(ProjectDocument::displayName(QStringLiteral("C:/p/ep.14.final.malloy.json")),
+             QStringLiteral("ep.14.final"));
+    // Other extensions fall back to the ordinary rule.
+    QCOMPARE(ProjectDocument::displayName(QStringLiteral("C:/p/notes.json")),
+             QStringLiteral("notes"));
+    QCOMPARE(ProjectDocument::displayName(QStringLiteral("C:/p/plain")),
+             QStringLiteral("plain"));
+    QVERIFY(ProjectDocument::displayName(QString()).isEmpty());
 }
 
 QTEST_MAIN(MalloyModelTests)

@@ -1,4 +1,5 @@
 #include "project/ProjectRegistry.h"
+#include "project/ProjectDocument.h"
 
 #include <QDir>
 #include <QFile>
@@ -30,12 +31,7 @@ int peekSceneCount(const QString& path) {
 }
 
 QString displayName(const QFileInfo& fi) {
-    QString n = fi.fileName();
-    if (n.endsWith(QStringLiteral(".malloy.json"), Qt::CaseInsensitive))
-        n.chop(int(sizeof(".malloy.json")) - 1);
-    else
-        n = fi.completeBaseName();
-    return n;
+    return ProjectDocument::displayName(fi.absoluteFilePath());
 }
 } // namespace
 

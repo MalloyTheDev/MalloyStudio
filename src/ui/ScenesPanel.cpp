@@ -113,6 +113,15 @@ void ScenesPanel::onItemChanged(QListWidgetItem* item) {
     if (m_updating) return;
     const int row = m_list->row(item);
     m_scenes->renameSceneAt(row, item->text());
+
+    // The model refuses empty or whitespace-only names and returns without
+    // signalling, which used to leave the list showing a name the project does
+    // not have. Put the real name back.
+    const Scene* scene = m_scenes->sceneAt(row);
+    if (scene && item->text() != scene->name()) {
+        const QSignalBlocker block(m_list);
+        item->setText(scene->name());
+    }
 }
 
 void ScenesPanel::onSelectionChanged() {

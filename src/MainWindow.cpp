@@ -498,7 +498,7 @@ void MainWindow::connectModelSignals() {
                                       QStringLiteral("{project} — {date} {time}")).toString();
         base.replace(QStringLiteral("{project}"),
                      m_projectPath.isEmpty() ? tr("Untitled")
-                                             : QFileInfo(m_projectPath).completeBaseName());
+                                             : ProjectDocument::displayName(m_projectPath));
         base.replace(QStringLiteral("{scene}"),
                      (m_scenes && m_scenes->currentScene()) ? m_scenes->currentScene()->name()
                                                             : tr("Scene"));
@@ -654,7 +654,7 @@ void MainWindow::connectModelSignals() {
     connect(m_media, &MediaController::replaySaved, this,
             [this](const QString& path) {
         const QString project = m_projectPath.isEmpty()
-            ? QString() : QFileInfo(m_projectPath).completeBaseName();
+            ? QString() : ProjectDocument::displayName(m_projectPath);
         m_clipsRegistry->registerFile(path, project, m_outputSettings.replayBufferSeconds);
         flash(tr("Replay saved: %1").arg(QFileInfo(path).fileName()), 5000);
     });
@@ -751,7 +751,7 @@ bool MainWindow::loadProject(const QString& filePath) {
 void MainWindow::updateWindowTitle() {
     const QString name = m_projectPath.isEmpty()
         ? tr("Untitled")
-        : QFileInfo(m_projectPath).completeBaseName();
+        : ProjectDocument::displayName(m_projectPath);
     setWindowTitle(QStringLiteral("%1%2 - MalloyStudio")
         .arg(m_undoStack && !m_undoStack->isClean() ? QStringLiteral("*") : QString())
         .arg(name));
@@ -820,7 +820,7 @@ void MainWindow::exportTimeline() {
 
     const OutputSettings output = OutputSettings::load();
     const QString projectName = m_projectPath.isEmpty()
-        ? tr("Untitled") : QFileInfo(m_projectPath).completeBaseName();
+        ? tr("Untitled") : ProjectDocument::displayName(m_projectPath);
 
     QSettings settings;
     const QString lastDir = settings.value(
