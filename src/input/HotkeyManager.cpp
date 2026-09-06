@@ -99,13 +99,14 @@ void HotkeyManager::unregisterById(int registeredId) {
         ::UnregisterHotKey(nullptr, registeredId);
 }
 
-void HotkeyManager::setBinding(const QString& actionId, const QKeySequence& key) {
+bool HotkeyManager::setBinding(const QString& actionId, const QKeySequence& key) {
     // Ensure entry exists.
     if (!m_entries.contains(actionId)) {
         m_entries[actionId] = {actionId, {}, -1};
         m_insertionOrder.append(actionId);
     }
     Entry& entry = m_entries[actionId];
+    const QKeySequence previous = entry.key;
 
     // Unregister old binding.
     if (entry.registeredId > 0) {
@@ -114,20 +115,39 @@ void HotkeyManager::setBinding(const QString& actionId, const QKeySequence& key)
         entry.registeredId = -1;
     }
 
-    entry.key = key;
-
-    // Register new binding.
+    // Register new binding. An empty key means "unbound", which always succeeds.
+    bool ok = true;
     if (!key.isEmpty()) {
         const int newId = m_nextId++;
-        if (registerHotkey(newId, key)) {
+        ok = registerHotkey(newId, key);
+        if (ok) {
             entry.registeredId = newId;
             m_idToAction[newId] = actionId;
         }
     }
 
+    if (!ok) {
+        // Windows owns this shortcut elsewhere. Keep what was working instead of
+        // storing a binding that cannot fire, and say so.
+        entry.key = QKeySequence();
+        if (!previous.isEmpty()) {
+            const int restoreId = m_nextId++;
+            if (registerHotkey(restoreId, previous)) {
+                entry.key = previous;
+                entry.registeredId = restoreId;
+                m_idToAction[restoreId] = actionId;
+            }
+        }
+        emit bindingFailed(actionId, key);
+        return false;
+    }
+
+    entry.key = key;
+
     // Persist.
     QSettings settings;
     settings.setValue(QStringLiteral("hotkeys/%1").arg(actionId), key.toString());
+    return true;
 }
 
 QKeySequence HotkeyManager::binding(const QString& actionId) const {

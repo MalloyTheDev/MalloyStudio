@@ -1,4 +1,5 @@
 #include "HotkeysDialog.h"
+#include <QMessageBox>
 #include "audio/AudioController.h"
 #include "input/HotkeyManager.h"
 
@@ -160,9 +161,25 @@ void HotkeysDialog::buildTree() {
 }
 
 void HotkeysDialog::applyAndSave() {
-    for (auto it = m_pending.constBegin(); it != m_pending.constEnd(); ++it)
-        m_manager->setBinding(it.key(), it.value());
+    QStringList refused;
+    for (auto it = m_pending.constBegin(); it != m_pending.constEnd(); ++it) {
+        if (!m_manager->setBinding(it.key(), it.value()) && !it.value().isEmpty())
+            refused << QStringLiteral("%1  (%2)")
+                           .arg(it.key(), it.value().toString(QKeySequence::NativeText));
+    }
     m_pending.clear();
+
+    // A shortcut Windows refused is not in effect, and saying nothing would
+    // leave the dialog showing it as though it were.
+    if (!refused.isEmpty()) {
+        QMessageBox::warning(
+            this, tr("Shortcut not available"),
+            tr("These shortcuts could not be registered:\n\n%1\n\n"
+               "Another application may already claim them, or the combination "
+               "may not be supported. The previous shortcut was kept where "
+               "there was one.")
+                .arg(refused.join(QStringLiteral("\n"))));
+    }
 }
 
 // MOC for KeyCaptureEdit (Q_OBJECT defined in this .cpp file).

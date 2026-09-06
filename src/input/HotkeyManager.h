@@ -38,7 +38,12 @@ public:
     // Set or change the hotkey for an action. Pass an empty QKeySequence to
     // unregister. Automatically unregisters any previous binding for the
     // same actionId and saves to QSettings.
-    void setBinding(const QString& actionId, const QKeySequence& key);
+    // Returns false when Windows refused the shortcut, which happens when
+    // another application already owns it globally. On failure the previous
+    // binding is restored if it can be, nothing is persisted, and
+    // bindingFailed() is emitted: a shortcut that cannot be registered must not
+    // be shown as if it works.
+    bool setBinding(const QString& actionId, const QKeySequence& key);
 
     // Return the current binding for an action (empty if none).
     QKeySequence binding(const QString& actionId) const;
@@ -55,6 +60,10 @@ public:
 
 signals:
     void triggered(const QString& actionId);
+    // Windows refused this shortcut. Emitted from setBinding() and from
+    // loadBindings() at startup, so a binding that stopped working since it was
+    // saved is surfaced rather than failing quietly every launch.
+    void bindingFailed(const QString& actionId, const QKeySequence& key);
 
 private:
     void unregisterById(int registeredId);

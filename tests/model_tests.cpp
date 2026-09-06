@@ -183,6 +183,10 @@ private slots:
     // Regression: capture forwarded device samples at whatever rate the device
     // ran at, so a 44.1 kHz microphone was recorded as if it were 48 kHz and
     // played back fast, sharp and drifting.
+    // Regression: a shortcut Windows refused was still stored and displayed as
+    // bound, so the user saw a working hotkey that never fired and the failure
+    // repeated silently on every launch.
+    void hotkeyManagerReportsRefusedBindings();
     void resamplerPreservesPitchAcrossRates();
     void pcmFifoKeepsTheSampleStreamContinuous();
     void mixerKeepsStereoSeparation();
@@ -743,37 +747,54 @@ void MalloyModelTests::sceneCollectionStudioModeProgramAndPreviewIndependent() {
 }
 
 void MalloyModelTests::hotkeyManagerRoundTripsBindingsThroughQSettings() {
-    // HotkeyManager::setBinding() must persist to QSettings so that a fresh
-    // instance can retrieve the same binding via loadBindings().
-    // We bind F12 to kRecordToggle; RegisterHotKey may fail in CI (no user
-    // session) but the QSettings round-trip must succeed regardless.
-    const QKeySequence seq(Qt::Key_F12);
-    const QLatin1String action(HotkeyManager::kRecordToggle);
+    // Contract as of issue #13: a binding is persisted only when Windows
+    // actually registered it. This test previously bound F12 and asserted the
+    // key was stored "regardless" of whether RegisterHotKey succeeded, which is
+    // precisely the behaviour that let an unusable shortcut look bound and be
+    // retried silently on every launch. F12 is in fact refused on some machines.
+    //
+    // So: use an obscure combination, and assert the round trip only when the
+    // registration really happened.
+    const QKeySequence seq(Qt::ControlModifier | Qt::AltModifier | Qt::ShiftModifier | Qt::Key_F9);
+    const QString action = QStringLiteral("test.roundtrip");
 
+    bool registered = false;
     {
         HotkeyManager mgr;
-        mgr.setBinding(action, seq);
+        registered = mgr.setBinding(action, seq);
+        if (!registered) {
+            // Refused: nothing may be shown as bound and nothing may be stored.
+            QVERIFY(mgr.binding(action).isEmpty());
+            const QSettings s;
+            QVERIFY(s.value(QStringLiteral("hotkeys/") + action).toString().isEmpty());
+            QSKIP("This machine refuses the test shortcut, so the round trip cannot run.");
+        }
         QCOMPARE(mgr.binding(action), seq);
     }
 
     // Verify QSettings was written.
     {
         const QSettings s;
-        const QString stored =
-            s.value(QStringLiteral("hotkeys/") + action).toString();
+        const QString stored = s.value(QStringLiteral("hotkeys/") + action).toString();
         QCOMPARE(QKeySequence(stored), seq);
     }
 
-    // A fresh manager loading persisted bindings must reproduce the same key.
+    // A fresh manager loading persisted bindings reproduces the same key.
     {
         HotkeyManager mgr;
         mgr.loadBindings();
         QCOMPARE(mgr.binding(action), seq);
     }
 
-    // Cleanup: clear so subsequent runs start fresh.
-    HotkeyManager mgr;
-    mgr.setBinding(action, QKeySequence());
+    // Unbinding always succeeds and clears the stored value.
+    {
+        HotkeyManager mgr;
+        mgr.loadBindings();
+        QVERIFY(mgr.setBinding(action, QKeySequence()));
+        QVERIFY(mgr.binding(action).isEmpty());
+        const QSettings s;
+        QVERIFY(s.value(QStringLiteral("hotkeys/") + action).toString().isEmpty());
+    }
 }
 
 void MalloyModelTests::replayBufferTrimsToLastNSeconds() {
@@ -2724,6 +2745,44 @@ void MalloyModelTests::resamplerPreservesPitchAcrossRates() {
         up.process(quiet.data(), 4410, out);
         for (int16_t v : out) QCOMPARE(v, int16_t(0));
     }
+}
+
+void MalloyModelTests::hotkeyManagerReportsRefusedBindings() {
+    // A refusal reaches setBinding() the same way whichever cause produced it:
+    // another application already owning the combination, or a key the Win32
+    // mapping does not support. The second is the one a test can stage
+    // deterministically, and it runs through the identical path.
+    //
+    // A same-thread duplicate registration is NOT a conflict: Windows 11 lets
+    // one process register the same combination twice, so it cannot be used to
+    // stage this.
+    const QKeySequence unsupported(Qt::ControlModifier | Qt::AltModifier | Qt::Key_F22);
+    const QKeySequence spare(Qt::ControlModifier | Qt::AltModifier
+                             | Qt::ShiftModifier | Qt::Key_F10);
+    const QString action = QStringLiteral("test.refused");
+
+    HotkeyManager mgr;
+    if (!mgr.setBinding(action, spare))
+        QSKIP("Could not register the fallback shortcut on this machine.");
+    QCOMPARE(mgr.binding(action), spare);
+
+    QSignalSpy refusedSpy(&mgr, &HotkeyManager::bindingFailed);
+    QVERIFY(!mgr.setBinding(action, unsupported));
+    QCOMPARE(refusedSpy.count(), 1);
+    QCOMPARE(refusedSpy.first().at(1).value<QKeySequence>(), unsupported);
+
+    // The refused shortcut is not reported as bound, so the dialog cannot show
+    // it as working, and the binding that did work is kept rather than lost.
+    QVERIFY(mgr.binding(action) != unsupported);
+    QCOMPARE(mgr.binding(action), spare);
+
+    // Nothing unusable was persisted, so it will not be retried every launch.
+    {
+        const QSettings s;
+        QCOMPARE(QKeySequence(s.value(QStringLiteral("hotkeys/") + action).toString()), spare);
+    }
+
+    QVERIFY(mgr.setBinding(action, QKeySequence()));
 }
 
 QTEST_MAIN(MalloyModelTests)

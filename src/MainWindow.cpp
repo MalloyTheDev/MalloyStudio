@@ -234,6 +234,15 @@ void MainWindow::setupUi() {
             [this](const QString& actionId, const QKeySequence& seq) {
         if (m_hotkeys) m_hotkeys->setBinding(actionId, seq);
     });
+    // A shortcut Windows refuses is not in effect; the status bar says so rather
+    // than leaving the user to discover it by pressing it.
+    if (m_hotkeys) {
+        connect(m_hotkeys, &HotkeyManager::bindingFailed, this,
+                [this](const QString& actionId, const QKeySequence& key) {
+            flash(tr("Shortcut %1 could not be registered for %2 (another application may claim it)")
+                      .arg(key.toString(QKeySequence::NativeText), actionId), 6000);
+        });
+    }
     m_shell->addWorkspace(QStringLiteral("settings"), m_settings);
 
     setCentralWidget(m_shell);
