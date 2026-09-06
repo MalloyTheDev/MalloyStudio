@@ -170,8 +170,17 @@ void DxgiCapture::run() {
         // Only copy when a new desktop frame was actually presented.
         if (info.LastPresentTime.QuadPart != 0) {
             ID3D11Texture2D* tex = nullptr;
-            resource->QueryInterface(__uuidof(ID3D11Texture2D),
-                                     reinterpret_cast<void**>(&tex));
+            const HRESULT qiHr = resource->QueryInterface(__uuidof(ID3D11Texture2D),
+                                                          reinterpret_cast<void**>(&tex));
+            // A lost or reset device fails this query, and the old code copied
+            // from and released the null pointer it left behind. Skip the frame
+            // instead: the next loop iteration re-acquires, and a genuinely dead
+            // duplication reports itself through the AccessLost branch above.
+            if (FAILED(qiHr) || !tex) {
+                resource->Release();
+                dup->ReleaseFrame();
+                continue;
+            }
 
             context->CopyResource(staging, tex);
             tex->Release();

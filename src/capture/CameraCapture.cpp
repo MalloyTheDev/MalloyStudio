@@ -160,6 +160,16 @@ void CameraCapture::captureLoop(QString deviceId) {
             BYTE* data = nullptr;
             DWORD maxLen = 0, curLen = 0;
             if (SUCCEEDED(buffer->Lock(&data, &maxLen, &curLen)) && data) {
+                // A driver can hand back fewer bytes than the negotiated stride
+                // and height imply. QImage would happily wrap the short buffer
+                // and then read past it on copy, so check before trusting it.
+                const qint64 needed = qint64(qAbs(stride)) * qint64(height);
+                if (qint64(curLen) < needed) {
+                    buffer->Unlock();
+                    safeRelease(buffer);
+                    safeRelease(sample);
+                    continue;   // drop this frame; the device keeps streaming
+                }
                 QImage frame(reinterpret_cast<const uchar*>(data),
                              static_cast<int>(width), static_cast<int>(height),
                              static_cast<int>(qAbs(stride)), QImage::Format_RGB32);

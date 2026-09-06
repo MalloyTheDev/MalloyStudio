@@ -308,9 +308,11 @@ static void boxBlurRow(const QRgb* src, QRgb* dst, int w, int r) {
     const int diam = 2 * r + 1;
     int sumR = 0, sumG = 0, sumB = 0, sumA = 0;
 
-    // Seed: window [-r..r], values < 0 replicate pixel[0].
+    // Seed: window [-r..r]. Both ends replicate, because r can exceed the image:
+    // the radius goes to 32 and a source can be a few pixels wide, in which case
+    // an unclamped upper end reads past the row.
     for (int k = -r; k <= r; ++k) {
-        const QRgb px = src[std::max(0, k)];
+        const QRgb px = src[std::clamp(k, 0, w - 1)];
         sumR += qRed(px);  sumG += qGreen(px);
         sumB += qBlue(px); sumA += qAlpha(px);
     }
@@ -350,7 +352,8 @@ void BlurFilter::apply(QImage& img) const {
 
         int sumR = 0, sumG = 0, sumB = 0, sumA = 0;
         for (int k = -r; k <= r; ++k) {
-            const QRgb px = col[static_cast<size_t>(std::max(0, k))];
+            // Same clamp as the horizontal seed: r can be larger than h.
+            const QRgb px = col[static_cast<size_t>(std::clamp(k, 0, h - 1))];
             sumR += qRed(px);  sumG += qGreen(px);
             sumB += qBlue(px); sumA += qAlpha(px);
         }

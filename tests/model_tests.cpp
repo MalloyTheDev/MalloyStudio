@@ -165,6 +165,10 @@ private slots:
     // ADR-0003: the timeline becomes an ffmpeg filter graph. The builder is pure,
     // so placement, trimming, mixing and every refusal are testable with no
     // encoder present. Media paths must reach ffmpeg as arguments only.
+    // Regression: the blur seeded its sliding window with an unclamped upper
+    // index, so any image narrower or shorter than the radius (which goes to 32)
+    // read past the row or column. A source only a few pixels wide is ordinary.
+    void blurHandlesImagesSmallerThanItsRadius();
     void timelineGraphPlacesTrimsAndScalesClips();
     void timelineGraphMixesAudioAndKeepsPathsOutOfTheGraph();
     void timelineGraphRefusesWhatItCannotRender();
@@ -2382,6 +2386,58 @@ void MalloyModelTests::timelineGraphRefusesWhatItCannotRender() {
         QVERIFY(!g.ok);
         QVERIFY(g.error.contains(QString::number(TimelineGraphBuilder::kMaxInputs)));
     }
+}
+
+void MalloyModelTests::blurHandlesImagesSmallerThanItsRadius() {
+    BlurFilter blur;
+    blur.setRadius(32);
+    QCOMPARE(blur.radius(), 32);
+
+    // A uniform image must survive any blur unchanged: every window, however
+    // large, averages the same colour. With the seed reading past the buffer
+    // this picked up whatever followed the allocation instead.
+    QImage uniform(3, 3, QImage::Format_ARGB32);
+    uniform.fill(qRgba(20, 140, 220, 255));
+    blur.apply(uniform);
+    for (int y = 0; y < uniform.height(); ++y) {
+        for (int x = 0; x < uniform.width(); ++x) {
+            const QRgb px = uniform.pixel(x, y);
+            QCOMPARE(qRed(px), 20);
+            QCOMPARE(qGreen(px), 140);
+            QCOMPARE(qBlue(px), 220);
+            QCOMPARE(qAlpha(px), 255);
+        }
+    }
+
+    // A single pixel is the smallest case the radius can overrun.
+    QImage one(1, 1, QImage::Format_ARGB32);
+    one.fill(qRgba(10, 20, 30, 255));
+    blur.apply(one);
+    QCOMPARE(qRed(one.pixel(0, 0)), 10);
+    QCOMPARE(qGreen(one.pixel(0, 0)), 20);
+    QCOMPARE(qBlue(one.pixel(0, 0)), 30);
+
+    // A two-tone image stays inside the range of its inputs: replicate padding
+    // can only ever average the colours that are actually there.
+    QImage pair(2, 1, QImage::Format_ARGB32);
+    pair.setPixel(0, 0, qRgba(0, 0, 0, 255));
+    pair.setPixel(1, 0, qRgba(200, 200, 200, 255));
+    blur.apply(pair);
+    for (int x = 0; x < 2; ++x) {
+        const QRgb px = pair.pixel(x, 0);
+        QVERIFY(qRed(px) >= 0 && qRed(px) <= 200);
+        QVERIFY(qGreen(px) >= 0 && qGreen(px) <= 200);
+        QVERIFY(qBlue(px) >= 0 && qBlue(px) <= 200);
+    }
+    // The darker pixel stays the darker of the two.
+    QVERIFY(qRed(pair.pixel(0, 0)) < qRed(pair.pixel(1, 0)));
+
+    // A tall, narrow image exercises the column seed rather than the row seed.
+    QImage column(1, 4, QImage::Format_ARGB32);
+    column.fill(qRgba(90, 90, 90, 255));
+    blur.apply(column);
+    for (int y = 0; y < column.height(); ++y)
+        QCOMPARE(qRed(column.pixel(0, y)), 90);
 }
 
 QTEST_MAIN(MalloyModelTests)
