@@ -69,6 +69,10 @@ set(MALLOY_CORE_SOURCES
     src/project/ByteSize.h
     src/recording/RenderQueue.cpp
     src/recording/RenderQueue.h
+    src/recording/RenderPipeline.cpp
+    src/recording/RenderPipeline.h
+    src/recording/TimelineGraphBuilder.cpp
+    src/recording/TimelineGraphBuilder.h
     src/model/Canvas.h
     src/model/FilterEffect.cpp
     src/model/FilterEffect.h

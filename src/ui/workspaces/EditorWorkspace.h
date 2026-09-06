@@ -21,6 +21,11 @@ public:
     QJsonArray timelineJson() const;
     void setTimelineJson(const QJsonArray& timeline);
 
+signals:
+    // Export was clicked. MainWindow owns the output-file choice and the render
+    // queue, so the workspace only reports the intent.
+    void exportRequested();
+
 private:
     QWidget*       m_timelineCanvas = nullptr;   // a TimelineCanvas (defined in the .cpp)
     MediaRegistry* m_media          = nullptr;

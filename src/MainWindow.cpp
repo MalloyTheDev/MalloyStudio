@@ -186,6 +186,7 @@ void MainWindow::setupUi() {
             this, [this] { m_controlsBar->toggleStream(); });
     m_shell->addWorkspace(QStringLiteral("stream"), m_streamStudio);
     m_editor = new EditorWorkspace(m_mediaRegistry, this);
+    connect(m_editor, &EditorWorkspace::exportRequested, this, &MainWindow::exportTimeline);
     m_shell->addWorkspace(QStringLiteral("editor"), m_editor);
     m_shell->addWorkspace(QStringLiteral("clips"), new ClipsWorkspace(m_clipsRegistry, this));
     m_shell->addWorkspace(QStringLiteral("media"), new MediaWorkspace(m_mediaRegistry, this));
@@ -806,6 +807,64 @@ void MainWindow::saveReplayClip() {
         flash(tr("Replay save failed: %1").arg(err), 5000);
     else
         flash(tr("Saving replay..."), 2000);
+}
+
+void MainWindow::exportTimeline() {
+    if (!m_editor || !m_renderQueue) return;
+
+    const QJsonArray timeline = m_editor->timelineJson();
+    if (timeline.isEmpty()) {
+        flash(tr("The timeline is empty, so there is nothing to render."), 4000);
+        return;
+    }
+
+    const OutputSettings output = OutputSettings::load();
+    const QString projectName = m_projectPath.isEmpty()
+        ? tr("Untitled") : QFileInfo(m_projectPath).completeBaseName();
+
+    QSettings settings;
+    const QString lastDir = settings.value(
+        QStringLiteral("recording/lastDir"),
+        QStandardPaths::writableLocation(QStandardPaths::MoviesLocation)).toString();
+    const QString suggested = QDir(lastDir).filePath(
+        QStringLiteral("%1-%2.%3")
+            .arg(projectName,
+                 QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss")),
+                 output.container));
+
+    // Overwrite confirmation is turned off here on purpose: a render refuses to
+    // overwrite, and it is better to say so now than to accept a name the queue
+    // will reject later.
+    const QString path = QFileDialog::getSaveFileName(
+        this, tr("Export timeline"), suggested,
+        tr("Video (*.%1);;All files (*)").arg(output.container),
+        nullptr, QFileDialog::DontConfirmOverwrite);
+    if (path.isEmpty()) return;
+
+    if (QFileInfo::exists(path)) {
+        QMessageBox::warning(this, tr("File already exists"),
+                             tr("Renders never overwrite an existing file.\n\n"
+                                "Choose a name that is not in use."));
+        return;
+    }
+
+    RenderRequest request;
+    request.name        = QFileInfo(path).fileName();
+    request.project     = projectName;
+    request.projectPath = m_projectPath;
+    request.outputPath  = path;
+    request.output      = output;
+    request.timeline    = timeline;   // snapshot: later edits do not change this job
+
+    QString error;
+    if (m_renderQueue->enqueue(request, &error).isEmpty()) {
+        QMessageBox::warning(this, tr("Cannot queue this render"), error);
+        return;
+    }
+
+    settings.setValue(QStringLiteral("recording/lastDir"), QFileInfo(path).absolutePath());
+    flash(tr("Queued render: %1").arg(QFileInfo(path).fileName()), 4000);
+    if (m_shell) m_shell->setCurrentWorkspace(QStringLiteral("render"));
 }
 
 void MainWindow::flash(const QString& text, int ms) {

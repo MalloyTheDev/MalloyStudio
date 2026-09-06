@@ -944,6 +944,8 @@ EditorWorkspace::EditorWorkspace(MediaRegistry* media, QWidget* parent)
     splitBtn->setToolTip(tr("Split the selected (or playhead-overlapping) clip"));
     transport->addWidget(splitBtn);
     auto* exp = new QPushButton(Icons::icon(QStringLiteral("upload"), Theme::Text, 11), tr(" Export"));
+    exp->setToolTip(tr("Queue this timeline for rendering"));
+    connect(exp, &QPushButton::clicked, this, &EditorWorkspace::exportRequested);
     transport->addWidget(exp);
     pv->addLayout(transport);
     rightSplit->addWidget(prev);

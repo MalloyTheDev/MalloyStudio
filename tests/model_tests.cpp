@@ -13,6 +13,7 @@
 #include "project/MediaRegistry.h"
 #include "project/RecentRecordings.h"
 #include "recording/RenderQueue.h"
+#include "recording/TimelineGraphBuilder.h"
 #include "recording/OutputSettings.h"
 #include "recording/EncoderPipeline.h"
 #include "recording/RingTimedPcmSource.h"
@@ -161,14 +162,46 @@ private slots:
     void renderJobCarriesSettingsAndSnapshot();
     void renderQueueRetiresJobsWithoutASnapshot();
     void renderQueueRejectsUnrenderableRequests();
+    // ADR-0003: the timeline becomes an ffmpeg filter graph. The builder is pure,
+    // so placement, trimming, mixing and every refusal are testable with no
+    // encoder present. Media paths must reach ffmpeg as arguments only.
+    void timelineGraphPlacesTrimsAndScalesClips();
+    void timelineGraphMixesAudioAndKeepsPathsOutOfTheGraph();
+    void timelineGraphRefusesWhatItCannotRender();
     void editorClipRoundTripPreservesSourceReference();
     void editorLegacyClipLoadsAsUnlinked();
     void timelineTrimKeepsSourceInSync();
     void timelineSplitDerivesRightHandSourceIn();
 };
 
+// Creates a placeholder media file so a clip can pass the graph builder's
+// existence check. The contents are irrelevant: no test here runs ffmpeg.
+static QString makeMediaFile(const QString& path) {
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly)) return QString();
+    f.write("not really video");
+    f.close();
+    return path;
+}
+
+// One clip of `dur` seconds at `start`, reading `sourcePath` from `sourceIn`.
+static QJsonObject makeClip(const QString& sourcePath, double start, double dur,
+                            double sourceIn = 0.0, bool audio = false) {
+    QJsonObject c;
+    c.insert(QStringLiteral("track"), audio ? 3 : 0);
+    c.insert(QStringLiteral("start"), start);
+    c.insert(QStringLiteral("dur"), dur);
+    c.insert(QStringLiteral("label"), QFileInfo(sourcePath).fileName());
+    c.insert(QStringLiteral("audio"), audio);
+    c.insert(QStringLiteral("sourcePath"), sourcePath);
+    c.insert(QStringLiteral("sourceIn"), sourceIn);
+    return c;
+}
+
 // A render request that passes enqueue validation: a one-clip timeline, default
-// encoder settings and an output file inside an existing directory.
+// encoder settings and an output file inside an existing directory. The media it
+// names does not exist, so the render itself fails deterministically without
+// needing ffmpeg.
 static RenderRequest makeRenderRequest(const QString& outputPath) {
     RenderRequest r;
     r.name        = QFileInfo(outputPath).fileName();
@@ -1619,25 +1652,28 @@ void MalloyModelTests::renderQueueProcessesAndPersists() {
     q.setStorePath(store);
     QCOMPARE(q.jobs().size(), 0);
 
+    // The media these jobs name does not exist, so the pipeline refuses to
+    // start them. That is the deterministic, ffmpeg-free path through the state
+    // machine: a job that cannot start is failed with a reason rather than
+    // sitting Active forever or blocking the jobs behind it.
     QVERIFY(!q.enqueue(makeRenderRequest(dir.filePath(QStringLiteral("a.mp4")))).isEmpty());
     QVERIFY(!q.enqueue(makeRenderRequest(dir.filePath(QStringLiteral("b.mp4")))).isEmpty());
     QCOMPARE(q.jobs().size(), 2);
-    QCOMPARE(q.countOfState(RenderJob::Active), 1);    // first promoted immediately
-    QCOMPARE(q.countOfState(RenderJob::Pending), 1);
+    QCOMPARE(q.countOfState(RenderJob::Failed), 2);
+    QCOMPARE(q.countOfState(RenderJob::Active), 0);
+    QCOMPARE(q.countOfState(RenderJob::Pending), 0);
+    for (const RenderJob& j : q.jobs()) {
+        QVERIFY(!j.error.isEmpty());
+        QVERIFY(j.error.contains(QStringLiteral("missing")));
+    }
 
-    for (int i = 0; i < 100 && q.countOfState(RenderJob::Completed) == 0; ++i)
-        q.advanceForTest();
-    QCOMPARE(q.countOfState(RenderJob::Completed), 1);
-    QCOMPARE(q.countOfState(RenderJob::Active), 1);     // second promoted
-
-    // Reload from the same store: completed history survives; active requeues.
+    // Reload: the failures, their reasons and their snapshots all survive.
     RenderQueue q2;
     q2.setStorePath(store);
     QCOMPARE(q2.jobs().size(), 2);
-    QCOMPARE(q2.countOfState(RenderJob::Completed), 1);
-    // The snapshot and settings survive the round-trip, which is what makes a
-    // reloaded job runnable at all.
+    QCOMPARE(q2.countOfState(RenderJob::Failed), 2);
     for (const RenderJob& j : q2.jobs()) {
+        QVERIFY(!j.error.isEmpty());
         QCOMPARE(j.timeline.size(), 1);
         QVERIFY(j.renderable());
         QCOMPARE(j.output.width, OutputSettings{}.width);
@@ -1697,23 +1733,25 @@ void MalloyModelTests::renderQueueRetryCancelClear() {
     QCOMPARE(q.countOfState(RenderJob::Completed), 0);
     QCOMPARE(q.jobs().size(), 1);
 
-    // retry() flips Failed→Pending, clears the error, and promotes it (no other
-    // job is active) so it lands Active. A QTimer drives progress, but no event
-    // loop runs in this test body, so the state stays Active deterministically.
+    // retry() re-attempts the job rather than just re-queueing it. The seeded
+    // job names media that does not exist, so it fails again, but with the
+    // pipeline's reason instead of the seeded "boom".
     QSignalSpy spy(&q, &RenderQueue::changed);
     q.retry(QStringLiteral("fail-1"));
     QVERIFY(spy.count() >= 1);
-    QCOMPARE(q.countOfState(RenderJob::Failed), 0);
-    QCOMPARE(q.countOfState(RenderJob::Active), 1);
-    QVERIFY(q.jobs().first().error.isEmpty());
+    QCOMPARE(q.countOfState(RenderJob::Failed), 1);
+    QCOMPARE(q.countOfState(RenderJob::Active), 0);
+    QCOMPARE(q.countOfState(RenderJob::Pending), 0);
+    QVERIFY(!q.jobs().first().error.isEmpty());
+    QVERIFY(q.jobs().first().error != QStringLiteral("boom"));
 
     // retry() on an unknown id is a no-op (no crash, no state change).
     q.retry(QStringLiteral("ghost"));
-    QCOMPARE(q.countOfState(RenderJob::Active), 1);
+    QCOMPARE(q.jobs().size(), 1);
 
-    // cancel() now removes the (Active) job, emptying the queue.
+    // cancel() leaves a Failed job alone: it is history, like a completed one.
     q.cancel(QStringLiteral("fail-1"));
-    QCOMPARE(q.jobs().size(), 0);
+    QCOMPARE(q.jobs().size(), 1);
 }
 
 void MalloyModelTests::renderQueuePauseHoldsPendingJobs() {
@@ -1733,16 +1771,16 @@ void MalloyModelTests::renderQueuePauseHoldsPendingJobs() {
     q.enqueue(makeRenderRequest(dir.filePath(QStringLiteral("b.mp4"))));
     QCOMPARE(q.countOfState(RenderJob::Active), 0);
     QCOMPARE(q.countOfState(RenderJob::Pending), 2);
+    // Nothing was attempted while paused, so nothing has failed either.
+    QCOMPARE(q.countOfState(RenderJob::Failed), 0);
 
-    // Ticking while paused with no active job is a harmless no-op.
-    q.advanceForTest();
-    QCOMPARE(q.countOfState(RenderJob::Pending), 2);
-
-    // Resuming promotes exactly one Pending job to Active.
+    // Resuming attempts them. Their media is missing, so both are refused at
+    // start; what this asserts is that the pause gate was the only thing
+    // holding them back.
     q.setPaused(false);
     QVERIFY(!q.paused());
-    QCOMPARE(q.countOfState(RenderJob::Active), 1);
-    QCOMPARE(q.countOfState(RenderJob::Pending), 1);
+    QCOMPARE(q.countOfState(RenderJob::Pending), 0);
+    QCOMPARE(q.countOfState(RenderJob::Failed), 2);
 }
 
 void MalloyModelTests::projectDocumentV3TimelineRoundTrips() {
@@ -2175,6 +2213,175 @@ void MalloyModelTests::renderQueueRejectsUnrenderableRequests() {
     QVERIFY(!q.enqueue(makeRenderRequest(dir.filePath(QStringLiteral("d.mp4"))), &error).isEmpty());
     QVERIFY(error.isEmpty());
     QCOMPARE(q.jobs().size(), 1);
+}
+
+void MalloyModelTests::timelineGraphPlacesTrimsAndScalesClips() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString media = makeMediaFile(dir.filePath(QStringLiteral("a.mp4")));
+    QVERIFY(!media.isEmpty());
+
+    OutputSettings out;
+    out.width = 1920; out.height = 1080; out.fps = 60;
+
+    // A clip at timeline 4s, 6s long, starting 12.5s into its source.
+    QJsonArray timeline;
+    timeline.append(makeClip(media, 4.0, 6.0, 12.5));
+    const RenderGraph g = TimelineGraphBuilder::build(timeline, out);
+    QVERIFY2(g.ok, qPrintable(g.error));
+    QCOMPARE(g.durationSecs, 10.0);          // start + dur
+    QCOMPARE(g.videoClips, 1);
+    QCOMPARE(g.audioClips, 0);
+    QVERIFY(!g.hasAudio);
+
+    // The source segment is [sourceIn, sourceIn + dur * speed).
+    QVERIFY(g.filterGraph.contains(QStringLiteral("trim=start=12.500000:end=18.500000")));
+    // Placement puts the clip at its timeline start.
+    QVERIFY(g.filterGraph.contains(QStringLiteral("+4.000000/TB")));
+    // Background fixes geometry and length, so gaps stay black.
+    QVERIFY(g.filterGraph.contains(QStringLiteral("color=c=black:s=1920x1080:r=60")));
+    QVERIFY(g.filterGraph.contains(QStringLiteral("scale=1920:1080")));
+    QVERIFY(g.filterGraph.contains(QStringLiteral("[vout]")));
+    QVERIFY(g.outputArgs.contains(QStringLiteral("-map")));
+    QVERIFY(g.outputArgs.contains(QStringLiteral("[vout]")));
+    QVERIFY(!g.outputArgs.contains(QStringLiteral("[aout]")));
+
+    // Double speed consumes twice the source over the same timeline span.
+    QJsonObject fast = makeClip(media, 0.0, 5.0, 0.0);
+    QJsonObject speed;
+    speed.insert(QStringLiteral("factor"), 2.0);
+    fast.insert(QStringLiteral("speed"), speed);
+    QJsonArray fastTimeline;
+    fastTimeline.append(fast);
+    const RenderGraph fg = TimelineGraphBuilder::build(fastTimeline, out);
+    QVERIFY2(fg.ok, qPrintable(fg.error));
+    QVERIFY(fg.filterGraph.contains(QStringLiteral("trim=start=0.000000:end=10.000000")));
+    QVERIFY(fg.filterGraph.contains(QStringLiteral("/2.000000+")));
+
+    // Half scale renders at half the output geometry.
+    QJsonObject small = makeClip(media, 0.0, 5.0, 0.0);
+    QJsonObject xf;
+    xf.insert(QStringLiteral("scale"), 50.0);
+    small.insert(QStringLiteral("transform"), xf);
+    QJsonArray smallTimeline;
+    smallTimeline.append(small);
+    const RenderGraph sg = TimelineGraphBuilder::build(smallTimeline, out);
+    QVERIFY2(sg.ok, qPrintable(sg.error));
+    QVERIFY(sg.filterGraph.contains(QStringLiteral("scale=960:540")));
+}
+
+void MalloyModelTests::timelineGraphMixesAudioAndKeepsPathsOutOfTheGraph() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    // A file name carrying filter-graph metacharacters. If the builder ever
+    // interpolated paths into the graph, this is what would break it, so the
+    // test pins the rule that paths are arguments only.
+    const QString video = makeMediaFile(dir.filePath(QStringLiteral("clip's [1]; odd.mp4")));
+    const QString audioA = makeMediaFile(dir.filePath(QStringLiteral("music.wav")));
+    const QString audioB = makeMediaFile(dir.filePath(QStringLiteral("voice.wav")));
+    QVERIFY(!video.isEmpty() && !audioA.isEmpty() && !audioB.isEmpty());
+
+    QJsonArray timeline;
+    timeline.append(makeClip(video, 0.0, 8.0));
+    timeline.append(makeClip(audioA, 0.0, 8.0, 0.0, true));
+    timeline.append(makeClip(audioB, 2.0, 4.0, 1.0, true));
+
+    const RenderGraph g = TimelineGraphBuilder::build(timeline, OutputSettings{});
+    QVERIFY2(g.ok, qPrintable(g.error));
+    QCOMPARE(g.videoClips, 1);
+    QCOMPARE(g.audioClips, 2);
+    QVERIFY(g.hasAudio);
+    QVERIFY(g.filterGraph.contains(QStringLiteral("amix=inputs=2")));
+    // The delayed clip is placed with adelay, in milliseconds.
+    QVERIFY(g.filterGraph.contains(QStringLiteral("adelay=2000:all=1")));
+    QVERIFY(g.outputArgs.contains(QStringLiteral("[aout]")));
+
+    // Every media path is an argument, and none of them appear in the graph.
+    QVERIFY(g.inputArgs.contains(video));
+    QVERIFY(g.inputArgs.contains(audioA));
+    QVERIFY(g.inputArgs.contains(audioB));
+    QCOMPARE(g.inputArgs.count(QStringLiteral("-i")), 3);
+    QVERIFY(!g.filterGraph.contains(video));
+    QVERIFY(!g.filterGraph.contains(audioA));
+    QVERIFY(!g.filterGraph.contains(QStringLiteral(".mp4")));
+    QVERIFY(!g.filterGraph.contains(QStringLiteral(".wav")));
+}
+
+void MalloyModelTests::timelineGraphRefusesWhatItCannotRender() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString media = makeMediaFile(dir.filePath(QStringLiteral("a.mp4")));
+    const OutputSettings out;
+
+    // Empty timeline.
+    QVERIFY(!TimelineGraphBuilder::build(QJsonArray{}, out).ok);
+
+    // Unlinked clip: named in the error so a long timeline is actionable.
+    {
+        QJsonObject c = makeClip(media, 0.0, 4.0);
+        c.insert(QStringLiteral("sourcePath"), QString());
+        c.insert(QStringLiteral("label"), QStringLiteral("Intro card"));
+        QJsonArray t;
+        t.append(c);
+        const RenderGraph g = TimelineGraphBuilder::build(t, out);
+        QVERIFY(!g.ok);
+        QVERIFY(g.error.contains(QStringLiteral("Intro card")));
+    }
+
+    // Source file that is gone.
+    {
+        QJsonArray t;
+        t.append(makeClip(dir.filePath(QStringLiteral("ghost.mp4")), 0.0, 4.0));
+        const RenderGraph g = TimelineGraphBuilder::build(t, out);
+        QVERIFY(!g.ok);
+        QVERIFY(g.error.contains(QStringLiteral("missing")));
+    }
+
+    // Audio-only timeline: there is no picture to render.
+    {
+        QJsonArray t;
+        t.append(makeClip(media, 0.0, 4.0, 0.0, true));
+        QVERIFY(!TimelineGraphBuilder::build(t, out).ok);
+    }
+
+    // Parameters this slice does not implement are refused rather than ignored,
+    // so nothing renders silently wrong.
+    auto withTransform = [&](const QString& key, double value) {
+        QJsonObject c = makeClip(media, 0.0, 4.0);
+        QJsonObject xf;
+        xf.insert(key, value);
+        c.insert(QStringLiteral("transform"), xf);
+        QJsonArray t;
+        t.append(c);
+        return TimelineGraphBuilder::build(t, out);
+    };
+    QVERIFY(!withTransform(QStringLiteral("rotation"), 90.0).ok);
+
+    auto withAudioParam = [&](const QString& key, int value) {
+        QJsonObject c = makeClip(media, 0.0, 4.0, 0.0, true);
+        QJsonObject ap;
+        ap.insert(key, value);
+        c.insert(QStringLiteral("audioParams"), ap);
+        QJsonArray t;
+        t.append(makeClip(media, 0.0, 4.0));
+        t.append(c);
+        return TimelineGraphBuilder::build(t, out);
+    };
+    QVERIFY(!withAudioParam(QStringLiteral("pan"), 50).ok);
+    QVERIFY(!withAudioParam(QStringLiteral("channels"), 1).ok);
+
+    // Opacity is implemented, so it must not be refused.
+    QVERIFY(withTransform(QStringLiteral("opacity"), 50.0).ok);
+
+    // Too many clips: refused with a number rather than handed to ffmpeg.
+    {
+        QJsonArray t;
+        for (int i = 0; i < TimelineGraphBuilder::kMaxInputs + 1; ++i)
+            t.append(makeClip(media, double(i), 1.0));
+        const RenderGraph g = TimelineGraphBuilder::build(t, out);
+        QVERIFY(!g.ok);
+        QVERIFY(g.error.contains(QString::number(TimelineGraphBuilder::kMaxInputs)));
+    }
 }
 
 QTEST_MAIN(MalloyModelTests)

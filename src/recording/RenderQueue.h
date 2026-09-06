@@ -11,8 +11,9 @@
 // not change what a queued job produces, and a retry re-renders the same thing
 // that failed.
 //
-// The worker is still simulated. Replacing it is
-// docs/adr/0003-render-worker-pipeline.md.
+// Jobs are rendered by RenderPipeline, one ffmpeg process at a time
+// (docs/adr/0003-render-worker-pipeline.md). The queue owns the scheduling and
+// the persistence; the pipeline owns the process.
 
 #include "recording/OutputSettings.h"
 
@@ -23,7 +24,7 @@
 #include <QVector>
 
 class QJsonObject;
-class QTimer;
+class RenderPipeline;
 
 struct RenderJob {
     enum State { Pending, Active, Completed, Failed };
@@ -89,21 +90,19 @@ public:
     void setPaused(bool paused);
     bool paused() const { return m_paused; }
 
-    // Testing hook: advance the active job by one simulated tick.
-    void advanceForTest() { tick(); }
-
 signals:
     void changed();
 
 private:
-    void tick();
-    void startNext();
+    void startNext();          // promote and start the next pending job
+    RenderJob* jobById(const QString& id);
     void load();
     void save() const;
     QString resolvedStorePath() const;
 
     QVector<RenderJob> m_jobs;
-    QTimer* m_timer = nullptr;
+    RenderPipeline* m_pipeline = nullptr;
+    QString m_activeId;        // job the pipeline is currently rendering
     bool    m_paused = false;
     QString m_storePath;
 };

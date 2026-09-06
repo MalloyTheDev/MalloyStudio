@@ -1,5 +1,6 @@
 #include "recording/RenderQueue.h"
 #include "recording/EncoderRegistry.h"
+#include "recording/RenderPipeline.h"
 
 #include <QDir>
 #include <QFile>
@@ -7,10 +8,8 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
-#include <QRandomGenerator>
 #include <QSaveFile>
 #include <QStandardPaths>
-#include <QTimer>
 #include <QUuid>
 
 #include <algorithm>
@@ -66,11 +65,50 @@ RenderJob RenderJob::fromJson(const QJsonObject& o) {
 }
 
 RenderQueue::RenderQueue(QObject* parent) : QObject(parent) {
-    m_timer = new QTimer(this);
-    m_timer->setInterval(400);
-    connect(m_timer, &QTimer::timeout, this, &RenderQueue::tick);
+    m_pipeline = new RenderPipeline(this);
+
+    connect(m_pipeline, &RenderPipeline::progress, this, [this](int percent) {
+        RenderJob* j = jobById(m_activeId);
+        if (!j) return;
+        j->progress = percent;
+        // Not persisted: progress changes many times a second and the store now
+        // carries a timeline snapshot per job. State transitions do the saving.
+        emit changed();
+    });
+
+    connect(m_pipeline, &RenderPipeline::finished, this, [this] {
+        if (RenderJob* j = jobById(m_activeId)) {
+            j->state = RenderJob::Completed;
+            j->progress = 100;
+            j->error.clear();
+            j->finishedAt = QDateTime::currentDateTime();
+        }
+        m_activeId.clear();
+        save();
+        emit changed();
+        startNext();
+    });
+
+    connect(m_pipeline, &RenderPipeline::failed, this, [this](const QString& message) {
+        if (RenderJob* j = jobById(m_activeId)) {
+            j->state = RenderJob::Failed;
+            j->error = message;
+        }
+        m_activeId.clear();
+        save();
+        emit changed();
+        startNext();
+    });
+
     load();
     startNext();
+}
+
+RenderJob* RenderQueue::jobById(const QString& id) {
+    if (id.isEmpty()) return nullptr;
+    for (RenderJob& j : m_jobs)
+        if (j.id == id) return &j;
+    return nullptr;
 }
 
 void RenderQueue::setStorePath(const QString& path) {
@@ -168,6 +206,12 @@ void RenderQueue::retry(const QString& id) {
 }
 
 void RenderQueue::cancel(const QString& id) {
+    // Stop the encoder first: cancel() also deletes the partial file, which
+    // must not be left behind for the media registries to pick up.
+    if (id == m_activeId && m_pipeline) {
+        m_pipeline->cancel();
+        m_activeId.clear();
+    }
     for (int i = 0; i < m_jobs.size(); ++i) {
         if (m_jobs[i].id == id
             && (m_jobs[i].state == RenderJob::Active || m_jobs[i].state == RenderJob::Pending)) {
@@ -191,46 +235,43 @@ void RenderQueue::clearCompleted() {
 void RenderQueue::setPaused(bool paused) {
     if (m_paused == paused) return;
     m_paused = paused;
-    if (m_paused) m_timer->stop();
-    else startNext();
+    // Pausing gates promotion only: a render already in flight is left to
+    // finish, since killing it would throw away the work done so far.
+    if (!m_paused) startNext();
     emit changed();
 }
 
 void RenderQueue::startNext() {
-    if (m_paused || hasActive()) {
-        if (hasActive() && !m_timer->isActive()) m_timer->start();
-        return;
-    }
+    if (m_paused || hasActive() || !m_pipeline) return;
+
+    bool changedAny = false;
     for (RenderJob& j : m_jobs) {
-        if (j.state == RenderJob::Pending) {
-            j.state = RenderJob::Active;
-            j.progress = 0;
+        if (j.state != RenderJob::Pending) continue;
+
+        QString error;
+        j.state = RenderJob::Active;
+        j.progress = 0;
+        if (m_pipeline->start(j, &error)) {
+            m_activeId = j.id;
+            save();
             emit changed();
-            m_timer->start();
             return;
         }
+
+        // Could not even start: record why and move on to the next job rather
+        // than stalling the queue behind one bad entry.
+        j.state = RenderJob::Failed;
+        j.progress = 0;
+        j.error = error;
+        changedAny = true;
     }
-    m_timer->stop();
-}
 
-void RenderQueue::tick() {
-    RenderJob* active = nullptr;
-    for (RenderJob& j : m_jobs)
-        if (j.state == RenderJob::Active) { active = &j; break; }
-    if (!active) { m_timer->stop(); return; }
-
-    active->progress += 3 + int(QRandomGenerator::global()->generateDouble() * 7);
-    if (active->progress >= 100) {
-        active->progress = 100;
-        active->state = RenderJob::Completed;
-        active->finishedAt = QDateTime::currentDateTime();
+    if (changedAny) {
         save();
         emit changed();
-        startNext();   // promote the next pending job
-    } else {
-        emit changed();
     }
 }
+
 
 void RenderQueue::load() {
     m_jobs.clear();
