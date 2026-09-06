@@ -1,4 +1,5 @@
 #include "AudioController.h"
+#include "audio/AudioMix.h"
 #include "capture/WasapiCapture.h"
 
 #include <QDateTime>
@@ -37,12 +38,8 @@ static constexpr int kBytesPerTick  = kFramesPerTick * kChannels * kBytesPerSamp
 static constexpr float kLimiterAttack  = 0.0f;           // snap to target in one tick
 static constexpr float kLimiterRelease = 1.0f / 60.0f;   // gain back 1/60 per tick
 
-// Equal-power pan: gainL = cos(angle), gainR = sin(angle), angle ∈ [0, π/2].
-static void panGains(float pan, float& gainL, float& gainR) {
-    const float angle = (std::clamp(pan, -1.0f, 1.0f) + 1.0f) * static_cast<float>(M_PI_4);
-    gainL = std::cos(angle);
-    gainR = std::sin(angle);
-}
+// Pan is a balance control here, not an equal-power placement: see
+// audio/AudioMix.h for why, and for the arithmetic itself.
 
 // ---------------------------------------------------------------------------
 // Construction / destruction
@@ -110,22 +107,14 @@ void AudioController::mixAndEmit() {
         const auto* src    = reinterpret_cast<const qint16*>(chunk.constData());
 
         float gainL, gainR;
-        panGains(in.pan, gainL, gainR);
+        balanceGains(in.pan, gainL, gainR);
         gainL *= in.volume;
         gainR *= in.volume;
 
-        // Interleaved stereo: [L0, R0, L1, R1, …]
-        // Mix the source's stereo into the accumulator with per-channel pan gains.
-        const int nFrames = nSamples / kChannels;
-        for (int f = 0; f < nFrames; ++f) {
-            const int fi = f * 2;
-            if (fi + 1 >= static_cast<int>(accum.size())) break;
-            const int32_t srcL = src[fi];
-            const int32_t srcR = src[fi + 1];
-            // Equal-power pan applies both L and R of the source into each output channel.
-            accum[fi]     += static_cast<int32_t>((srcL + srcR) * 0.5f * gainL * 2.0f);
-            accum[fi + 1] += static_cast<int32_t>((srcL + srcR) * 0.5f * gainR * 2.0f);
-        }
+        // Interleaved stereo: [L0, R0, L1, R1, ...]. The previous version summed
+        // the source's channels before applying the pan gains, which mixed every
+        // stereo input down to mono in the recording and the stream.
+        mixStereoInto(accum, src, nSamples, gainL, gainR);
     }
 
     // --- Optional master bus limiter ---
@@ -197,7 +186,7 @@ void AudioController::startWorker(int index) {
         if (i < 0) return;
         const AudioInput& ai = m_inputs[i];
         float gainL, gainR;
-        panGains(ai.pan, gainL, gainR);
+        balanceGains(ai.pan, gainL, gainR);
         const float g = ai.muted ? 0.0f : ai.volume;
         const float pL = std::min(1.0f, peakL * g * gainL);
         const float pR = std::min(1.0f, peakR * g * gainR);

@@ -1,4 +1,5 @@
 #include "audio/AudioController.h"
+#include "audio/AudioMix.h"
 #include "capture/CaptureController.h"
 #include "input/HotkeyManager.h"
 #include "model/Canvas.h"
@@ -168,6 +169,10 @@ private slots:
     // Regression: the blur seeded its sliding window with an unclamped upper
     // index, so any image narrower or shorter than the radius (which goes to 32)
     // read past the row or column. A source only a few pixels wide is ordinary.
+    // Regression: the mixer summed each input's left and right together before
+    // applying pan, so every stereo source reached the recording and the stream
+    // as mono. Pan is a balance control on a stereo bus.
+    void mixerKeepsStereoSeparation();
     void blurHandlesImagesSmallerThanItsRadius();
     void timelineGraphPlacesTrimsAndScalesClips();
     void timelineGraphMixesAudioAndKeepsPathsOutOfTheGraph();
@@ -2438,6 +2443,75 @@ void MalloyModelTests::blurHandlesImagesSmallerThanItsRadius() {
     blur.apply(column);
     for (int y = 0; y < column.height(); ++y)
         QCOMPARE(qRed(column.pixel(0, y)), 90);
+}
+
+void MalloyModelTests::mixerKeepsStereoSeparation() {
+    float l = 0.0f, r = 0.0f;
+
+    // Centre is unity on both sides: a stereo source is passed through, not
+    // re-spread.
+    balanceGains(0.0f, l, r);
+    QCOMPARE(l, 1.0f);
+    QCOMPARE(r, 1.0f);
+
+    // Hard left mutes the right side and leaves the left alone.
+    balanceGains(-1.0f, l, r);
+    QCOMPARE(l, 1.0f);
+    QCOMPARE(r, 0.0f);
+
+    balanceGains(1.0f, l, r);
+    QCOMPARE(l, 0.0f);
+    QCOMPARE(r, 1.0f);
+
+    // Partway is linear on the attenuated side only.
+    balanceGains(-0.5f, l, r);
+    QCOMPARE(l, 1.0f);
+    QCOMPARE(r, 0.5f);
+
+    // Out of range values are clamped rather than inverting the law.
+    balanceGains(-4.0f, l, r);
+    QCOMPARE(l, 1.0f);
+    QCOMPARE(r, 0.0f);
+
+    // A hard-panned source: everything on the left, silence on the right.
+    const std::vector<int16_t> src = {1000, -2000, 3000, -4000};
+
+    std::vector<int32_t> accum(4, 0);
+    balanceGains(0.0f, l, r);
+    mixStereoInto(accum, src.data(), int(src.size()), l, r);
+    QCOMPARE(accum[0], 1000);
+    QCOMPARE(accum[1], -2000);
+    QCOMPARE(accum[2], 3000);
+    QCOMPARE(accum[3], -4000);
+
+    // The regression itself: a signal present only on the left must never
+    // appear on the right, at any pan setting. The old mixer put half of it
+    // there.
+    const std::vector<int16_t> leftOnly = {8000, 0, 8000, 0};
+    for (float pan : {-1.0f, -0.5f, 0.0f, 0.5f, 1.0f}) {
+        std::vector<int32_t> out(4, 0);
+        balanceGains(pan, l, r);
+        mixStereoInto(out, leftOnly.data(), int(leftOnly.size()), l, r);
+        QCOMPARE(out[1], 0);
+        QCOMPARE(out[3], 0);
+    }
+
+    // Mixing two inputs accumulates per channel without touching the other one.
+    std::vector<int32_t> two(2, 0);
+    const std::vector<int16_t> a = {100, 200};
+    const std::vector<int16_t> b = {400, 800};
+    balanceGains(0.0f, l, r);
+    mixStereoInto(two, a.data(), int(a.size()), l, r);
+    mixStereoInto(two, b.data(), int(b.size()), l, r);
+    QCOMPARE(two[0], 500);
+    QCOMPARE(two[1], 1000);
+
+    // A short buffer never writes past the accumulator.
+    std::vector<int32_t> small(2, 0);
+    mixStereoInto(small, src.data(), int(src.size()), 1.0f, 1.0f);
+    QCOMPARE(small.size(), size_t(2));
+    QCOMPARE(small[0], 1000);
+    QCOMPARE(small[1], -2000);
 }
 
 QTEST_MAIN(MalloyModelTests)
