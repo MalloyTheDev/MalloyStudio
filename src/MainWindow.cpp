@@ -168,11 +168,17 @@ void MainWindow::setupUi() {
         m_scenesPanel, m_sourcesPanel, m_studioContainer, m_controlsBar,
         m_mixerPanel, m_inspectorPanel);
 
-    m_dashboard = new Dashboard(m_renderQueue, this);
+    m_dashboard = new Dashboard(m_scenes, m_audio, m_clipsRegistry, m_projectRegistry,
+                                m_renderQueue, this);
     connect(m_dashboard, &Dashboard::navigateTo, this,
             [this](const QString& id) { m_shell->setCurrentWorkspace(id); });
     connect(m_dashboard, &Dashboard::recordRequested, this, [this] { m_controlsBar->toggleRecord(); });
     connect(m_dashboard, &Dashboard::streamRequested, this, [this] { m_controlsBar->toggleStream(); });
+    connect(m_dashboard, &Dashboard::saveReplayRequested, this, &MainWindow::saveReplayClip);
+    connect(m_dashboard, &Dashboard::newProjectRequested, this, &MainWindow::newProject);
+    connect(m_dashboard, &Dashboard::openProjectRequested, this, [this](const QString& path) {
+        if (maybeSave()) loadProject(path);
+    });
     m_shell->addWorkspace(QStringLiteral("dashboard"), m_dashboard);
     m_shell->addWorkspace(QStringLiteral("record"), recording);
     m_streamStudio = new StreamingWorkspace(m_audio, this);
@@ -625,29 +631,7 @@ void MainWindow::connectModelSignals() {
         } else if (actionId == QLatin1String(HotkeyManager::kStudioTransition)) {
             m_transitionBtn->click();
         } else if (actionId == QLatin1String(HotkeyManager::kReplaySave)) {
-            if (m_outputSettings.replayBufferSeconds <= 0) {
-                flash(tr("Replay buffer is disabled — enable it in Output Settings."), 4000);
-            } else {
-                const QString dir = QStandardPaths::writableLocation(
-                    QStandardPaths::MoviesLocation);
-                const QString path = QDir(dir).filePath(
-                    QStringLiteral("replay-%1.mp4").arg(
-                        QDateTime::currentDateTime().toString(
-                            QStringLiteral("yyyyMMdd-HHmmss"))));
-                // Snapshot both rings before calling saveReplay so the
-                // timestamps are as synchronised as possible.
-                auto frames = m_preview->snapshotReplayFrames();
-                auto pcm    = m_audio->snapshotReplayPcm();
-                QString err;
-                if (!m_media->saveReplay(path, m_outputSettings,
-                                         std::move(frames),
-                                         m_preview->nativeWidth(),
-                                         m_preview->nativeHeight(),
-                                         std::move(pcm), &err))
-                    flash(tr("Replay save failed: %1").arg(err), 5000);
-                else
-                    flash(tr("Saving replay…"), 2000);
-            }
+            saveReplayClip();
         } else if (actionId.startsWith(QStringLiteral("scene.switch."))) {
             const int idx = actionId.mid(13).toInt() - 1;  // 0-based
             if (idx >= 0 && idx < m_scenes->sceneCount())
@@ -798,6 +782,30 @@ void MainWindow::updateShellMode() {
         m_dashboard->setRecording(m_media && m_media->isRecording());
         m_dashboard->setStreaming(streaming);
     }
+}
+
+void MainWindow::saveReplayClip() {
+    if (m_outputSettings.replayBufferSeconds <= 0) {
+        flash(tr("Replay buffer is disabled. Enable it in Settings, Recording."), 4000);
+        return;
+    }
+    const QString dir = QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);
+    const QString path = QDir(dir).filePath(
+        QStringLiteral("replay-%1.mp4").arg(
+            QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss"))));
+    // Snapshot both rings before calling saveReplay so the timestamps are as
+    // synchronised as possible.
+    auto frames = m_preview->snapshotReplayFrames();
+    auto pcm    = m_audio->snapshotReplayPcm();
+    QString err;
+    if (!m_media->saveReplay(path, m_outputSettings,
+                             std::move(frames),
+                             m_preview->nativeWidth(),
+                             m_preview->nativeHeight(),
+                             std::move(pcm), &err))
+        flash(tr("Replay save failed: %1").arg(err), 5000);
+    else
+        flash(tr("Saving replay..."), 2000);
 }
 
 void MainWindow::flash(const QString& text, int ms) {

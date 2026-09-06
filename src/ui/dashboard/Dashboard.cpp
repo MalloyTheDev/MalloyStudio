@@ -1,25 +1,45 @@
 #include "ui/dashboard/Dashboard.h"
+
+#include "audio/AudioController.h"
+#include "model/Scene.h"
+#include "model/SceneCollection.h"
+#include "model/Source.h"
+#include "project/ByteSize.h"
+#include "project/ClipsRegistry.h"
+#include "project/ProjectRegistry.h"
+#include "project/RecentRecordings.h"
+#include "recording/EncoderRegistry.h"
+#include "recording/OutputSettings.h"
+#include "recording/RenderQueue.h"
+#include "recording/StreamSettings.h"
+#include "ui/IconFactory.h"
+#include "ui/Theme.h"
 #include "ui/components/MeterBar.h"
 #include "ui/components/PanelFrame.h"
 #include "ui/components/Placeholder.h"
-#include "ui/IconFactory.h"
-#include "ui/Theme.h"
-#include "recording/RenderQueue.h"
 
+#include <QDir>
 #include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLayoutItem>
 #include <QProgressBar>
 #include <QPushButton>
-#include <QRandomGenerator>
 #include <QScrollArea>
-#include <QTimer>
+#include <QStorageInfo>
 #include <QVBoxLayout>
 
 #include <cmath>
 
 namespace {
+
+// How many rows each "recent" panel shows.
+constexpr int kRecentLimit = 4;
+// Peak-hold falloff per mixer tick (AudioController emits levels at 50 Hz).
+constexpr double kPeakDecay = 0.01;
+// Below this, the storage check reports a warning instead of a tick.
+constexpr qint64 kLowDiskBytes = 10LL * 1024 * 1024 * 1024;
 
 QFrame* card(QWidget* parent = nullptr) {
     auto* f = new QFrame(parent);
@@ -27,12 +47,28 @@ QFrame* card(QWidget* parent = nullptr) {
     return f;
 }
 
-QLabel* mono(const QString& text, const QString& tone = QStringLiteral("mute"), int px = 11) {
-    return Theme::label(text, tone, px, false, true);
+QLabel* mono(const QString& s, const QString& tone = QStringLiteral("mute"), int px = 11) {
+    return Theme::label(s, tone, px, false, true);
 }
 
 QLabel* text(const QString& s, const QString& tone = QString(), int px = 13, bool bold = false) {
     return Theme::label(s, tone, px, bold);
+}
+
+// Fixed-width label that ellipsises anything too long for its cell, keeping the
+// full string as a tooltip. File and device names are user data and can be
+// arbitrarily long; without this one long name stretches its column and skews
+// the surrounding grid.
+QLabel* elided(const QString& s, int width, const QString& tone = QString(),
+               int px = 13, bool bold = false, bool useMono = false) {
+    QLabel* l = Theme::label(QString(), tone, px, bold, useMono);
+    l->setFixedWidth(width);
+    // Elide against a slightly narrower budget: the label is measured with its
+    // pre-polish font, and the stylesheet can substitute a marginally wider
+    // family, which would clip the tail instead of ellipsising it.
+    l->setText(l->fontMetrics().elidedText(s, Qt::ElideRight, qMax(16, width - 8)));
+    l->setToolTip(s);
+    return l;
 }
 
 QFrame* iconChip(const QString& name, const QColor& color, int chip = 32, int ic = 16) {
@@ -48,28 +84,67 @@ QFrame* iconChip(const QString& name, const QColor& color, int chip = 32, int ic
     return f;
 }
 
-QWidget* factPill(const QString& label, const QString& value) {
+QWidget* factPill(const QString& label, QLabel** valueOut) {
     auto* w = new QWidget;
     auto* v = new QVBoxLayout(w);
     v->setContentsMargins(0, 0, 0, 0);
     v->setSpacing(2);
     auto* l = new QLabel(label.toUpper());
     l->setProperty("tone", "mute");
-    QFont lf = l->font(); lf.setPixelSize(10); lf.setLetterSpacing(QFont::AbsoluteSpacing, 0.6); l->setFont(lf);
+    QFont lf = l->font();
+    lf.setPixelSize(10);
+    lf.setLetterSpacing(QFont::AbsoluteSpacing, 0.6);
+    l->setFont(lf);
     v->addWidget(l);
-    v->addWidget(mono(value, QString(), 12));
+    auto* value = mono(QString(), QString(), 12);
+    v->addWidget(value);
+    if (valueOut) *valueOut = value;
     return w;
 }
 
 QString dbText(double v) {
-    if (v < 0.001) return QStringLiteral("-∞ dB");
+    if (v < 0.001) return QStringLiteral("-inf dB");
     return QStringLiteral("%1 dB").arg(20.0 * std::log10(v), 0, 'f', 1);
 }
 
+// Drops every child of a re-rendered panel body. Widgets go through
+// deleteLater() because a rebuild can be triggered from a signal one of them
+// emitted; callers must clear any pointer they kept into the old content
+// before calling this.
+void clearLayout(QLayout* layout) {
+    if (!layout) return;
+    while (QLayoutItem* item = layout->takeAt(0)) {
+        if (QWidget* w = item->widget()) w->deleteLater();
+        if (QLayout* child = item->layout()) {
+            clearLayout(child);
+            child->deleteLater();
+        }
+        delete item;
+    }
+}
+
+// One row of the system-status grid.
+struct StatusCheck {
+    QString icon;
+    QString label;
+    QString value;
+    bool    ok = false;
+};
+
 } // namespace
 
-Dashboard::Dashboard(RenderQueue* renderQueue, QWidget* parent)
-    : QWidget(parent), m_renderQueue(renderQueue) {
+Dashboard::Dashboard(SceneCollection* scenes,
+                     AudioController* audio,
+                     ClipsRegistry* clips,
+                     ProjectRegistry* projects,
+                     RenderQueue* renderQueue,
+                     QWidget* parent)
+    : QWidget(parent),
+      m_scenes(scenes),
+      m_audio(audio),
+      m_clips(clips),
+      m_projects(projects),
+      m_renderQueue(renderQueue) {
     auto* outer = new QVBoxLayout(this);
     outer->setContentsMargins(0, 0, 0, 0);
 
@@ -91,10 +166,10 @@ Dashboard::Dashboard(RenderQueue* renderQueue, QWidget* parent)
     r1->addWidget(buildQuickActions(), 10);
     col->addLayout(r1);
 
-    // Row 2: now playing | recent recordings | render queue
+    // Row 2: preview signal | recent recordings | render queue
     auto* r2 = new QHBoxLayout;
     r2->setSpacing(20);
-    r2->addWidget(buildNowPlaying(), 1);
+    r2->addWidget(buildPreviewSignal(), 1);
     r2->addWidget(buildRecentRecordings(), 1);
     r2->addWidget(buildRenderQueue(), 1);
     col->addLayout(r2);
@@ -112,23 +187,49 @@ Dashboard::Dashboard(RenderQueue* renderQueue, QWidget* parent)
 
     scroll->setWidget(content);
 
-    m_meterTimer = new QTimer(this);
-    m_meterTimer->setInterval(60);
-    connect(m_meterTimer, &QTimer::timeout, this, &Dashboard::tickMeters);
-    // started in showEvent so it only runs while the dashboard is the visible page
-
     if (m_renderQueue)
         connect(m_renderQueue, &RenderQueue::changed, this, &Dashboard::refreshRenderQueue);
+    if (m_clips)
+        connect(m_clips, &ClipsRegistry::changed, this, &Dashboard::refreshClips);
+    if (m_projects)
+        connect(m_projects, &ProjectRegistry::changed, this, &Dashboard::refreshProjects);
+    if (m_audio) {
+        connect(m_audio, &AudioController::inputsChanged, this, &Dashboard::rebuildMeterRows);
+        connect(m_audio, &AudioController::levelsUpdated, this, &Dashboard::onLevels);
+        connect(m_audio, &AudioController::inputConnectionChanged, this, [this] {
+            refreshOutputFacts();
+            refreshSystemStatus();
+        });
+    }
+    if (m_scenes) {
+        connect(m_scenes, &SceneCollection::sourcesChanged, this, &Dashboard::refreshSceneSummary);
+        connect(m_scenes, &SceneCollection::itemsChanged, this, &Dashboard::refreshSceneSummary);
+        connect(m_scenes, &SceneCollection::sceneAdded, this, &Dashboard::refreshSceneSummary);
+        connect(m_scenes, &SceneCollection::sceneRemoved, this, &Dashboard::refreshSceneSummary);
+        connect(m_scenes, &SceneCollection::sceneRenamed, this, &Dashboard::refreshSceneSummary);
+        connect(m_scenes, &SceneCollection::currentChanged, this, &Dashboard::refreshSceneSummary);
+        connect(m_scenes, &SceneCollection::collectionReset, this, &Dashboard::refreshSceneSummary);
+    }
+
+    rebuildMeterRows();
+    refreshAll();
 }
 
 void Dashboard::showEvent(QShowEvent* event) {
     QWidget::showEvent(event);
-    if (m_meterTimer) m_meterTimer->start();
+    // Output settings, the recording folder and the registries can all change
+    // from other workspaces while the dashboard is stacked behind them.
+    refreshAll();
 }
 
-void Dashboard::hideEvent(QHideEvent* event) {
-    QWidget::hideEvent(event);
-    if (m_meterTimer) m_meterTimer->stop();
+void Dashboard::refreshAll() {
+    refreshOutputFacts();
+    refreshSceneSummary();
+    refreshRecordings();
+    refreshProjects();
+    refreshClips();
+    refreshRenderQueue();
+    refreshSystemStatus();
 }
 
 void Dashboard::setProjectName(const QString& name) {
@@ -150,6 +251,10 @@ void Dashboard::refreshState() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Hero
+// ---------------------------------------------------------------------------
+
 QWidget* Dashboard::buildHero() {
     auto* c = card();
     auto* v = new QVBoxLayout(c);
@@ -159,7 +264,8 @@ QWidget* Dashboard::buildHero() {
     auto* top = new QHBoxLayout;
     top->setSpacing(8);
     top->addWidget(Theme::makeTag(tr("Project"), QStringLiteral("accent")));
-    top->addWidget(text(tr("Stream Night · Tuesday · 2 hr planned"), QStringLiteral("mute"), 12));
+    m_heroSubtitle = text(QString(), QStringLiteral("mute"), 12);
+    top->addWidget(m_heroSubtitle);
     top->addStretch();
     v->addLayout(top);
 
@@ -167,7 +273,7 @@ QWidget* Dashboard::buildHero() {
     m_heroTitle->setObjectName(QStringLiteral("heroTitle"));
     v->addWidget(m_heroTitle);
 
-    auto* desc = text(tr("Compose scenes, record and stream, then clip and edit — all in one workstation."),
+    auto* desc = text(tr("Compose scenes, record and stream, then clip and edit, all in one workstation."),
                       QStringLiteral("dim"), 13);
     desc->setWordWrap(true);
     desc->setMaximumWidth(560);
@@ -194,17 +300,94 @@ QWidget* Dashboard::buildHero() {
 
     auto* facts = new QHBoxLayout;
     facts->setSpacing(24);
-    facts->addWidget(factPill(tr("Resolution"), QStringLiteral("1920 × 1080")));
-    facts->addWidget(factPill(tr("Framerate"), QStringLiteral("60 fps")));
-    facts->addWidget(factPill(tr("Audio"), QStringLiteral("48 kHz · Stereo")));
-    facts->addWidget(factPill(tr("Mic"), QStringLiteral("Shure SM7B")));
-    facts->addWidget(factPill(tr("Destination"), QStringLiteral("Twitch · /malloy_live")));
+    facts->addWidget(factPill(tr("Resolution"), &m_factResolution));
+    facts->addWidget(factPill(tr("Framerate"), &m_factFramerate));
+    facts->addWidget(factPill(tr("Audio"), &m_factAudio));
+    facts->addWidget(factPill(tr("Mic"), &m_factMic));
+    facts->addWidget(factPill(tr("Destination"), &m_factDestination));
     facts->addStretch();
     v->addLayout(facts);
     v->addStretch();
 
     return c;
 }
+
+void Dashboard::refreshOutputFacts() {
+    const OutputSettings out = OutputSettings::load();
+
+    if (m_factResolution)
+        m_factResolution->setText(QStringLiteral("%1 x %2").arg(out.width).arg(out.height));
+    if (m_factFramerate)
+        m_factFramerate->setText(tr("%1 fps").arg(out.fps));
+    if (m_previewMeta)
+        m_previewMeta->setText(QStringLiteral("%1 x %2 · %3 fps")
+                                   .arg(out.width).arg(out.height).arg(out.fps));
+
+    if (m_factAudio) {
+        if (m_audio) {
+            const int channels = m_audio->channels();
+            m_factAudio->setText(QStringLiteral("%1 kHz · %2")
+                                     .arg(m_audio->sampleRate() / 1000)
+                                     .arg(channels == 2 ? tr("Stereo") : tr("%1 ch").arg(channels)));
+        } else {
+            m_factAudio->setText(tr("No mix bus"));
+        }
+    }
+
+    if (m_factMic) {
+        QString mic = tr("None");
+        if (m_audio) {
+            for (const AudioInput& in : m_audio->inputs()) {
+                if (in.loopback) continue;
+                mic = in.connected ? in.name : tr("%1 (offline)").arg(in.name);
+                break;
+            }
+        }
+        m_factMic->setText(mic);
+    }
+
+    if (m_factDestination) {
+        // The key itself is never rendered, only whether one is configured.
+        const StreamSettings stream = StreamSettings::load();
+        const QString service = StreamSettings::displayName(stream.service);
+        m_factDestination->setText(stream.streamKey.isEmpty() ? tr("%1 · no key").arg(service)
+                                                              : tr("%1 · key set").arg(service));
+    }
+
+    // Keep the replay quick action honest about the configured buffer length.
+    if (m_clipTitle) {
+        m_clipTitle->setText(out.replayBufferSeconds > 0
+                                 ? tr("Clip last %1 s").arg(out.replayBufferSeconds)
+                                 : tr("Clip last seconds"));
+    }
+    if (m_clipSub) {
+        m_clipSub->setText(out.replayBufferSeconds > 0 ? tr("Replay buffer")
+                                                       : tr("Replay buffer is off"));
+    }
+}
+
+void Dashboard::refreshSceneSummary() {
+    if (m_heroSubtitle) {
+        if (m_scenes) {
+            const int scenes = m_scenes->sceneCount();
+            const int sources = m_scenes->sources().size();
+            m_heroSubtitle->setText(tr("%n scene(s)", nullptr, scenes) + QStringLiteral(" · ")
+                                    + tr("%n source(s)", nullptr, sources));
+        } else {
+            m_heroSubtitle->setText(QString());
+        }
+    }
+
+    if (m_scenePlaceholder) {
+        const Scene* current = m_scenes ? m_scenes->currentScene() : nullptr;
+        m_scenePlaceholder->setLabel(current ? tr("Scene · %1").arg(current->name())
+                                             : tr("No scene"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Quick actions
+// ---------------------------------------------------------------------------
 
 QWidget* Dashboard::buildQuickActions() {
     auto* c = card();
@@ -215,119 +398,198 @@ QWidget* Dashboard::buildQuickActions() {
 
     auto* grid = new QGridLayout;
     grid->setSpacing(8);
-    struct A { QString icon, label, sub, target; QColor color; };
-    const QVector<A> items = {
-        {QStringLiteral("record"),   tr("Start Recording"), tr("Use last profile · F9"), QStringLiteral("record"), Theme::RecHi},
-        {QStringLiteral("stream"),   tr("Go Live"),          tr("Twitch · Stream Setup"), QStringLiteral("stream"), Theme::AccentHi},
-        {QStringLiteral("editor"),   tr("Open Editor"),      tr("Resume highlights"),      QStringLiteral("editor"), Theme::TextDim},
-        {QStringLiteral("upload"),   tr("Import Media"),     tr("Drag files or browse"),   QStringLiteral("media"),  Theme::TextDim},
-        {QStringLiteral("scissors"), tr("Clip last 30 s"),   tr("Replay buffer"),          QStringLiteral("clips"),  Theme::TextDim},
-        {QStringLiteral("projects"), tr("New Project"),      tr("From scratch or template"), QStringLiteral("projects"), Theme::TextDim},
-    };
-    int i = 0;
-    for (const A& a : items) {
+
+    // A QPushButton derives its size hint from its own (empty) text and ignores
+    // a nested layout, so a grid cell squeezes the icon chip and the two text
+    // lines until they overlap. Pin a content-sized height (same remedy as the
+    // onboarding option cards, which share this style).
+    auto addAction = [&](int index, const QString& icon, const QString& title,
+                         const QString& sub, const QColor& color,
+                         QLabel** titleOut, QLabel** subOut) {
         auto* b = new QPushButton;
         b->setObjectName(QStringLiteral("actionButton"));
         b->setCursor(Qt::PointingHandCursor);
-        // QPushButton computes its size hint from its (empty) text, ignoring the
-        // nested layout below — so a grid cell squeezes the icon-chip + two text
-        // lines until the title and subtitle overlap. Pin a content-sized height
-        // (same remedy as the onboarding optionCard, which shares this style).
         b->setMinimumHeight(52);
         auto* h = new QHBoxLayout(b);
         h->setContentsMargins(8, 8, 8, 8);
         h->setSpacing(12);
-        h->addWidget(iconChip(a.icon, a.color, 32, 16));
+        h->addWidget(iconChip(icon, color, 32, 16));
         auto* tv = new QVBoxLayout;
         tv->setSpacing(0);
-        tv->addWidget(text(a.label, QString(), 13, true));
-        tv->addWidget(text(a.sub, QStringLiteral("mute"), 11));
+        auto* titleLabel = text(title, QString(), 13, true);
+        auto* subLabel = text(sub, QStringLiteral("mute"), 11);
+        tv->addWidget(titleLabel);
+        tv->addWidget(subLabel);
         h->addLayout(tv);
         h->addStretch();
-        const QString target = a.target;
-        connect(b, &QPushButton::clicked, this, [this, target] {
-            if (target == QLatin1String("record")) emit recordRequested();
-            else if (target == QLatin1String("stream")) emit streamRequested();
-            else emit navigateTo(target);
-        });
-        grid->addWidget(b, i / 2, i % 2);
-        ++i;
-    }
+        grid->addWidget(b, index / 2, index % 2);
+        if (titleOut) *titleOut = titleLabel;
+        if (subOut) *subOut = subLabel;
+        return b;
+    };
+
+    connect(addAction(0, QStringLiteral("record"), tr("Start Recording"),
+                      tr("Current output profile"), Theme::RecHi, nullptr, nullptr),
+            &QPushButton::clicked, this, &Dashboard::recordRequested);
+    connect(addAction(1, QStringLiteral("stream"), tr("Go Live"),
+                      tr("Streaming studio"), Theme::AccentHi, nullptr, nullptr),
+            &QPushButton::clicked, this, &Dashboard::streamRequested);
+    connect(addAction(2, QStringLiteral("editor"), tr("Open Editor"),
+                      tr("Project timeline"), Theme::TextDim, nullptr, nullptr),
+            &QPushButton::clicked, this, [this] { emit navigateTo(QStringLiteral("editor")); });
+    connect(addAction(3, QStringLiteral("upload"), tr("Media Library"),
+                      tr("Browse indexed folders"), Theme::TextDim, nullptr, nullptr),
+            &QPushButton::clicked, this, [this] { emit navigateTo(QStringLiteral("media")); });
+    connect(addAction(4, QStringLiteral("scissors"), tr("Clip last seconds"),
+                      tr("Replay buffer"), Theme::TextDim, &m_clipTitle, &m_clipSub),
+            &QPushButton::clicked, this, &Dashboard::saveReplayRequested);
+    connect(addAction(5, QStringLiteral("projects"), tr("New Project"),
+                      tr("From scratch"), Theme::TextDim, nullptr, nullptr),
+            &QPushButton::clicked, this, &Dashboard::newProjectRequested);
+
     v->addLayout(grid);
     v->addStretch();
     return c;
 }
 
-QWidget* Dashboard::buildNowPlaying() {
+// ---------------------------------------------------------------------------
+// Preview signal: current scene plus the live mix bus
+// ---------------------------------------------------------------------------
+
+QWidget* Dashboard::buildPreviewSignal() {
     auto* panel = new PanelFrame(tr("Preview signal"), QStringLiteral("display"));
-    panel->addHeaderWidget(mono(QStringLiteral("1920 × 1080 · 60 fps")));
+    m_previewMeta = mono(QString());
+    panel->addHeaderWidget(m_previewMeta);
 
     auto* body = new QWidget;
     auto* v = new QVBoxLayout(body);
     v->setContentsMargins(12, 12, 12, 12);
     v->setSpacing(12);
-    v->addWidget(new Placeholder(tr("Scene · Gameplay"), 16, 9));
 
-    auto addMeterRow = [&](const QString& label, MeterBar** meterOut, QLabel** dbOut) {
-        auto* row = new QHBoxLayout;
-        row->setSpacing(8);
-        auto* l = text(label, QStringLiteral("dim"), 11);
-        l->setFixedWidth(110);
-        row->addWidget(l);
-        auto* m = new MeterBar;
-        row->addWidget(m, 1);
-        auto* db = mono(QStringLiteral("-∞ dB"), QStringLiteral("dim"));
-        db->setFixedWidth(56);
-        db->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-        row->addWidget(db);
-        v->addLayout(row);
-        if (meterOut) *meterOut = m;
-        if (dbOut) *dbOut = db;
-    };
-    addMeterRow(tr("Mic — SM7B"), &m_micMeter, &m_micDb);
-    addMeterRow(tr("Desktop Audio"), &m_deskMeter, &m_deskDb);
+    m_scenePlaceholder = new Placeholder(tr("No scene"), 16, 9);
+    v->addWidget(m_scenePlaceholder);
+
+    m_meterLayout = new QVBoxLayout;
+    m_meterLayout->setSpacing(8);
+    v->addLayout(m_meterLayout);
     v->addStretch();
 
     panel->bodyLayout()->addWidget(body);
     return panel;
 }
+
+void Dashboard::rebuildMeterRows() {
+    if (!m_meterLayout) return;
+
+    // Clear the lookup before the widgets go away: a level update can arrive
+    // between the takeAt() below and the deferred deletion.
+    m_meterRows.clear();
+    clearLayout(m_meterLayout);
+
+    const QList<AudioInput> inputs = m_audio ? m_audio->inputs() : QList<AudioInput>{};
+    if (inputs.isEmpty()) {
+        auto* empty = text(tr("No inputs on the mix bus."), QStringLiteral("mute"), 12);
+        empty->setWordWrap(true);
+        m_meterLayout->addWidget(empty);
+        return;
+    }
+
+    for (const AudioInput& in : inputs) {
+        auto* row = new QWidget;
+        auto* h = new QHBoxLayout(row);
+        h->setContentsMargins(0, 0, 0, 0);
+        h->setSpacing(8);
+
+        const QString name = in.connected ? in.name : tr("%1 (offline)").arg(in.name);
+        h->addWidget(elided(name, 110, QStringLiteral("dim"), 11));
+
+        auto* meter = new MeterBar;
+        h->addWidget(meter, 1);
+
+        auto* db = mono(dbText(0.0), QStringLiteral("dim"));
+        db->setFixedWidth(56);
+        db->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        h->addWidget(db);
+
+        m_meterLayout->addWidget(row);
+        m_meterRows.insert(in.id, MeterRow{meter, db, 0.0, 0.0});
+    }
+}
+
+void Dashboard::onLevels(const QString& id, float peakL, float peakR) {
+    // The mix bus keeps running while another workspace is on screen; there is
+    // no point repainting meters nobody can see.
+    if (!isVisible()) return;
+
+    auto it = m_meterRows.find(id);
+    if (it == m_meterRows.end()) return;
+
+    MeterRow& row = it.value();
+    row.level = qMax(peakL, peakR);
+    row.peak = row.level > row.peak ? row.level : qMax(row.level, row.peak - kPeakDecay);
+    row.meter->setValues(row.level, row.peak);
+    row.db->setText(dbText(row.peak));
+}
+
+// ---------------------------------------------------------------------------
+// Recent recordings
+// ---------------------------------------------------------------------------
 
 QWidget* Dashboard::buildRecentRecordings() {
     auto* panel = new PanelFrame(tr("Recent recordings"), QStringLiteral("record"));
     auto* viewAll = new QPushButton(tr("View all"));
     Theme::setVariant(viewAll, QStringLiteral("ghost"));
+    connect(viewAll, &QPushButton::clicked, this, [this] { emit navigateTo(QStringLiteral("media")); });
     panel->addHeaderWidget(viewAll);
 
     auto* body = new QWidget;
-    auto* v = new QVBoxLayout(body);
-    v->setContentsMargins(6, 4, 6, 6);
-    v->setSpacing(2);
-    struct R { QString name, meta, when; bool warn; };
-    const QVector<R> recs = {
-        {tr("Spire — Ep 14 raw.mkv"), QStringLiteral("01:47:21 · 14.2 GB"), tr("Today, 1h ago"), false},
-        {tr("Spire — Ep 13 raw.mkv"), QStringLiteral("02:11:08 · 17.8 GB"), tr("Mon · 8:14 PM"), false},
-        {tr("Late test stream.mkv"),  QStringLiteral("00:23:55 · 3.0 GB"),  tr("Sun · 11:02 PM"), true},
-        {tr("Voice memo — intro.mp3"),QStringLiteral("00:01:12 · 1.1 MB"),  tr("Sun · 9:45 PM"), false},
-    };
-    for (const R& r : recs) {
+    m_recordingsLayout = new QVBoxLayout(body);
+    m_recordingsLayout->setContentsMargins(6, 4, 6, 6);
+    m_recordingsLayout->setSpacing(2);
+    panel->bodyLayout()->addWidget(body);
+
+    refreshRecordings();
+    return panel;
+}
+
+void Dashboard::refreshRecordings() {
+    if (!m_recordingsLayout) return;
+    clearLayout(m_recordingsLayout);
+
+    const QString dir = RecentRecordings::outputDir();
+    const QVector<RecordingInfo> recordings = RecentRecordings::scan(dir, kRecentLimit);
+
+    if (recordings.isEmpty()) {
+        auto* empty = text(tr("No recordings in %1 yet.").arg(QDir::toNativeSeparators(dir)),
+                           QStringLiteral("mute"), 12);
+        empty->setWordWrap(true);
+        m_recordingsLayout->addWidget(empty);
+        m_recordingsLayout->addStretch();
+        return;
+    }
+
+    for (const RecordingInfo& r : recordings) {
         auto* row = new QWidget;
+        row->setToolTip(QDir::toNativeSeparators(r.filePath));
         auto* h = new QHBoxLayout(row);
         h->setContentsMargins(6, 4, 6, 4);
         h->setSpacing(8);
         h->addWidget(iconChip(QStringLiteral("record"), Theme::TextMute, 26, 12));
-        auto* tv = new QVBoxLayout; tv->setSpacing(0);
-        tv->addWidget(text(r.name, QString(), 12));
-        tv->addWidget(mono(r.meta, QStringLiteral("mute"), 10));
+        auto* tv = new QVBoxLayout;
+        tv->setSpacing(0);
+        tv->addWidget(elided(r.name, 220, QString(), 12));
+        tv->addWidget(mono(r.sizeText(), QStringLiteral("mute"), 10));
         h->addLayout(tv);
         h->addStretch();
-        h->addWidget(text(r.when, QStringLiteral("mute"), 11));
-        if (r.warn) h->addWidget(Theme::makeTag(tr("truncated"), QStringLiteral("warn")));
-        v->addWidget(row);
+        h->addWidget(text(r.relativeTimeText(), QStringLiteral("mute"), 11));
+        m_recordingsLayout->addWidget(row);
     }
-    v->addStretch();
-    panel->bodyLayout()->addWidget(body);
-    return panel;
+    m_recordingsLayout->addStretch();
 }
+
+// ---------------------------------------------------------------------------
+// Render queue
+// ---------------------------------------------------------------------------
 
 QWidget* Dashboard::buildRenderQueue() {
     auto* panel = new PanelFrame(tr("Render queue"), QStringLiteral("render"));
@@ -346,11 +608,7 @@ QWidget* Dashboard::buildRenderQueue() {
 
 void Dashboard::refreshRenderQueue() {
     if (!m_renderBodyLayout) return;
-    // Clear previous content.
-    while (QLayoutItem* it = m_renderBodyLayout->takeAt(0)) {
-        if (it->widget()) it->widget()->deleteLater();
-        delete it;
-    }
+    clearLayout(m_renderBodyLayout);
 
     using S = RenderJob::State;
     const QVector<RenderJob> all = m_renderQueue ? m_renderQueue->jobs() : QVector<RenderJob>{};
@@ -360,7 +618,7 @@ void Dashboard::refreshRenderQueue() {
             .arg(m_renderQueue->countOfState(S::Pending)));
     }
 
-    // Show active + pending jobs (up to 4), newest-relevant first.
+    // Show active + pending jobs (up to 4), active first.
     int shown = 0;
     auto addJob = [&](const RenderJob& j, bool active) {
         auto* w = new QWidget;
@@ -368,7 +626,7 @@ void Dashboard::refreshRenderQueue() {
         jv->setContentsMargins(0, 0, 0, 0);
         jv->setSpacing(4);
         auto* hr = new QHBoxLayout;
-        hr->addWidget(text(j.name, QString(), 12));
+        hr->addWidget(elided(j.name, 150, QString(), 12));
         hr->addStretch();
         hr->addWidget(mono(active ? tr("%1%").arg(j.progress) : tr("queued")));
         jv->addLayout(hr);
@@ -382,10 +640,10 @@ void Dashboard::refreshRenderQueue() {
         m_renderBodyLayout->addWidget(w);
     };
     for (const RenderJob& j : all) { if (j.state == S::Active)  { addJob(j, true);  ++shown; } }
-    for (const RenderJob& j : all) { if (shown >= 4) break; if (j.state == S::Pending) { addJob(j, false); ++shown; } }
+    for (const RenderJob& j : all) { if (shown >= kRecentLimit) break; if (j.state == S::Pending) { addJob(j, false); ++shown; } }
 
     if (shown == 0) {
-        auto* empty = text(tr("No renders queued — start one from the Render Queue."),
+        auto* empty = text(tr("No renders queued. Start one from the Render workspace."),
                            QStringLiteral("mute"), 12);
         empty->setWordWrap(true);
         m_renderBodyLayout->addWidget(empty);
@@ -393,37 +651,81 @@ void Dashboard::refreshRenderQueue() {
     m_renderBodyLayout->addStretch();
 }
 
+// ---------------------------------------------------------------------------
+// Recent projects
+// ---------------------------------------------------------------------------
+
 QWidget* Dashboard::buildRecentProjects() {
     auto* panel = new PanelFrame(tr("Recent projects"), QStringLiteral("projects"));
     auto* neu = new QPushButton(Icons::icon(QStringLiteral("plus"), Theme::Text, 12), tr(" New"));
-    connect(neu, &QPushButton::clicked, this, [this] { emit navigateTo(QStringLiteral("projects")); });
+    connect(neu, &QPushButton::clicked, this, &Dashboard::newProjectRequested);
     panel->addHeaderWidget(neu);
 
     auto* body = new QWidget;
-    auto* grid = new QGridLayout(body);
-    grid->setContentsMargins(12, 12, 12, 12);
-    grid->setSpacing(12);
-    struct P { QString cover, name, meta; };
-    const QVector<P> projects = {
-        {tr("Scene: gameplay"), tr("Spire of the Hollow Sun"), QStringLiteral("2 hr ago · 142 GB")},
-        {tr("Webcam · A-roll"), tr("Tuesday Vlog — Week 22"),  QStringLiteral("Yesterday · 38 GB")},
-        {tr("Editor capture"),  tr("Coding Sessions · S3"),    QStringLiteral("4 days · 88 GB")},
-        {tr("Final cut · v3"),  tr("Boss Rush — Compilation"), QStringLiteral("2 weeks · 21 GB")},
-    };
+    m_projectsLayout = new QGridLayout(body);
+    m_projectsLayout->setContentsMargins(12, 12, 12, 12);
+    m_projectsLayout->setSpacing(12);
+    panel->bodyLayout()->addWidget(body);
+
+    refreshProjects();
+    return panel;
+}
+
+void Dashboard::refreshProjects() {
+    if (!m_projectsLayout) return;
+    clearLayout(m_projectsLayout);
+
+    // Fixed column widths and a slack row below: with fewer than kRecentLimit
+    // projects the cells would otherwise stretch and the covers balloon.
+    for (int c = 0; c < kRecentLimit; ++c) m_projectsLayout->setColumnStretch(c, 1);
+    m_projectsLayout->setRowStretch(1, 1);
+
+    QVector<ProjectInfo> projects = m_projects ? m_projects->projects() : QVector<ProjectInfo>{};
+    if (projects.isEmpty()) {
+        auto* empty = text(tr("No projects found yet. Saved .malloy.json projects in your "
+                              "Movies and Documents folders appear here."),
+                           QStringLiteral("mute"), 12);
+        empty->setWordWrap(true);
+        m_projectsLayout->addWidget(empty, 0, 0, 1, kRecentLimit);
+        return;
+    }
+    if (projects.size() > kRecentLimit) projects.resize(kRecentLimit);
+
     int i = 0;
-    for (const P& p : projects) {
+    for (const ProjectInfo& p : projects) {
         auto* cell = new QWidget;
         auto* cv = new QVBoxLayout(cell);
         cv->setContentsMargins(0, 0, 0, 0);
         cv->setSpacing(6);
-        cv->addWidget(new Placeholder(p.cover, 16, 10));
-        cv->addWidget(text(p.name, QString(), 12, true));
-        cv->addWidget(mono(p.meta, QStringLiteral("mute"), 10));
-        grid->addWidget(cell, 0, i++);
+        cv->addWidget(new Placeholder(p.name, 16, 10));
+
+        auto* titleRow = new QHBoxLayout;
+        titleRow->setSpacing(6);
+        titleRow->addWidget(elided(p.name, 130, QString(), 12, true));
+        titleRow->addStretch();
+        auto* open = new QPushButton(tr("Open"));
+        Theme::setVariant(open, QStringLiteral("ghost"));
+        open->setCursor(Qt::PointingHandCursor);
+        const QString path = p.filePath;
+        open->setToolTip(QDir::toNativeSeparators(path));
+        connect(open, &QPushButton::clicked, this, [this, path] { emit openProjectRequested(path); });
+        titleRow->addWidget(open);
+        cv->addLayout(titleRow);
+
+        const QString scenes = p.sceneCount >= 0 ? tr("%n scene(s)", nullptr, p.sceneCount)
+                                                 : tr("MalloyStudio project");
+        cv->addWidget(mono(QStringLiteral("%1 · %2 · %3")
+                               .arg(scenes, p.sizeText(),
+                                    p.modified.toString(QStringLiteral("MMM d"))),
+                           QStringLiteral("mute"), 10));
+        cv->addStretch();
+        m_projectsLayout->addWidget(cell, 0, i++);
     }
-    panel->bodyLayout()->addWidget(body);
-    return panel;
 }
+
+// ---------------------------------------------------------------------------
+// Recent clips
+// ---------------------------------------------------------------------------
 
 QWidget* Dashboard::buildRecentClips() {
     auto* panel = new PanelFrame(tr("Recent clips"), QStringLiteral("clips"));
@@ -433,92 +735,229 @@ QWidget* Dashboard::buildRecentClips() {
     panel->addHeaderWidget(lib);
 
     auto* body = new QWidget;
-    auto* grid = new QGridLayout(body);
-    grid->setContentsMargins(12, 12, 12, 12);
-    grid->setSpacing(12);
-    struct C { QString label, tag, dur; };
-    const QVector<C> clips = {
-        {tr("No-hit boss phase 3"), QStringLiteral("Spire"),  QStringLiteral("0:24")},
-        {tr("Dodge into riposte"),  QStringLiteral("Spire"),  QStringLiteral("0:18")},
-        {tr("Bit about coffee"),    QStringLiteral("Vlog"),   QStringLiteral("0:09")},
-        {tr("Refactor reveal"),     QStringLiteral("Coding"), QStringLiteral("0:42")},
-    };
-    int i = 0;
-    for (const C& c : clips) {
-        auto* cell = new QWidget;
-        auto* cv = new QVBoxLayout(cell);
-        cv->setContentsMargins(0, 0, 0, 0);
-        cv->setSpacing(6);
-        cv->addWidget(new Placeholder(c.label, 16, 9));
-        auto* meta = new QHBoxLayout;
-        meta->setSpacing(6);
-        meta->addWidget(Theme::makeTag(c.tag));
-        meta->addStretch();
-        meta->addWidget(mono(c.dur, QStringLiteral("dim")));
-        cv->addLayout(meta);
-        grid->addWidget(cell, i / 2, i % 2);
-        ++i;
-    }
+    m_clipsLayout = new QGridLayout(body);
+    m_clipsLayout->setContentsMargins(12, 12, 12, 12);
+    m_clipsLayout->setSpacing(12);
     panel->bodyLayout()->addWidget(body);
+
+    refreshClips();
     return panel;
 }
 
+void Dashboard::refreshClips() {
+    if (!m_clipsLayout) return;
+    clearLayout(m_clipsLayout);
+
+    for (int c = 0; c < 2; ++c) m_clipsLayout->setColumnStretch(c, 1);
+    m_clipsLayout->setRowStretch(2, 1);
+
+    QVector<ClipInfo> clips;
+    if (m_clips) {
+        for (const ClipInfo& c : m_clips->clips()) {
+            if (c.archived) continue;
+            clips.push_back(c);
+            if (clips.size() >= kRecentLimit) break;
+        }
+    }
+
+    if (clips.isEmpty()) {
+        auto* empty = text(tr("No clips yet. Saving from the replay buffer adds them here."),
+                           QStringLiteral("mute"), 12);
+        empty->setWordWrap(true);
+        m_clipsLayout->addWidget(empty, 0, 0, 1, 2);
+        return;
+    }
+
+    int i = 0;
+    for (const ClipInfo& c : clips) {
+        auto* cell = new QWidget;
+        cell->setToolTip(QDir::toNativeSeparators(c.filePath));
+        auto* cv = new QVBoxLayout(cell);
+        cv->setContentsMargins(0, 0, 0, 0);
+        cv->setSpacing(6);
+        cv->addWidget(new Placeholder(c.name, 16, 9));
+        auto* meta = new QHBoxLayout;
+        meta->setSpacing(6);
+        if (!c.sourceProject.isEmpty()) meta->addWidget(Theme::makeTag(c.sourceProject));
+        meta->addStretch();
+        meta->addWidget(mono(c.durationText(), QStringLiteral("dim")));
+        cv->addLayout(meta);
+        cv->addStretch();
+        m_clipsLayout->addWidget(cell, i / 2, i % 2);
+        ++i;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// System status
+// ---------------------------------------------------------------------------
+
 QWidget* Dashboard::buildSystemStatus() {
     auto* panel = new PanelFrame(tr("System status"), QStringLiteral("info"));
-    panel->addHeaderWidget(text(tr("All systems ready · checked just now"), QStringLiteral("mute"), 11));
+    m_statusMeta = text(QString(), QStringLiteral("mute"), 11);
+    panel->addHeaderWidget(m_statusMeta);
 
     auto* body = new QWidget;
-    auto* grid = new QGridLayout(body);
-    grid->setContentsMargins(12, 12, 12, 12);
-    grid->setSpacing(8);
-    struct S { QString icon, label, value; };
-    const QVector<S> checks = {
-        {QStringLiteral("mic"),     tr("Microphone"),      QStringLiteral("Shure SM7B (USB)")},
-        {QStringLiteral("camera"),  tr("Camera"),          QStringLiteral("Sony α7C · 1080p60")},
-        {QStringLiteral("display"), tr("Display capture"), QStringLiteral("DXGI · Monitor 2")},
-        {QStringLiteral("window"),  tr("Window capture"),  QStringLiteral("Spire of the Hollow Sun")},
-        {QStringLiteral("speaker"), tr("Desktop audio"),   QStringLiteral("WASAPI loopback · 48k")},
-        {QStringLiteral("cpu"),     tr("Encoder"),         QStringLiteral("NVENC H.264 ready")},
-        {QStringLiteral("disk"),    tr("Storage"),         QStringLiteral("412 GB free · D:\\")},
-        {QStringLiteral("link"),    tr("Stream key"),      QStringLiteral("Twitch · verified")},
-    };
+    m_statusLayout = new QGridLayout(body);
+    m_statusLayout->setContentsMargins(12, 12, 12, 12);
+    m_statusLayout->setSpacing(8);
+    panel->bodyLayout()->addWidget(body);
+
+    refreshSystemStatus();
+    return panel;
+}
+
+void Dashboard::refreshSystemStatus() {
+    if (!m_statusLayout) return;
+    clearLayout(m_statusLayout);
+
+    const OutputSettings out = OutputSettings::load();
+    QVector<StatusCheck> checks;
+
+    // Microphone: the first capture (non-loopback) input on the mix bus.
+    {
+        StatusCheck c{QStringLiteral("mic"), tr("Microphone"), tr("No input device"), false};
+        if (m_audio) {
+            for (const AudioInput& in : m_audio->inputs()) {
+                if (in.loopback) continue;
+                c.ok = in.connected;
+                c.value = in.connected ? in.name : tr("%1 (disconnected)").arg(in.name);
+                break;
+            }
+        }
+        checks.push_back(c);
+    }
+
+    // Capture sources configured in the current collection. These report what
+    // the project is set up to capture, not what hardware exists: enumerating
+    // devices here would put a MediaFoundation probe (measured at ~3.5 s with
+    // no camera attached) on the startup path, and the add-source dialogs
+    // already validate the device when a source is created.
+    {
+        StatusCheck camera{QStringLiteral("camera"), tr("Camera"), tr("No camera source"), false};
+        StatusCheck display{QStringLiteral("display"), tr("Display capture"), tr("No display source"), false};
+        StatusCheck window{QStringLiteral("window"), tr("Window capture"), tr("No window source"), false};
+        bool haveCamera = false;
+        bool haveDisplay = false;
+        bool haveWindow = false;
+
+        if (m_scenes) {
+            for (const Source* s : m_scenes->sources()) {
+                switch (s->type()) {
+                case Source::Type::Camera:
+                    if (haveCamera) break;
+                    haveCamera = true;
+                    camera.ok = s->hasCameraConfig();
+                    camera.value = camera.ok && !s->cameraName().isEmpty()
+                                       ? s->cameraName()
+                                       : tr("%1 (no device set)").arg(s->name());
+                    break;
+                case Source::Type::DisplayCapture:
+                    if (haveDisplay) break;
+                    haveDisplay = true;
+                    display.ok = s->hasMonitorConfig();
+                    display.value = display.ok
+                                        ? tr("%1 · monitor %2").arg(s->name()).arg(s->outputIndex() + 1)
+                                        : tr("%1 (no monitor set)").arg(s->name());
+                    break;
+                case Source::Type::WindowCapture:
+                    if (haveWindow) break;
+                    haveWindow = true;
+                    window.ok = s->hasWindowConfig();
+                    window.value = window.ok && !s->windowTitle().isEmpty()
+                                       ? s->windowTitle()
+                                       : tr("%1 (no window set)").arg(s->name());
+                    break;
+                default:
+                    break;
+                }
+            }
+        }
+        checks.push_back(camera);
+        checks.push_back(display);
+        checks.push_back(window);
+    }
+
+    // Desktop audio: the loopback input on the mix bus.
+    {
+        StatusCheck c{QStringLiteral("speaker"), tr("Desktop audio"), tr("Loopback unavailable"), false};
+        if (m_audio) {
+            for (const AudioInput& in : m_audio->inputs()) {
+                if (!in.loopback) continue;
+                c.ok = in.connected;
+                c.value = in.connected
+                              ? tr("%1 · %2 kHz").arg(in.name).arg(m_audio->sampleRate() / 1000)
+                              : tr("%1 (disconnected)").arg(in.name);
+                break;
+            }
+        }
+        checks.push_back(c);
+    }
+
+    // Encoder: whether the configured codec is one this machine can run.
+    {
+        const EncoderRegistry::Encoder* encoder = EncoderRegistry::find(out.videoCodec);
+        checks.push_back({QStringLiteral("cpu"), tr("Encoder"),
+                          encoder ? encoder->display : tr("%1 (unavailable)").arg(out.videoCodec),
+                          encoder != nullptr});
+    }
+
+    // Storage: free space on the volume holding the recording folder.
+    {
+        const QString dir = RecentRecordings::outputDir();
+        const QStorageInfo storage(dir);
+        StatusCheck c{QStringLiteral("disk"), tr("Storage"), tr("Folder unavailable"), false};
+        if (storage.isValid() && storage.isReady()) {
+            const qint64 available = storage.bytesAvailable();
+            c.value = tr("%1 free · %2").arg(formatByteSize(available),
+                                             QDir::toNativeSeparators(storage.rootPath()));
+            c.ok = available >= kLowDiskBytes;
+        }
+        checks.push_back(c);
+    }
+
+    // Stream key: presence only. The key is never displayed.
+    {
+        const StreamSettings stream = StreamSettings::load();
+        const QString service = StreamSettings::displayName(stream.service);
+        const bool configured = !stream.streamKey.isEmpty();
+        checks.push_back({QStringLiteral("link"), tr("Stream key"),
+                          configured ? tr("%1 · configured").arg(service)
+                                     : tr("%1 · not configured").arg(service),
+                          configured});
+    }
+
+    int ready = 0;
     int i = 0;
-    for (const S& s : checks) {
+    for (const StatusCheck& s : checks) {
+        if (s.ok) ++ready;
         auto* item = new QFrame;
         item->setObjectName(QStringLiteral("statusItem"));
         auto* h = new QHBoxLayout(item);
         h->setContentsMargins(12, 10, 12, 10);
         h->setSpacing(12);
-        h->addWidget(iconChip(s.icon, Theme::TextDim, 28, 14));
-        auto* tv = new QVBoxLayout; tv->setSpacing(0);
-        auto* lab = text(s.label.toUpper(), QStringLiteral("mute"), 11);
-        QFont lf = lab->font(); lf.setLetterSpacing(QFont::AbsoluteSpacing, 0.5); lab->setFont(lf);
-        tv->addWidget(lab);
-        tv->addWidget(mono(s.value, QString(), 12));
+        h->addWidget(iconChip(s.icon, s.ok ? Theme::TextDim : Theme::Warn, 28, 14));
+        auto* tv = new QVBoxLayout;
+        tv->setSpacing(0);
+        auto* label = text(s.label.toUpper(), QStringLiteral("mute"), 11);
+        QFont lf = label->font();
+        lf.setLetterSpacing(QFont::AbsoluteSpacing, 0.5);
+        label->setFont(lf);
+        tv->addWidget(label);
+        tv->addWidget(elided(s.value, 190, s.ok ? QString() : QStringLiteral("warn"), 12, false, true));
         h->addLayout(tv);
         h->addStretch();
-        auto* ok = new QLabel;
-        ok->setPixmap(Icons::pixmap(QStringLiteral("check"), Theme::Success, 14));
-        h->addWidget(ok);
-        grid->addWidget(item, i / 4, i % 4);
+        auto* mark = new QLabel;
+        mark->setPixmap(Icons::pixmap(s.ok ? QStringLiteral("check") : QStringLiteral("alert"),
+                                      s.ok ? Theme::Success : Theme::Warn, 14));
+        h->addWidget(mark);
+        m_statusLayout->addWidget(item, i / 4, i % 4);
         ++i;
     }
-    panel->bodyLayout()->addWidget(body);
-    return panel;
-}
 
-void Dashboard::tickMeters() {
-    auto* rng = QRandomGenerator::global();
-    auto step = [&](double& level, double& peak, double base, double variance) {
-        const double target = qBound(0.05, base + (rng->generateDouble() - 0.5) * variance * 2, 0.95);
-        level += (target - level) * 0.35;
-        if (level > peak) peak = level;
-        else peak = qMax(level, peak - 0.01);
-    };
-    step(m_micL, m_micP, 0.40, 0.25);
-    step(m_deskL, m_deskP, 0.55, 0.20);
-    if (m_micMeter) m_micMeter->setValues(m_micL, m_micP);
-    if (m_deskMeter) m_deskMeter->setValues(m_deskL, m_deskP);
-    if (m_micDb) m_micDb->setText(dbText(m_micP));
-    if (m_deskDb) m_deskDb->setText(dbText(m_deskP));
+    if (m_statusMeta) {
+        m_statusMeta->setText(ready == checks.size()
+                                  ? tr("All systems ready")
+                                  : tr("%1 of %2 ready").arg(ready).arg(checks.size()));
+    }
 }

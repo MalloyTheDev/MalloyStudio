@@ -56,6 +56,9 @@ private:
     void updateStatusBar();
     void updatePreviewLabel();
     void updateShellMode();              // reflect record/stream state in the status bar
+    // Writes the replay-buffer contents to a file. Shared by the replay
+    // hotkey and the dashboard quick action.
+    void saveReplayClip();
     void flash(const QString& text, int ms = 4000);  // transient status toast
 
     SceneCollection*   m_scenes            = nullptr;
