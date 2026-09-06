@@ -1,4 +1,5 @@
 #include "WasapiCapture.h"
+#include "audio/Resampler.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -164,7 +165,11 @@ void WasapiCapture::run() {
     // rate is the common 44.1/48/96 kHz. For v4 we assume devices are 48 kHz
     // (Windows default for most hardware) and just pass through; if the rate
     // differs we still emit but flag it once.
-    bool warnedSampleRate = false;
+    // Converts the device rate to the canonical 48 kHz. A device already at
+    // 48 kHz makes this a straight copy.
+    StereoResampler resampler(deviceSampleRate, SampleRate);
+    std::vector<qint16> resampled;
+    resampled.reserve(static_cast<size_t>(SampleRate / 25) * Channels);
 
     hr = client->Start();
     if (FAILED(hr)) {
@@ -245,17 +250,30 @@ void WasapiCapture::run() {
             capture->ReleaseBuffer(frames);
             packetFrames -= frames;
 
-            if (!warnedSampleRate && deviceSampleRate != SampleRate) {
-                warnedSampleRate = true;
-                emit captureError(QStringLiteral("WASAPI: device is %1 Hz, expected %2 Hz "
-                                                 "(no resample in v4 — audio pitch may drift)")
-                                    .arg(deviceSampleRate).arg(SampleRate));
+            // Device rate to canonical rate. Forwarding the samples untouched,
+            // as this used to, played the recording at the wrong speed and
+            // pitch and drifted further out of sync the longer it ran.
+            // Meters read the captured signal, so they update even on a tick
+            // that produces no output frames.
+            emit levelsUpdated(peakL, peakR);
+
+            const qint16* emitData = outBuf.data();
+            size_t emitSamples = outBuf.size();
+            if (resampler.active()) {
+                resampled.clear();
+                resampler.process(outBuf.data(), static_cast<int>(frames), resampled);
+                emitData = resampled.data();
+                emitSamples = resampled.size();
             }
 
-            QByteArray chunk(reinterpret_cast<const char*>(outBuf.data()),
-                             static_cast<int>(outBuf.size() * sizeof(qint16)));
-            emit samplesReady(std::move(chunk));
-            emit levelsUpdated(peakL, peakR);
+            // A very small packet can leave the resampler short of a full
+            // interpolation window; it keeps those frames and emits them with
+            // the next packet.
+            if (emitSamples > 0) {
+                QByteArray chunk(reinterpret_cast<const char*>(emitData),
+                                 static_cast<int>(emitSamples * sizeof(qint16)));
+                emit samplesReady(std::move(chunk));
+            }
 
             if (FAILED(capture->GetNextPacketSize(&packetFrames))) {
                 m_running.store(false, std::memory_order_relaxed);

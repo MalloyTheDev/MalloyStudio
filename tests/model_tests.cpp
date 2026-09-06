@@ -1,5 +1,6 @@
 #include "audio/AudioController.h"
 #include "audio/AudioMix.h"
+#include "audio/Resampler.h"
 #include "capture/CaptureController.h"
 #include "input/HotkeyManager.h"
 #include "model/Canvas.h"
@@ -179,6 +180,10 @@ private slots:
     // Regression: the mixer popped one device chunk per tick and discarded
     // whatever did not fit, so any chunk size that disagreed with the tick size
     // lost audio and crackled.
+    // Regression: capture forwarded device samples at whatever rate the device
+    // ran at, so a 44.1 kHz microphone was recorded as if it were 48 kHz and
+    // played back fast, sharp and drifting.
+    void resamplerPreservesPitchAcrossRates();
     void pcmFifoKeepsTheSampleStreamContinuous();
     void mixerKeepsStereoSeparation();
     void blurHandlesImagesSmallerThanItsRadius();
@@ -2615,6 +2620,110 @@ void MalloyModelTests::pcmFifoKeepsTheSampleStreamContinuous() {
     // Muting clears the buffer rather than leaving stale audio to play later.
     fifo.clear();
     QVERIFY(fifo.isEmpty());
+}
+
+// Counts positive-going zero crossings on the left channel, which is a cheap
+// proxy for the frequency of a clean tone.
+static int countRisingZeroCrossings(const std::vector<int16_t>& pcm) {
+    int crossings = 0;
+    for (size_t f = 1; f * 2 < pcm.size(); ++f) {
+        const int16_t prev = pcm[(f - 1) * 2];
+        const int16_t cur  = pcm[f * 2];
+        if (prev <= 0 && cur > 0) ++crossings;
+    }
+    return crossings;
+}
+
+// Interleaved stereo sine of `freq` Hz at `rate`, `seconds` long.
+static std::vector<int16_t> makeTone(double freq, int rate, double seconds, double amp = 12000.0) {
+    const int frames = int(rate * seconds);
+    std::vector<int16_t> pcm;
+    pcm.reserve(size_t(frames) * 2);
+    for (int f = 0; f < frames; ++f) {
+        const double t = double(f) / double(rate);
+        const auto v = int16_t(std::lround(amp * std::sin(2.0 * 3.14159265358979323846 * freq * t)));
+        pcm.push_back(v);
+        pcm.push_back(v);
+    }
+    return pcm;
+}
+
+void MalloyModelTests::resamplerPreservesPitchAcrossRates() {
+    // Matching rates are a straight copy: no interpolation, no drift, no cost.
+    {
+        StereoResampler same(48000, 48000);
+        QVERIFY(!same.active());
+        const std::vector<int16_t> in = {1, 2, 3, 4, 5, 6};
+        std::vector<int16_t> out;
+        same.process(in.data(), 3, out);
+        QCOMPARE(out, in);
+    }
+
+    // 44.1 kHz to 48 kHz: one second of input must yield about one second of
+    // output, and the tone must still be the same tone. Before the fix the
+    // samples were passed through untouched, so a second of 44.1 kHz audio was
+    // played as 0.92 seconds and every frequency rose with it.
+    {
+        StereoResampler up(44100, 48000);
+        QVERIFY(up.active());
+        const std::vector<int16_t> tone = makeTone(1000.0, 44100, 1.0);
+        std::vector<int16_t> out;
+        // Feed it in device-sized packets, so the fractional position and the
+        // history have to carry across calls.
+        const int packet = 441;
+        for (int f = 0; f + packet <= int(tone.size() / 2); f += packet)
+            up.process(tone.data() + size_t(f) * 2, packet, out);
+
+        const int outFrames = int(out.size() / 2);
+        // Within a few frames of one second at the output rate.
+        QVERIFY2(std::abs(outFrames - 48000) < 200,
+                 qPrintable(QStringLiteral("got %1 frames").arg(outFrames)));
+        // A 1 kHz tone still crosses zero about 1000 times per second.
+        const int crossings = countRisingZeroCrossings(out);
+        QVERIFY2(std::abs(crossings - 1000) <= 5,
+                 qPrintable(QStringLiteral("got %1 crossings").arg(crossings)));
+    }
+
+    // 96 kHz to 48 kHz, the other direction.
+    {
+        StereoResampler down(96000, 48000);
+        const std::vector<int16_t> tone = makeTone(1000.0, 96000, 1.0);
+        std::vector<int16_t> out;
+        down.process(tone.data(), int(tone.size() / 2), out);
+        const int outFrames = int(out.size() / 2);
+        QVERIFY2(std::abs(outFrames - 48000) < 200,
+                 qPrintable(QStringLiteral("got %1 frames").arg(outFrames)));
+        const int crossings = countRisingZeroCrossings(out);
+        QVERIFY2(std::abs(crossings - 1000) <= 5,
+                 qPrintable(QStringLiteral("got %1 crossings").arg(crossings)));
+    }
+
+    // Content above the output Nyquist is filtered out rather than folded back
+    // into the audible band as a false low tone.
+    {
+        StereoResampler down(96000, 48000);
+        const std::vector<int16_t> ultrasonic = makeTone(36000.0, 96000, 0.25);
+        std::vector<int16_t> out;
+        down.process(ultrasonic.data(), int(ultrasonic.size() / 2), out);
+        QVERIFY(!out.empty());
+
+        double sum = 0.0;
+        for (size_t i = 0; i < out.size(); i += 2)
+            sum += double(out[i]) * double(out[i]);
+        const double rms = std::sqrt(sum / double(out.size() / 2));
+        // The input is 12000 peak, about 8485 RMS. Anything close to that means
+        // the tone aliased through instead of being rejected.
+        QVERIFY2(rms < 1500.0, qPrintable(QStringLiteral("alias rms %1").arg(rms)));
+    }
+
+    // Silence in, silence out: no ringing, no DC offset.
+    {
+        StereoResampler up(44100, 48000);
+        const std::vector<int16_t> quiet(4410 * 2, 0);
+        std::vector<int16_t> out;
+        up.process(quiet.data(), 4410, out);
+        for (int16_t v : out) QCOMPARE(v, int16_t(0));
+    }
 }
 
 QTEST_MAIN(MalloyModelTests)

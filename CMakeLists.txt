@@ -39,6 +39,7 @@ set(MALLOY_CORE_SOURCES
     src/audio/AudioController.h
     src/audio/AudioInput.h
     src/audio/AudioMix.h
+    src/audio/Resampler.h
     src/media/TimedSource.h
     src/recording/OutputSettings.h
     src/recording/EncoderPipeline.cpp
