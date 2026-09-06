@@ -20,6 +20,7 @@
 #include "recording/StreamingPipeline.h"
 #include "recording/EncoderRegistry.h"
 #include "ui/workspaces/EditorWorkspace.h"
+#include "ui/workspaces/TimelineEdits.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -149,6 +150,14 @@ private slots:
     // tolerate a missing folder.
     void recentRecordingsScanFiltersOrdersAndLimits();
     void recentRecordingsRelativeTimeBuckets();
+    // ADR-0001: clips carry the media they play plus an in-point, so a render
+    // can resolve them. The schema has to round-trip, older projects have to
+    // load as unlinked, and the trim/split arithmetic has to keep the timeline
+    // and the source in step.
+    void editorClipRoundTripPreservesSourceReference();
+    void editorLegacyClipLoadsAsUnlinked();
+    void timelineTrimKeepsSourceInSync();
+    void timelineSplitDerivesRightHandSourceIn();
 };
 
 void MalloyModelTests::initTestCase() {
@@ -1885,6 +1894,109 @@ void MalloyModelTests::recentRecordingsRelativeTimeBuckets() {
     // A future timestamp (clock skew) must not render as a negative age.
     QCOMPARE(whenFor(now.addSecs(120)), QStringLiteral("Just now"));
     QCOMPARE(whenFor(QDateTime()), QStringLiteral("Unknown"));
+}
+
+void MalloyModelTests::editorClipRoundTripPreservesSourceReference() {
+    EditorWorkspace editor(nullptr);
+    QJsonArray in;
+    QJsonObject c;
+    c.insert(QStringLiteral("track"), 2);
+    c.insert(QStringLiteral("start"), 8.0);
+    c.insert(QStringLiteral("dur"),   132.0);
+    c.insert(QStringLiteral("label"), QStringLiteral("spire-ep14.mkv"));
+    c.insert(QStringLiteral("tag"),   QStringLiteral("VID"));
+    c.insert(QStringLiteral("color"), QStringLiteral("#5087c3"));
+    c.insert(QStringLiteral("audio"), false);
+    c.insert(QStringLiteral("sourcePath"), QStringLiteral("F:/Captures/spire-ep14.mkv"));
+    c.insert(QStringLiteral("sourceIn"),   12.5);
+    in.append(c);
+
+    editor.setTimelineJson(in);
+    const QJsonArray out = editor.timelineJson();
+    QCOMPARE(out.size(), 1);
+    const QJsonObject got = out.at(0).toObject();
+    QCOMPARE(got.value(QStringLiteral("sourcePath")).toString(),
+             QStringLiteral("F:/Captures/spire-ep14.mkv"));
+    QCOMPARE(got.value(QStringLiteral("sourceIn")).toDouble(), 12.5);
+    // The rest of the clip is untouched by the new fields.
+    QCOMPARE(got.value(QStringLiteral("start")).toDouble(), 8.0);
+    QCOMPARE(got.value(QStringLiteral("dur")).toDouble(),   132.0);
+}
+
+void MalloyModelTests::editorLegacyClipLoadsAsUnlinked() {
+    // Every project written before ADR-0001 has clips with no source keys.
+    // They must load without complaint, as unlinked clips starting at 0, and a
+    // re-save must record that state explicitly rather than omitting it.
+    EditorWorkspace editor(nullptr);
+    QJsonArray in;
+    QJsonObject c;
+    c.insert(QStringLiteral("track"), 0);
+    c.insert(QStringLiteral("start"), 0.0);
+    c.insert(QStringLiteral("dur"),   8.0);
+    c.insert(QStringLiteral("label"), QStringLiteral("Intro card"));
+    c.insert(QStringLiteral("audio"), false);
+    in.append(c);
+
+    editor.setTimelineJson(in);
+    const QJsonArray out = editor.timelineJson();
+    QCOMPARE(out.size(), 1);
+    const QJsonObject got = out.at(0).toObject();
+    QVERIFY(got.contains(QStringLiteral("sourcePath")));
+    QVERIFY(got.value(QStringLiteral("sourcePath")).toString().isEmpty());
+    QCOMPARE(got.value(QStringLiteral("sourceIn")).toDouble(), 0.0);
+}
+
+void MalloyModelTests::timelineTrimKeepsSourceInSync() {
+    constexpr double kMinDur = 0.25;
+
+    // Dragging the left edge right by 4 s consumes 4 s more of the source.
+    TimelineTrim t = trimLeftEdge(10.0, 20.0, 5.0, 1.0, 14.0, true, kMinDur);
+    QCOMPARE(t.start,    14.0);
+    QCOMPARE(t.dur,      16.0);
+    QCOMPARE(t.sourceIn,  9.0);
+
+    // At 2x speed the same 4 s of timeline eats 8 s of source.
+    t = trimLeftEdge(10.0, 20.0, 5.0, 2.0, 14.0, true, kMinDur);
+    QCOMPARE(t.sourceIn, 13.0);
+
+    // Dragging left gives time back, down to the head of the source: with
+    // sourceIn 5 and speed 1 the edge cannot pass timeline 5.
+    t = trimLeftEdge(10.0, 20.0, 5.0, 1.0, 2.0, true, kMinDur);
+    QCOMPARE(t.start,    5.0);
+    QCOMPARE(t.dur,      25.0);
+    QCOMPARE(t.sourceIn, 0.0);
+
+    // An unlinked clip has no source to run out of, so it stops at 0 instead.
+    t = trimLeftEdge(10.0, 20.0, 0.0, 1.0, 2.0, false, kMinDur);
+    QCOMPARE(t.start,    2.0);
+    QCOMPARE(t.dur,      28.0);
+    QCOMPARE(t.sourceIn, 0.0);
+
+    // The minimum duration still wins over a right-ward drag.
+    t = trimLeftEdge(10.0, 20.0, 5.0, 1.0, 999.0, true, kMinDur);
+    QCOMPARE(t.dur, kMinDur);
+
+    // The right edge never moves the in-point.
+    TimelineTrim r = trimRightEdge(10.0, 5.0, 22.0, kMinDur, 360.0);
+    QCOMPARE(r.start,    10.0);
+    QCOMPARE(r.dur,      12.0);
+    QCOMPARE(r.sourceIn,  5.0);
+    // ... and is bounded by the timeline length and the minimum duration.
+    r = trimRightEdge(10.0, 5.0, 900.0, kMinDur, 360.0);
+    QCOMPARE(r.dur, 350.0);
+    r = trimRightEdge(10.0, 5.0, 10.0, kMinDur, 360.0);
+    QCOMPARE(r.dur, kMinDur);
+}
+
+void MalloyModelTests::timelineSplitDerivesRightHandSourceIn() {
+    // Split 6 s into a clip that starts at timeline 10 with in-point 30.
+    QCOMPARE(splitSourceIn(10.0, 30.0, 1.0, 16.0), 36.0);
+    // Half speed consumes half as much source over the same timeline span.
+    QCOMPARE(splitSourceIn(10.0, 30.0, 0.5, 16.0), 33.0);
+    // Double speed consumes twice as much.
+    QCOMPARE(splitSourceIn(10.0, 30.0, 2.0, 16.0), 42.0);
+    // A cut at the clip head is a no-op on the in-point.
+    QCOMPARE(splitSourceIn(10.0, 30.0, 1.0, 10.0), 30.0);
 }
 
 QTEST_MAIN(MalloyModelTests)

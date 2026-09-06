@@ -10,11 +10,12 @@ The file is written atomically via `QSaveFile` (temp-file + rename).
 ```jsonc
 {
   "app":          "MalloyStudio",  // always this literal string
-  "version":      2,               // format version (see migration notes below)
+  "version":      2,               // on-disk format version (see version history below)
   "currentScene": 0,               // index into "scenes" array
-  "audio":        {},              // reserved — present but empty in v5
+  "audio":        {},              // reserved, always written empty
   "sources":      [ ...Source ],   // shared source library
-  "scenes":       [ ...Scene ]     // ordered scene list
+  "scenes":       [ ...Scene ],    // ordered scene list
+  "timeline":     [ ...Clip ]      // editor timeline; omitted when empty
 }
 ```
 
@@ -60,7 +61,7 @@ Every source in the library has a stable integer `id`. Items reference it via `s
 | `"image"` | `Image` | Static image from disk |
 | `"text"` | `Text` | Rendered text with colour |
 | `"color_block"` | `ColorBlock` | Solid-colour rectangle |
-| `"browser"` | `Browser` | Browser source (v5 placeholder) |
+| `"browser"` | `Browser` | Browser source; renders blank without Qt WebEngine |
 | `"window_capture"` | `WindowCapture` | Specific app window via HWND |
 | `"audio_input"` | `AudioInput` | Microphone / line-in source |
 
@@ -157,6 +158,59 @@ per-pixel alongside a Rec.601 luma-based saturation blend.
 
 ---
 
+## Timeline
+
+The editor timeline is a flat, ordered array of clips under the top-level `"timeline"`
+key. It is omitted entirely when the timeline is empty, which is also how every file
+written before the editor existed reads.
+
+```jsonc
+{
+  "track": 2,                     // track index; audio clips must sit on audio tracks
+  "start": 8.0,                   // seconds from the head of the timeline
+  "dur":   132.0,                 // duration on the timeline, in seconds
+
+  "label": "spire-ep14.mkv",      // shown on the clip
+  "tag":   "VID",                 // VID | AUD | IMG, drives the default colour
+  "color": "#5087c3",             // #RRGGBB
+  "audio": false,                 // audio-only clip
+
+  "sourcePath": "F:/Captures/spire-ep14.mkv",  // media this clip plays; "" = unlinked
+  "sourceIn":   12.5,                          // seconds into that file of the first frame
+
+  "transform":   { "x": 0, "y": 0, "scale": 100.0, "rotation": 0.0, "opacity": 100 },
+  "audioParams": { "gainDb": 0, "pan": 0, "channels": 0 },
+  "speed":       { "factor": 1.0 }
+}
+```
+
+### Source consumption
+
+A clip occupies `[start, start + dur)` on the timeline and consumes
+`[sourceIn, sourceIn + dur * speed.factor)` of `sourcePath`. Trimming the left edge moves
+`start`, `dur` and `sourceIn` together; trimming the right edge changes `dur` only.
+Splitting at time `t` gives the right-hand clip `sourceIn + (t - start) * speed.factor`.
+
+### Unlinked clips
+
+A clip with an empty or missing `sourcePath` is *unlinked*: still editable, drawn with a
+dashed outline, and not renderable. Clips in files written before the source keys existed
+load this way, and nothing tries to guess a path for them. A `sourcePath` that no longer
+resolves on disk is treated the same way at render time, and is not rewritten on load, so
+opening a project with an unplugged drive does not damage it.
+
+### Defaults
+
+| Key | Missing value reads as |
+|---|---|
+| `sourcePath` | `""` (unlinked) |
+| `sourceIn` | `0.0` |
+| `transform` | `x` 0, `y` 0, `scale` 100.0, `rotation` 0.0, `opacity` 100 |
+| `audioParams` | `gainDb` 0, `pan` 0, `channels` 0 |
+| `speed` | `factor` 1.0 |
+
+---
+
 ## Complete minimal example
 
 ```json
@@ -215,12 +269,23 @@ per-pixel alongside a Rec.601 luma-based saturation blend.
 
 ## Version history
 
+`"version"` is the on-disk format version, and is unrelated to the application version.
+It has been `2` since the source library was split out, and everything added since has
+been added as optional keys rather than a bump. That is deliberate: the loader rejects
+any file whose `version` is greater than 2 outright, so raising it makes new files
+unreadable by every existing build, while unknown keys are ignored and cost nothing.
+
+Extend the format by adding optional keys with documented defaults, and reserve a version
+bump for a change that genuinely cannot be read by an older build.
+
 ### v2 (current)
 
 - Separate `"sources"` array at root level; items hold `"sourceId"` references.
 - Top-level `"audio": {}` reserved key.
-- `"filters"` array on items (omitted when empty — backwards-compatible with early v2 files).
-- `"window"` and `"audioDeviceId"` fields on sources (v5, omitted when not set).
+- `"filters"` array on items, omitted when empty.
+- `"window"` and `"audioDeviceId"` fields on sources, omitted when not set.
+- `"timeline"` array holding editor clips, omitted when empty.
+- `"sourcePath"` and `"sourceIn"` on timeline clips.
 
 ### v1 (legacy — read-only, auto-migrated)
 
@@ -236,4 +301,4 @@ per-pixel alongside a Rec.601 luma-based saturation blend.
 
 Unknown top-level keys are ignored on load. Unknown source types cause a load error.
 Unknown filter types are silently skipped (the item loads with a shorter filter chain).
-This means future versions can add optional top-level metadata without breaking v5 readers.
+This is what lets new optional keys ship without a version bump.

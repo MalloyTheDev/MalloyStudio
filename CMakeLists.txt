@@ -118,6 +118,7 @@ set(MALLOY_UI_SOURCES
     src/ui/workspaces/AILabWorkspace.h
     src/ui/workspaces/EditorWorkspace.cpp
     src/ui/workspaces/EditorWorkspace.h
+    src/ui/workspaces/TimelineEdits.h
     src/ui/workspaces/LibraryWorkspaces.cpp
     src/ui/workspaces/LibraryWorkspaces.h
     src/ui/dashboard/Dashboard.cpp
@@ -195,6 +196,7 @@ qt_add_executable(MalloyStudioTests
     # of the UI layer into the test binary.
     src/ui/workspaces/EditorWorkspace.cpp
     src/ui/workspaces/EditorWorkspace.h
+    src/ui/workspaces/TimelineEdits.h
     src/ui/components/PanelFrame.cpp
     src/ui/components/PanelFrame.h
     src/ui/components/Placeholder.cpp

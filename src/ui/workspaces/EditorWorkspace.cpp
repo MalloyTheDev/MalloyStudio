@@ -4,6 +4,7 @@
 #include "ui/IconFactory.h"
 #include "ui/Theme.h"
 #include "project/MediaRegistry.h"
+#include "ui/workspaces/TimelineEdits.h"
 
 #include <QButtonGroup>
 #include <QComboBox>
@@ -70,6 +71,11 @@ struct Clip {
     QString tag;
     QColor  color;
     bool    audio    = false;
+    // ADR-0001: the media this clip plays. Empty sourcePath means "unlinked":
+    // the clip is still editable, but there is nothing to render. sourceIn is
+    // the offset into that file, in source seconds, of the clip's first frame.
+    QString sourcePath;
+    double  sourceIn = 0.0;
     // ── Inspector-bound per-clip params (v4). All defaulted so legacy clips
     // (loaded from .malloy.json files written before v4) round-trip unchanged.
     int     tx       = 0;            // transform.x  (px in canvas space)
@@ -82,27 +88,6 @@ struct Clip {
     int     channels = 0;            // audioParams.channels (0=Stereo,1=MonoL,2=MonoR)
     double  speedFactor = 1.0;       // speed.factor (0.10..4.00)
 };
-const QVector<Clip>& clips() {
-    const QColor violet(150, 110, 210), blue(90, 150, 205), blueD(80, 135, 195);
-    const QColor green(95, 190, 130), greenD(90, 170, 120), amber(200, 165, 90);
-    static const QVector<Clip> c = {
-        {0, 0, 8, QStringLiteral("Intro card"), QStringLiteral("IMG"), violet, false},
-        {0, 60, 4, QStringLiteral("Lower-third · No-hit"), QStringLiteral("IMG"), violet, false},
-        {0, 180, 4, QStringLiteral("Lower-third · Dodge"), QStringLiteral("IMG"), violet, false},
-        {1, 8, 120, QStringLiteral("Webcam α7C"), QStringLiteral("VID"), blue, false},
-        {1, 140, 96, QStringLiteral("Webcam · phase 3"), QStringLiteral("VID"), blue, false},
-        {2, 0, 8, QStringLiteral("Intro · BG"), QStringLiteral("VID"), blueD, false},
-        {2, 8, 132, QStringLiteral("Spire — phase 1"), QStringLiteral("VID"), blueD, false},
-        {2, 140, 60, QStringLiteral("Spire — phase 2"), QStringLiteral("VID"), blueD, false},
-        {2, 200, 88, QStringLiteral("Spire — phase 3"), QStringLiteral("VID"), blueD, false},
-        {3, 8, 280, QStringLiteral("Mic — SM7B"), QStringLiteral("AUD"), green, true},
-        {4, 8, 280, QStringLiteral("Game audio"), QStringLiteral("AUD"), greenD, true},
-        {5, 0, 64, QStringLiteral("Music · Synth bed"), QStringLiteral("AUD"), amber, true},
-        {5, 200, 90, QStringLiteral("Music · Outro"), QStringLiteral("AUD"), amber, true},
-    };
-    return c;
-}
-
 QJsonObject clipToJson(const Clip& c) {
     QJsonObject o;
     o.insert(QStringLiteral("track"), c.track);
@@ -112,6 +97,10 @@ QJsonObject clipToJson(const Clip& c) {
     o.insert(QStringLiteral("tag"),   c.tag);
     o.insert(QStringLiteral("color"), c.color.name());
     o.insert(QStringLiteral("audio"), c.audio);
+    // ADR-0001 source reference. Written unconditionally so a re-save of an
+    // older project records the (empty) unlinked state explicitly.
+    o.insert(QStringLiteral("sourcePath"), c.sourcePath);
+    o.insert(QStringLiteral("sourceIn"),   c.sourceIn);
     // v4 nested per-clip params.
     QJsonObject xf;
     xf.insert(QStringLiteral("x"),        c.tx);
@@ -139,6 +128,10 @@ Clip clipFromJson(const QJsonObject& o) {
     c.tag   = o.value(QStringLiteral("tag")).toString();
     c.color = QColor(o.value(QStringLiteral("color")).toString());
     c.audio = o.value(QStringLiteral("audio")).toBool();
+    // ADR-0001: absent in every project written before the render work, which
+    // is read as an unlinked clip starting at the head of its (missing) source.
+    c.sourcePath = o.value(QStringLiteral("sourcePath")).toString();
+    c.sourceIn   = o.value(QStringLiteral("sourceIn")).toDouble(c.sourceIn);
     // v4 nested params: missing keys take the field defaults (back-compat).
     const QJsonObject xf = o.value(QStringLiteral("transform")).toObject();
     if (!xf.isEmpty()) {
@@ -315,7 +308,7 @@ private:
     bool m_snap      = true;
     int  m_drag      = -1;
     Zone m_dragZone  = Zone::None;
-    double m_origStart = 0, m_origDur = 0, m_grabOffset = 0;
+    double m_origStart = 0, m_origDur = 0, m_origSourceIn = 0, m_grabOffset = 0;
 
     // Drift-compensated play ticker: a 16 ms QTimer drives tickPlayhead(),
     // which advances by REAL elapsed seconds via QElapsedTimer. A stalled UI
@@ -333,7 +326,9 @@ private:
 TimelineCanvas::TimelineCanvas(QWidget* parent) : QWidget(parent) {
     setMouseTracking(true);
     setAcceptDrops(true);
-    m_clips = clips();        // seed; the active project replaces it via setClips()
+    // Starts empty: clips carry a media reference now (ADR-0001), so seeded
+    // demo rows would be permanently unrenderable. setClips() fills this in
+    // when a project is opened; the bin fills it by drag and drop.
     updateSize();
     m_playTimer = new QTimer(this);
     m_playTimer->setInterval(int(1000.0 / kFps));
@@ -489,6 +484,11 @@ void TimelineCanvas::paintEvent(QPaintEvent*) {
         if (i == m_selected) {
             p.setPen(QPen(QColor(0xf7, 0xf7, 0xf7), 1.5));
             p.drawPath(path);
+        } else if (c.sourcePath.isEmpty()) {
+            QPen unlinked(Theme::Warn, 1);
+            unlinked.setStyle(Qt::DashLine);
+            p.setPen(unlinked);
+            p.drawPath(path);
         } else {
             p.setPen(QPen(QColor(0, 0, 0, 80), 1));
             p.drawPath(path);
@@ -537,6 +537,18 @@ void TimelineCanvas::paintEvent(QPaintEvent*) {
         p.fillPath(tri, m.color);
     }
 
+    // Empty state: a new project has no clips until media is dropped in. The
+    // canvas is kTimelineLen * zoom wide inside a scroll area, so the hint is
+    // centred on the visible portion rather than on the full virtual width.
+    if (m_clips.isEmpty()) {
+        QRect hint = visibleRegion().boundingRect();
+        if (hint.isEmpty()) hint = rect();
+        hint.setTop(qMax(hint.top(), int(kRulerH)));
+        p.setPen(Theme::TextMute);
+        QFont ef = p.font(); ef.setPixelSize(12); ef.setWeight(QFont::Normal); p.setFont(ef);
+        p.drawText(hint, Qt::AlignCenter, tr("Drag media from the bin to build a timeline."));
+    }
+
     // Playhead
     const int px = int(m_playhead * m_zoom);
     p.setPen(QPen(Theme::RecHi, 1));
@@ -577,6 +589,7 @@ void TimelineCanvas::mousePressEvent(QMouseEvent* e) {
         m_dragZone = zone;
         m_origStart = m_clips[i].start;
         m_origDur = m_clips[i].dur;
+        m_origSourceIn = m_clips[i].sourceIn;
         m_grabOffset = pos.x() / m_zoom - m_clips[i].start;
     }
     update();
@@ -593,7 +606,6 @@ void TimelineCanvas::mouseMoveEvent(QMouseEvent* e) {
     if (m_drag >= 0 && (e->buttons() & Qt::LeftButton)) {
         Clip& c = m_clips[m_drag];
         const double t = pos.x() / m_zoom;
-        const double origEnd = m_origStart + m_origDur;
         constexpr double minDur = 0.25;
         if (m_dragZone == Zone::Body) {
             c.start = qBound(0.0, snapTime(t - m_grabOffset, m_drag),
@@ -602,13 +614,18 @@ void TimelineCanvas::mouseMoveEvent(QMouseEvent* e) {
                                   int(tracks().size()) - 1);
             if (tracks()[ty].audio == c.audio) c.track = ty;
         } else if (m_dragZone == Zone::LeftEdge) {
-            const double ns = qBound(0.0, snapTime(t, m_drag), origEnd - minDur);
-            c.start = ns;
-            c.dur = origEnd - ns;
+            // The in-point moves with the edge, and a linked clip stops at the
+            // head of its source (ADR-0001).
+            const TimelineTrim tl = trimLeftEdge(m_origStart, m_origDur, m_origSourceIn,
+                                                 c.speedFactor, snapTime(t, m_drag),
+                                                 !c.sourcePath.isEmpty(), minDur);
+            c.start    = tl.start;
+            c.dur      = tl.dur;
+            c.sourceIn = tl.sourceIn;
         } else if (m_dragZone == Zone::RightEdge) {
-            const double ne = qBound(c.start + minDur, snapTime(t, m_drag),
-                                     double(kTimelineLen));
-            c.dur = ne - c.start;
+            const TimelineTrim tr = trimRightEdge(c.start, c.sourceIn, snapTime(t, m_drag),
+                                                  minDur, double(kTimelineLen));
+            c.dur = tr.dur;
         }
         update();
         emit clipsChanged();
@@ -670,6 +687,8 @@ void TimelineCanvas::dropEvent(QDropEvent* e) {
     const double dur = (durSecs > 0) ? double(durSecs) : 4.0;
 
     Clip nc;
+    nc.sourcePath = path;      // ADR-0001: what makes the clip renderable
+    nc.sourceIn   = 0.0;       // dropped clips start at the head of the file
     nc.track = track;
     nc.start = qBound(0.0, snapTime(t, -1), double(kTimelineLen) - dur);
     nc.dur   = std::min(dur, double(kTimelineLen) - nc.start);
@@ -751,6 +770,8 @@ void TimelineCanvas::splitClip(int i, double t) {
     a.dur = cut - a.start;
     b.start = cut;
     b.dur = origEnd - cut;
+    // The right-hand clip resumes where the left one stopped consuming source.
+    b.sourceIn = splitSourceIn(a.start, a.sourceIn, a.speedFactor, cut);
     m_clips[i] = a;
     m_clips.insert(i + 1, b);
     m_selected = i + 1;
