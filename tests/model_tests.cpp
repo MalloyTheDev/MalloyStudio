@@ -186,6 +186,10 @@ private slots:
     // Regression: a shortcut Windows refused was still stored and displayed as
     // bound, so the user saw a working hotkey that never fired and the failure
     // repeated silently on every launch.
+    // Regression: creating a configured layer pushed two undo commands, so the
+    // first undo stripped the image path or window and left an empty layer
+    // behind instead of removing what the user had just added.
+    void addingAConfiguredLayerIsOneUndoStep();
     void hotkeyManagerReportsRefusedBindings();
     void resamplerPreservesPitchAcrossRates();
     void pcmFifoKeepsTheSampleStreamContinuous();
@@ -2783,6 +2787,45 @@ void MalloyModelTests::hotkeyManagerReportsRefusedBindings() {
     }
 
     QVERIFY(mgr.setBinding(action, QKeySequence()));
+}
+
+void MalloyModelTests::addingAConfiguredLayerIsOneUndoStep() {
+    SceneCollection scenes;
+    QUndoStack undo;
+    scenes.setUndoStack(&undo);
+    scenes.addScene(QStringLiteral("Scene"));
+    undo.clear();
+
+    // What SourcesPanel does for an image layer: create it, then set the path.
+    scenes.beginEditGroup(QStringLiteral("Add Image"));
+    scenes.addNewSourceToCurrent(QStringLiteral("Backdrop"), Source::Type::Image,
+                                 QString(), QColor());
+    const int idx = scenes.currentItemIndex();
+    QVERIFY(idx >= 0);
+    scenes.setCurrentSourceImagePath(idx, QStringLiteral("C:/pics/bg.png"));
+    scenes.endEditGroup();
+
+    QCOMPARE(scenes.currentScene()->itemCount(), 1);
+    QCOMPARE(scenes.sourceForCurrentItem(0)->imagePath(), QStringLiteral("C:/pics/bg.png"));
+
+    // One action in, one undo step out.
+    QCOMPARE(undo.count(), 1);
+    undo.undo();
+    QCOMPARE(scenes.currentScene()->itemCount(), 0);
+
+    // And redo brings back the configured layer, not a bare one.
+    undo.redo();
+    QCOMPARE(scenes.currentScene()->itemCount(), 1);
+    QCOMPARE(scenes.sourceForCurrentItem(0)->imagePath(), QStringLiteral("C:/pics/bg.png"));
+
+    // Ungrouped edits still record separately, which is what the group exists
+    // to override.
+    undo.clear();
+    scenes.addNewSourceToCurrent(QStringLiteral("Second"), Source::Type::Image,
+                                 QString(), QColor());
+    const int second = scenes.currentItemIndex();
+    scenes.setCurrentSourceImagePath(second, QStringLiteral("C:/pics/other.png"));
+    QCOMPARE(undo.count(), 2);
 }
 
 QTEST_MAIN(MalloyModelTests)

@@ -165,6 +165,14 @@ void SceneCollection::setUndoStack(QUndoStack* undoStack) {
     m_undoStack = undoStack;
 }
 
+void SceneCollection::beginEditGroup(const QString& text) {
+    if (m_undoStack) m_undoStack->beginMacro(text);
+}
+
+void SceneCollection::endEditGroup() {
+    if (m_undoStack) m_undoStack->endMacro();
+}
+
 QJsonObject SceneCollection::snapshot() const {
     return toJson();
 }

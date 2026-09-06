@@ -392,6 +392,15 @@ void SourcesPanel::onAddClicked() {
         if (!pickedWindow.has_value()) return;
     }
 
+    // Creating the layer and configuring it are one action to the user, so they
+    // are one undo step. Without the group, undo removed the image path or the
+    // window and left an unconfigured layer behind, needing a second undo.
+    const bool configuresAfterAdd =
+        (t == Source::Type::Image && !imagePathValue.isEmpty())
+        || (t == Source::Type::WindowCapture && pickedWindow.has_value());
+    if (configuresAfterAdd)
+        m_scenes->beginEditGroup(tr("Add %1").arg(Source::typeToString(t)));
+
     m_scenes->addNewSourceToCurrent(name, t, textValue, colorValue, adapterIndex, outputIndex);
 
     if (t == Source::Type::Image && !imagePathValue.isEmpty()) {
@@ -403,6 +412,9 @@ void SourcesPanel::onAddClicked() {
         if (idx >= 0)
             m_scenes->setCurrentSourceWindow(idx, pickedWindow->first, pickedWindow->second);
     }
+
+    if (configuresAfterAdd)
+        m_scenes->endEditGroup();
 }
 
 void SourcesPanel::onRemoveClicked() {

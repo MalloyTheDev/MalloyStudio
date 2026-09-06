@@ -41,6 +41,13 @@ public:
     const QList<Source*>& sources() const { return m_sources; }
 
     void setUndoStack(QUndoStack* undoStack);
+
+    // Groups the edits made between the two calls into a single undo step, so a
+    // layer that is created and then configured is undone as the one action the
+    // user actually took. Every begin must be matched by an end; without an undo
+    // stack both are no-ops.
+    void beginEditGroup(const QString& text);
+    void endEditGroup();
     QJsonObject snapshot() const;
     void restoreSnapshot(const QJsonObject& snapshot);
     void pushSnapshotCommand(const QString& text, const QJsonObject& before, const QJsonObject& after);
