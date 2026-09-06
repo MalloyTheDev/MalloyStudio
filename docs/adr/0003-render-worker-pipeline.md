@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted, implemented in d2717d2
 
 ## Context
 
