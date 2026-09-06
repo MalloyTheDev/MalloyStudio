@@ -7,8 +7,69 @@
 // the summing loop, not in the law.
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <vector>
+
+// Byte-accurate PCM buffer for one input.
+//
+// The mixer needs exactly one tick of audio per tick. Device chunks do not
+// arrive in tick-sized pieces, so a buffer that hands back whole chunks either
+// throws away the tail of a large one or leaves the rest of the tick silent
+// while more data sits in the queue. This keeps the leftovers instead, so the
+// sample stream stays continuous across ticks.
+//
+// Reads consume from the front; when the buffer runs long (a stalled encoder,
+// a device delivering faster than the mixer drains) the OLDEST bytes go first,
+// because live audio wants to stay near the present rather than play a backlog.
+class PcmFifo {
+public:
+    void push(const char* data, int bytes) {
+        if (!data || bytes <= 0) return;
+        m_buf.insert(m_buf.end(), data, data + bytes);
+    }
+
+    // Copies up to `bytes` into `out` and consumes them. Returns how many bytes
+    // were actually available, which is less than `bytes` on an underrun.
+    int take(char* out, int bytes) {
+        if (!out || bytes <= 0) return 0;
+        const int got = std::min<int>(bytes, available());
+        if (got <= 0) return 0;
+        std::memcpy(out, m_buf.data() + m_read, static_cast<size_t>(got));
+        m_read += static_cast<size_t>(got);
+        compact();
+        return got;
+    }
+
+    // Drops the oldest bytes until at most `maxBytes` remain, bounding latency.
+    void trimToLast(int maxBytes) {
+        if (maxBytes < 0) maxBytes = 0;
+        const int over = available() - maxBytes;
+        if (over <= 0) return;
+        m_read += static_cast<size_t>(over);
+        compact();
+    }
+
+    int available() const { return static_cast<int>(m_buf.size() - m_read); }
+    bool isEmpty() const { return available() == 0; }
+    void clear() { m_buf.clear(); m_read = 0; }
+
+private:
+    // Reading advances an offset rather than moving the whole buffer; the front
+    // is reclaimed once it dominates, which keeps steady-state reads cheap.
+    void compact() {
+        if (m_read == 0) return;
+        if (m_read >= m_buf.size()) { m_buf.clear(); m_read = 0; return; }
+        if (m_read >= m_buf.size() / 2) {
+            m_buf.erase(m_buf.begin(), m_buf.begin() + static_cast<std::ptrdiff_t>(m_read));
+            m_read = 0;
+        }
+    }
+
+    std::vector<char> m_buf;
+    std::size_t       m_read = 0;
+};
 
 // Balance law for a stereo input. Pan attenuates the opposite side and never
 // folds one channel into the other, so a source panned centre passes through

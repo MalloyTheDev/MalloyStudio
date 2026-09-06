@@ -176,6 +176,10 @@ private slots:
     // QFileInfo::completeBaseName only strips the last suffix, so recordings
     // and renders were named "project.malloy-20260906.mp4".
     void projectDisplayNameStripsCompoundExtension();
+    // Regression: the mixer popped one device chunk per tick and discarded
+    // whatever did not fit, so any chunk size that disagreed with the tick size
+    // lost audio and crackled.
+    void pcmFifoKeepsTheSampleStreamContinuous();
     void mixerKeepsStereoSeparation();
     void blurHandlesImagesSmallerThanItsRadius();
     void timelineGraphPlacesTrimsAndScalesClips();
@@ -2536,6 +2540,81 @@ void MalloyModelTests::projectDisplayNameStripsCompoundExtension() {
     QCOMPARE(ProjectDocument::displayName(QStringLiteral("C:/p/plain")),
              QStringLiteral("plain"));
     QVERIFY(ProjectDocument::displayName(QString()).isEmpty());
+}
+
+void MalloyModelTests::pcmFifoKeepsTheSampleStreamContinuous() {
+    PcmFifo fifo;
+    QVERIFY(fifo.isEmpty());
+    QCOMPARE(fifo.available(), 0);
+
+    // A short read on an empty buffer is an underrun, not a crash.
+    char out[16] = {};
+    QCOMPARE(fifo.take(out, sizeof(out)), 0);
+
+    // Leftovers survive: pushing 100 bytes and taking 60 leaves 40.
+    std::vector<char> hundred(100, 'x');
+    fifo.push(hundred.data(), int(hundred.size()));
+    QCOMPARE(fifo.available(), 100);
+    std::vector<char> sixty(60, 0);
+    QCOMPARE(fifo.take(sixty.data(), 60), 60);
+    QCOMPARE(fifo.available(), 40);
+
+    // Taking more than is buffered returns what there is and empties it.
+    std::vector<char> big(200, 0);
+    QCOMPARE(fifo.take(big.data(), 200), 40);
+    QVERIFY(fifo.isEmpty());
+
+    // The heart of the bug: a ramp pushed in chunk sizes that do not divide the
+    // tick size must come back out byte for byte, with nothing dropped or
+    // repeated at the boundaries.
+    fifo.clear();
+    const int kTotal = 5000;
+    std::vector<char> written;
+    written.reserve(kTotal);
+    for (int i = 0; i < kTotal; ++i)
+        written.push_back(static_cast<char>(i % 251));   // 251 is coprime with the chunk sizes
+
+    std::vector<char> read;
+    read.reserve(kTotal);
+    const int pushSizes[] = {700, 1100, 250, 1950, 1000};   // none is a multiple of 480
+    int written_off = 0;
+    for (int size : pushSizes) {
+        fifo.push(written.data() + written_off, size);
+        written_off += size;
+        // Drain in tick-sized bites, exactly as the mixer does.
+        for (;;) {
+            std::vector<char> tick(480, 0);
+            const int got = fifo.take(tick.data(), 480);
+            if (got <= 0) break;
+            read.insert(read.end(), tick.begin(), tick.begin() + got);
+            if (got < 480) break;   // underrun: wait for the next push
+        }
+    }
+    QCOMPARE(written_off, kTotal);
+    QCOMPARE(int(read.size()), kTotal);
+    QVERIFY(read == written);
+
+    // Overrun policy: when the buffer runs long the OLDEST bytes go, so the mix
+    // stays near live instead of playing a backlog.
+    fifo.clear();
+    std::vector<char> a(100, 'a'), b(100, 'b');
+    fifo.push(a.data(), 100);
+    fifo.push(b.data(), 100);
+    fifo.trimToLast(100);
+    QCOMPARE(fifo.available(), 100);
+    std::vector<char> kept(100, 0);
+    QCOMPARE(fifo.take(kept.data(), 100), 100);
+    QCOMPARE(kept, b);
+
+    // Trimming to more than is held is a no-op.
+    fifo.clear();
+    fifo.push(a.data(), 100);
+    fifo.trimToLast(1000);
+    QCOMPARE(fifo.available(), 100);
+
+    // Muting clears the buffer rather than leaving stale audio to play later.
+    fifo.clear();
+    QVERIFY(fifo.isEmpty());
 }
 
 QTEST_MAIN(MalloyModelTests)

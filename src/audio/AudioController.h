@@ -1,5 +1,6 @@
 #pragma once
 #include "AudioInput.h"
+#include "audio/AudioMix.h"
 #include "media/TimedSource.h"
 
 #include <QHash>
@@ -88,10 +89,12 @@ private:
     QList<AudioInput>     m_inputs;
     QList<WasapiCapture*> m_workers; // parallel to m_inputs, nullptr if not started
 
-    // Per-input chunk rings: samplesReady pushes here; mixAndEmit() drains.
-    // Capped at kRingMaxChunks to bound memory during pipeline stalls.
-    static constexpr int kRingMaxChunks = 8;
-    QHash<QString, QQueue<QByteArray>> m_rings;  // keyed by AudioInput.id
+    // Per-input PCM buffers: samplesReady pushes here; mixAndEmit() drains
+    // exactly one tick per tick. Bounded by bytes rather than by chunk count,
+    // since device chunk sizes are not ours to choose; roughly 160 ms, after
+    // which the oldest audio is dropped to keep the mix near live.
+    static constexpr int kMaxBufferedBytes = 8 * 3840;
+    QHash<QString, PcmFifo> m_rings;  // keyed by AudioInput.id
 
     // 50 Hz mixer timer — fires mixAndEmit() on the main thread.
     QTimer* m_mixerTimer = nullptr;

@@ -97,13 +97,17 @@ void AudioController::mixAndEmit() {
             continue;
         }
 
-        auto& ring = m_rings[in.id];
-        if (ring.isEmpty()) continue;   // no data this tick → silence contribution
+        auto& fifo = m_rings[in.id];
+        if (fifo.isEmpty()) continue;   // no data this tick, contributes silence
 
-        // Pop one chunk (typically ~3840 bytes = 960 stereo frames).
-        // If WasapiCapture emits at a different rate, we take just the first chunk.
-        QByteArray chunk = ring.dequeue();
-        const int nSamples = static_cast<int>(chunk.size()) / kBytesPerSample;
+        // Take exactly one tick and keep the remainder for the next one. The
+        // previous version popped a single device chunk and dropped whatever did
+        // not fit, which crackled whenever the device chunk size and the tick
+        // size disagreed.
+        QByteArray chunk(kBytesPerTick, Qt::Uninitialized);
+        const int got = fifo.take(chunk.data(), kBytesPerTick);
+        if (got <= 0) continue;
+        const int nSamples = got / kBytesPerSample;
         const auto* src    = reinterpret_cast<const qint16*>(chunk.constData());
 
         float gainL, gainR;
@@ -197,12 +201,11 @@ void AudioController::startWorker(int index) {
 
     connect(worker, &WasapiCapture::samplesReady, this,
             [this, id](QByteArray pcm) {
-        // Push into the per-input ring; the mixer timer drains it at 50 Hz.
-        auto& ring = m_rings[id];
-        ring.enqueue(std::move(pcm));
-        // Cap the ring to prevent unbounded growth if the mixer is slow.
-        while (ring.size() > kRingMaxChunks)
-            ring.dequeue();
+        // Push into the per-input buffer; the mixer timer drains it at 50 Hz.
+        auto& fifo = m_rings[id];
+        fifo.push(pcm.constData(), static_cast<int>(pcm.size()));
+        // Bound latency if the mixer falls behind, dropping the oldest audio.
+        fifo.trimToLast(kMaxBufferedBytes);
     });
 
     connect(worker, &WasapiCapture::captureError, this,
