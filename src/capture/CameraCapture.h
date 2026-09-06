@@ -47,8 +47,9 @@ public:
     static bool hasEnumerated();
 
     // Enumerates on a worker thread and delivers the result on `context`'s
-    // thread once it finishes. `context` is watched: if it is destroyed first,
-    // the callback is dropped rather than firing on a dangling object.
+    // thread once it finishes. Delivery is an ordinary Qt connection bound to
+    // `context`, so a context destroyed while the enumeration is still running
+    // disconnects itself and the callback never fires.
     static void refreshDevicesAsync(QObject* context,
                                     std::function<void(QList<Device>)> done = {});
 
@@ -68,3 +69,21 @@ private:
     std::thread       m_thread;
     std::atomic<bool> m_running{false};
 };
+
+// Carries enumeration results from a worker thread to the main thread.
+//
+// A deliberately leaked singleton, so a result posted from a worker can never
+// land on a destroyed object. Callers do not touch it: refreshDevicesAsync
+// binds the connection to the caller's own context object, which is what makes
+// receiver lifetime Qt's problem rather than ours. The previous version copied
+// a QPointer across the thread boundary, which QPointer does not support.
+class CameraDeviceNotifier : public QObject {
+    Q_OBJECT
+public:
+    // Called on the main thread; emits devicesRefreshed().
+    void publish(const QList<CameraCapture::Device>& devices);
+
+signals:
+    void devicesRefreshed(const QList<CameraCapture::Device>& devices);
+};
+

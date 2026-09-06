@@ -1,4 +1,6 @@
 #include "CameraCapture.h"
+#include <memory>
+#include <atomic>
 #include <mutex>
 #include <QPointer>
 #include <QElapsedTimer>
@@ -59,10 +61,49 @@ bool CameraCapture::cacheIsStale(int seconds) {
     return cacheAge().hasExpired(qint64(seconds) * 1000);
 }
 
+void CameraDeviceNotifier::publish(const QList<CameraCapture::Device>& devices) {
+    emit devicesRefreshed(devices);
+}
+
+namespace {
+// Leaked on purpose: worker threads post here, and it must outlive every
+// caller and the application object itself.
+CameraDeviceNotifier* notifier() {
+    static CameraDeviceNotifier* hub = new CameraDeviceNotifier;
+    return hub;
+}
+
+// Set when the application starts shutting down, so a worker finishing during
+// teardown does not try to post into an event loop that is going away.
+std::atomic<bool>& shuttingDown() {
+    static std::atomic<bool> flag{false};
+    return flag;
+}
+}  // namespace
+
 void CameraCapture::refreshDevicesAsync(QObject* context,
                                         std::function<void(QList<Device>)> done) {
-    QPointer<QObject> guard(context);
-    std::thread([guard, done = std::move(done)]() mutable {
+    CameraDeviceNotifier* hub = notifier();
+
+    static bool hookedShutdown = false;
+    if (!hookedShutdown && qApp) {
+        hookedShutdown = true;
+        QObject::connect(qApp, &QCoreApplication::aboutToQuit, hub,
+                         [] { shuttingDown() = true; });
+    }
+
+    if (context && done) {
+        // One-shot, and bound to `context`: if it is destroyed while the
+        // enumeration runs, Qt disconnects and nothing is called.
+        auto link = std::make_shared<QMetaObject::Connection>();
+        *link = QObject::connect(hub, &CameraDeviceNotifier::devicesRefreshed, context,
+                                 [done, link](const QList<Device>& devices) {
+            QObject::disconnect(*link);
+            done(devices);
+        });
+    }
+
+    std::thread([] {
         const QList<Device> devices = availableDevices();
         {
             std::lock_guard<std::mutex> lock(cacheMutex());
@@ -70,12 +111,10 @@ void CameraCapture::refreshDevicesAsync(QObject* context,
             cacheAge().restart();
             cacheFilled() = true;
         }
-        if (!qApp || !done) return;
-        // Hop to the main thread. The guard is checked there, so a context that
-        // was destroyed while the enumeration ran simply drops the callback.
-        QMetaObject::invokeMethod(qApp, [guard, done, devices] {
-            if (!guard) return;
-            done(devices);
+        if (shuttingDown()) return;
+        // Hops to the main thread. The target outlives the post by construction.
+        QMetaObject::invokeMethod(notifier(), [devices] {
+            notifier()->publish(devices);
         }, Qt::QueuedConnection);
     }).detach();
 }
