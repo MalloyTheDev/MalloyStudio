@@ -1,4 +1,5 @@
 #include "SourcesPanel.h"
+#include <QApplication>
 #include "MicrophonePickerDialog.h"
 #include "MonitorPickerDialog.h"
 #include "WindowPickerDialog.h"
@@ -138,6 +139,10 @@ SourcesPanel::SourcesPanel(SceneCollection* scenes, AudioController* audio, QWid
     connect(m_scenes, &SceneCollection::itemSelectionChanged, this, &SourcesPanel::onCurrentItemChanged);
 
     rebuild();
+
+    // Warm the camera list off the UI thread so the Add Source dialog does not
+    // have to wait for MediaFoundation when the user picks Camera.
+    CameraCapture::refreshDevicesAsync(this);
 }
 
 void SourcesPanel::rebuild() {
@@ -330,7 +335,23 @@ void SourcesPanel::onAddClicked() {
 
     // ── Camera: pick a MediaFoundation video device up-front (like Window).
     if (t == Source::Type::Camera) {
-        const QList<CameraCapture::Device> cams = CameraCapture::availableDevices();
+        // The cache is warmed in the constructor, so this is normally instant.
+        // Only a cold cache (the first moments after launch) falls back to the
+        // blocking enumeration, and then the user has explicitly asked for a
+        // camera and a brief wait is expected.
+        // Only the very first use can block: after one enumeration the cached
+        // list answers immediately, and a stale list is refreshed in the
+        // background for next time. An empty but filled cache means "no
+        // cameras", which is an answer, not a reason to go and look again.
+        if (CameraCapture::cacheIsStale())
+            CameraCapture::refreshDevicesAsync(this);
+
+        QList<CameraCapture::Device> cams = CameraCapture::cachedDevices();
+        if (!CameraCapture::hasEnumerated()) {
+            QApplication::setOverrideCursor(Qt::WaitCursor);
+            cams = CameraCapture::availableDevices();
+            QApplication::restoreOverrideCursor();
+        }
         if (cams.isEmpty()) {
             QMessageBox::information(this, tr("No Cameras"),
                 tr("No webcam or capture device was found."));

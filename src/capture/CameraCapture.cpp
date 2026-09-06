@@ -1,4 +1,8 @@
 #include "CameraCapture.h"
+#include <mutex>
+#include <QPointer>
+#include <QElapsedTimer>
+#include <QCoreApplication>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -30,7 +34,51 @@ QString allocatedString(IMFActivate* dev, const GUID& key) {
 }
 
 template <typename T> void safeRelease(T*& p) { if (p) { p->Release(); p = nullptr; } }
+
+// Process-wide device cache. Enumeration is slow enough that every UI path
+// reads this instead, and refreshes it in the background.
+std::mutex& cacheMutex() { static std::mutex m; return m; }
+QList<CameraCapture::Device>& deviceCache() { static QList<CameraCapture::Device> c; return c; }
+QElapsedTimer& cacheAge() { static QElapsedTimer t; return t; }
+bool& cacheFilled() { static bool filled = false; return filled; }
 } // namespace
+
+QList<CameraCapture::Device> CameraCapture::cachedDevices() {
+    std::lock_guard<std::mutex> lock(cacheMutex());
+    return deviceCache();
+}
+
+bool CameraCapture::hasEnumerated() {
+    std::lock_guard<std::mutex> lock(cacheMutex());
+    return cacheFilled();
+}
+
+bool CameraCapture::cacheIsStale(int seconds) {
+    std::lock_guard<std::mutex> lock(cacheMutex());
+    if (!cacheFilled()) return true;
+    return cacheAge().hasExpired(qint64(seconds) * 1000);
+}
+
+void CameraCapture::refreshDevicesAsync(QObject* context,
+                                        std::function<void(QList<Device>)> done) {
+    QPointer<QObject> guard(context);
+    std::thread([guard, done = std::move(done)]() mutable {
+        const QList<Device> devices = availableDevices();
+        {
+            std::lock_guard<std::mutex> lock(cacheMutex());
+            deviceCache() = devices;
+            cacheAge().restart();
+            cacheFilled() = true;
+        }
+        if (!qApp || !done) return;
+        // Hop to the main thread. The guard is checked there, so a context that
+        // was destroyed while the enumeration ran simply drops the callback.
+        QMetaObject::invokeMethod(qApp, [guard, done, devices] {
+            if (!guard) return;
+            done(devices);
+        }, Qt::QueuedConnection);
+    }).detach();
+}
 
 QList<CameraCapture::Device> CameraCapture::availableDevices() {
     QList<Device> result;

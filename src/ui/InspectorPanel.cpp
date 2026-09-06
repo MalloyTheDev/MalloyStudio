@@ -587,9 +587,19 @@ void InspectorPanel::rebuild() {
     }
 
     if (isCamera) {
+        // Filled from the cached device list, which is immediate. Enumerating
+        // here used to block the UI for seconds every time a camera layer was
+        // selected; the refresh below happens on a worker thread and repopulates
+        // when it lands.
+        if (CameraCapture::cacheIsStale()) {
+            CameraCapture::refreshDevicesAsync(this, [this](QList<CameraCapture::Device>) {
+                rebuild();   // re-enter with the fresh list in the cache
+            });
+        }
+
         QSignalBlocker sb(m_cameraDevice);
         m_cameraDevice->clear();
-        for (const CameraCapture::Device& c : CameraCapture::availableDevices())
+        for (const CameraCapture::Device& c : CameraCapture::cachedDevices())
             m_cameraDevice->addItem(c.name, c.id);
         // Select the stored device. If it isn't currently enumerated (e.g.
         // unplugged), add it anyway so the binding isn't silently lost.
