@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted, implemented in 7fe0923
 
 ## Context
 
