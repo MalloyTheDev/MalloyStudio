@@ -1,4 +1,5 @@
 #include "EncoderPipeline.h"
+#include <QProcessEnvironment>
 #include "media/TimedSource.h"
 #include "model/Canvas.h"
 #include "recording/EncoderRegistry.h"
@@ -164,6 +165,11 @@ bool EncoderPipeline::start(const Target& target,
     m_stderrPending.clear();
 
     m_ffmpeg = new QProcess(this);
+    // FFREPORT makes ffmpeg write a log whose header is the entire command
+    // line, destination URL included. Nothing here needs it.
+    QProcessEnvironment childEnv = QProcessEnvironment::systemEnvironment();
+    childEnv.remove(QStringLiteral("FFREPORT"));
+    m_ffmpeg->setProcessEnvironment(childEnv);
     // SeparateChannels (not ForwardedErrorChannel) so we can read stderr in C++
     // and surface it in errorOccurred messages + parse ffmpeg's ~1 Hz progress
     // lines for the streaming status display. v6 forwarded stderr straight to
@@ -424,8 +430,14 @@ void EncoderPipeline::onFfmpegStderrReady() {
 }
 
 void EncoderPipeline::appendStderrTail(const QString& chunk) {
+    // Redact before storing: this tail is attached to errorOccurred() and shown
+    // to the user, so the key must not survive into it.
+    // Only a stream URL carries a secret. A recording's destination is a file
+    // path, and masking that would hide the very thing the error is about.
+    const QString safe = redactDestination(
+        chunk, m_target.kind == Target::Kind::Rtmp ? m_target.destination : QString());
     constexpr int kTailCap = 4096;
-    m_stderrTail += chunk;
+    m_stderrTail += safe;
     if (m_stderrTail.size() > kTailCap) {
         // Trim to the most recent kTailCap chars; align to a newline so the
         // surfaced tail starts on a clean line where possible.
@@ -433,6 +445,30 @@ void EncoderPipeline::appendStderrTail(const QString& chunk) {
         const int nl = m_stderrTail.indexOf(QLatin1Char('\n'));
         if (nl > 0 && nl < 256) m_stderrTail.remove(0, nl + 1);
     }
+}
+
+QString EncoderPipeline::redactDestination(QString text, const QString& destination) {
+    if (destination.isEmpty() || text.isEmpty()) return text;
+
+    // Only the last path segment of an RTMP URL is secret; keeping the server
+    // visible is what makes an error message useful at all.
+    const int slash = destination.lastIndexOf(QLatin1Char('/'));
+    const QString secret = (slash >= 0 && slash + 1 < destination.size())
+                               ? destination.mid(slash + 1)
+                               : QString();
+
+    if (!secret.isEmpty()) {
+        QString masked = destination;
+        masked.replace(slash + 1, secret.size(), QStringLiteral("***"));
+        text.replace(destination, masked);
+        // ffmpeg sometimes prints the stream name on its own. A very short
+        // segment is not a key and replacing it blindly would mangle unrelated
+        // words, so only redact one that is plausibly a credential.
+        if (secret.size() >= 8) text.replace(secret, QStringLiteral("***"));
+    } else {
+        text.replace(destination, QStringLiteral("***"));
+    }
+    return text;
 }
 
 bool EncoderPipeline::tryParseProgressLine(QStringView line,

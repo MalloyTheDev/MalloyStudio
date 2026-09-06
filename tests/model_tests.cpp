@@ -189,6 +189,10 @@ private slots:
     // Regression: creating a configured layer pushed two undo commands, so the
     // first undo stripped the image path or window and left an empty layer
     // behind instead of removing what the user had just added.
+    // Regression: ffmpeg prints the destination URL on a failed connect even at
+    // the production log level, and that tail is shown in an error dialog, so
+    // the stream key could be screenshotted or pasted into a bug report.
+    void encoderRedactsTheStreamKeyFromFfmpegOutput();
     void addingAConfiguredLayerIsOneUndoStep();
     void hotkeyManagerReportsRefusedBindings();
     void resamplerPreservesPitchAcrossRates();
@@ -2826,6 +2830,43 @@ void MalloyModelTests::addingAConfiguredLayerIsOneUndoStep() {
     const int second = scenes.currentItemIndex();
     scenes.setCurrentSourceImagePath(second, QStringLiteral("C:/pics/other.png"));
     QCOMPARE(undo.count(), 2);
+}
+
+void MalloyModelTests::encoderRedactsTheStreamKeyFromFfmpegOutput() {
+    const QString url = QStringLiteral("rtmp://live.twitch.tv/app/live_999999_SECRETKEYVALUE");
+    const QString key = QStringLiteral("live_999999_SECRETKEYVALUE");
+
+    // What ffmpeg actually prints on a failed connect, twice, at -loglevel error.
+    const QString stderrText =
+        QStringLiteral("[flv @ 000001] Error opening output %1: Input/output error\n"
+                       "Error opening output file %1.\n").arg(url);
+
+    const QString safe = EncoderPipeline::redactDestination(stderrText, url);
+    QVERIFY(!safe.contains(key));
+    // The server stays visible: an error naming no destination is not useful.
+    QVERIFY(safe.contains(QStringLiteral("rtmp://live.twitch.tv/app/")));
+    QVERIFY(safe.contains(QStringLiteral("***")));
+    QVERIFY(safe.contains(QStringLiteral("Input/output error")));
+
+    // The key on its own, without the URL around it, is redacted too.
+    const QString bare = EncoderPipeline::redactDestination(
+        QStringLiteral("publishing to %1 failed").arg(key), url);
+    QVERIFY(!bare.contains(key));
+
+    // No destination means nothing to redact.
+    QCOMPARE(EncoderPipeline::redactDestination(stderrText, QString()), stderrText);
+
+    // A recording target is a file path, and its name is not a secret. The
+    // caller passes an empty destination for file targets, so this is what a
+    // recording error keeps.
+    const QString fileErr = QStringLiteral("Error opening output file C:/Videos/take-3.mp4.");
+    QCOMPARE(EncoderPipeline::redactDestination(fileErr, QString()), fileErr);
+
+    // A short trailing segment is not a credential; replacing it blindly would
+    // mangle ordinary words.
+    const QString shortUrl = QStringLiteral("rtmp://example.com/live/ab");
+    const QString text = QStringLiteral("ab is a common fragment, cabbage included");
+    QVERIFY(EncoderPipeline::redactDestination(text, shortUrl).contains(QStringLiteral("cabbage")));
 }
 
 QTEST_MAIN(MalloyModelTests)

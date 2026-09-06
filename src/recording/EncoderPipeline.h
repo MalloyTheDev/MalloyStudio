@@ -81,6 +81,15 @@ protected:
     virtual QStringList buildOutputArgs(const Target& target) const;
 
 public:
+    // Removes the stream key from text that came out of ffmpeg.
+    //
+    // ffmpeg prints the destination URL on a failed connect, even at
+    // `-loglevel error`, and that URL carries the key. The tail of stderr is
+    // attached to errorOccurred() and shown in an error dialog, so without this
+    // the key can be screenshotted or pasted into a bug report. Static and pure
+    // so the redaction itself is testable.
+    static QString redactDestination(QString text, const QString& destination);
+
     // Parses an ffmpeg progress line (one of the ~1 Hz status lines printed to
     // stderr). Returns true on success and populates out-params; on failure
     // returns false and leaves them unchanged. Exposed for unit-testing the
