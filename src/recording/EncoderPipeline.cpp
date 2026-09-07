@@ -204,25 +204,30 @@ QStringList buildInputArgs(const OutputSettings& s, const QString& audioPipeName
         QStringLiteral("-f"),       QStringLiteral("rawvideo"),
         QStringLiteral("-pix_fmt"), QStringLiteral("bgra"),
         QStringLiteral("-s"),       srcRes,
-        // Stamp each frame with the time it arrived rather than with its index,
-        // and deliberately do NOT declare -r on this input.
+        // Declare the rate, and let the wall clock decide the timestamps.
         //
-        // rawvideo carries no timestamps of its own. Given -r, ffmpeg generates
-        // them by frame index and assumes every frame sits exactly 1/fps after
-        // the last, so a frame this application drops deletes time from the
-        // recording instead of leaving a gap. The file then plays fast and ends
-        // short: 144 seconds of wall clock produced a 109 second file, a
-        // quarter missing, which is a broken recording even though the
-        // container is valid.
+        // These are two different things and only the second was ever right
+        // here. -framerate tells the demuxer what rate this stream nominally
+        // runs at, which is what sets the time base; -r generates timestamps
+        // from the frame index, which is what destroys a recording. Given -r,
+        // ffmpeg assumes every frame sits exactly 1/fps after the last, so a
+        // frame this application drops deletes time from the file instead of
+        // leaving a gap: 144 seconds of wall clock produced a 109 second file,
+        // and a producer stalled for four seconds inside an eight second run
+        // produced 3.81 s. So -r stays gone.
         //
-        // -r also wins over this option, which is why it is gone rather than
-        // merely accompanied. Measured against ffmpeg 8.1.1 with a producer
-        // that stalls for four seconds in the middle of an eight second run:
-        // with -r the output was 3.81 s, without it exactly 8.00 s.
+        // -framerate does not do that, because -use_wallclock_as_timestamps
+        // still decides where each frame sits. Measured against ffmpeg 8.1.1
+        // with the same stalling producer: 7.93 s of an eight second run, the
+        // gap intact, against 3.81 s for -r.
         //
-        // The nominal rate the demuxer falls back to is cosmetic; the encoder
-        // takes its rate control from the output arguments, and -g is computed
-        // from OutputSettings rather than from this.
+        // Leaving the rate undeclared is not neutral either. ffmpeg falls back
+        // to 25, and that fallback was the output frame rate of every
+        // recording this application has ever made: arrivals closer together
+        // than 40 ms landed on one timestamp and -fps_mode vfr kept one of
+        // them. See declaredInputFrameRate.
+        QStringLiteral("-framerate"),
+        QString::number(EncoderPipeline::declaredInputFrameRate(s)),
         QStringLiteral("-use_wallclock_as_timestamps"), QStringLiteral("1"),
         QStringLiteral("-i"),       QStringLiteral("pipe:0"),
         QStringLiteral("-f"),       QStringLiteral("s16le"),
@@ -232,6 +237,13 @@ QStringList buildInputArgs(const OutputSettings& s, const QString& audioPipeName
     };
 }
 } // namespace
+
+int EncoderPipeline::declaredInputFrameRate(const OutputSettings& settings) {
+    // 1000 is an upper bound rather than a target: past it the time base gets
+    // fine enough that the rate control on the stream path has nothing left to
+    // spend per frame, and no sink here is clocked anywhere near it.
+    return std::clamp(settings.fps, 1, 1000);
+}
 
 QStringList EncoderPipeline::buildOutputArgs(const Target& target) const {
     const OutputSettings& s = target.output;
@@ -257,7 +269,10 @@ QStringList EncoderPipeline::buildOutputArgs(const Target& target) const {
     // lambda emits the correct flags for whichever encoder is selected.
     const EncoderRegistry::Encoder* enc = EncoderRegistry::find(s.videoCodec);
     if (enc) {
-        args << enc->buildArgs(s);
+        // A file holds quality and lets its size follow the content. It is
+        // also the only rate control that does not lose bitrate to the rate
+        // declared on the input, which a file has no reason to pay.
+        args << enc->buildArgs(s, EncoderRegistry::Destination::File);
     } else {
         // Unknown codec id — fall back to libx264-style args. Should never
         // happen via the UI (the combo is populated from the registry), but

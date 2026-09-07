@@ -38,7 +38,12 @@ QStringList StreamingPipeline::buildOutputArgs(const Target& target) const {
     // fix. We now consult the registry exactly the same way.
     const EncoderRegistry::Encoder* enc = EncoderRegistry::find(s.videoCodec);
     if (enc) {
-        args << enc->buildArgs(s);
+        // An ingest negotiated a bitrate and expects it whatever is on screen,
+        // so this path holds the rate and lets quality move. The rate control
+        // divides its budget by the frame rate declared on the input, which on
+        // this path is the same number the sink is clocked at, so the two
+        // agree by construction.
+        args << enc->buildArgs(s, EncoderRegistry::Destination::Stream);
     } else {
         // Unknown codec id — libx264-style fallback (matches the RecorderPipeline
         // fallback in EncoderPipeline::buildOutputArgs). Should never fire via

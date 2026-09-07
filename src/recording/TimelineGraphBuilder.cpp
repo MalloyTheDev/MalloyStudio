@@ -217,7 +217,7 @@ RenderGraph TimelineGraphBuilder::build(const QJsonArray& timeline, const Output
     // Per-codec arguments come from the same registry the recording and
     // streaming paths use, so a render honours the encoder the user picked.
     if (const EncoderRegistry::Encoder* encoder = EncoderRegistry::find(output.videoCodec)) {
-        g.outputArgs << encoder->buildArgs(output);
+        g.outputArgs << encoder->buildArgs(output, EncoderRegistry::Destination::File);
     } else {
         return fail(QStringLiteral("The configured encoder is not available: %1")
                         .arg(output.videoCodec));

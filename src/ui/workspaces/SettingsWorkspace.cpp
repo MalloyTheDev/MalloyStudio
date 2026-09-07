@@ -261,9 +261,10 @@ QWidget* SettingsWorkspace::buildRecordingPage() {
     connect(m_encoderCombo, &QComboBox::currentIndexChanged, this,
             [this](int) { updateEncoderDerived(); });
 
-    // Rate control is derived from the encoder (hardware → CBR, software → CRF),
-    // so it's shown but not independently editable.
-    m_rateCombo = combo({tr("CRF (quality-based)"), tr("CBR (constant bitrate)")});
+    // Rate control is derived from where the media is going rather than chosen
+    // here, so it is shown and not editable. This page configures recordings,
+    // which hold quality; a stream holds the bitrate its ingest negotiated.
+    m_rateCombo = combo({tr("Constant quality"), tr("Constant bitrate")});
     m_rateCombo->setEnabled(false);
 
     // Storage + auto-action controls. Persisted via QSettings on Apply; the
@@ -292,10 +293,12 @@ QWidget* SettingsWorkspace::buildRecordingPage() {
     m_saveClip  = check(true);
 
     col->addWidget(settingsBlock(tr("Encoder"), {
-        {tr("Video encoder"), tr("Detected ffmpeg encoders. Hardware encoders use CBR; x264 uses CRF."),
+        {tr("Video encoder"), tr("Detected ffmpeg encoders. Hardware ones encode on the GPU."),
          m_encoderCombo},
-        {tr("Rate control"), tr("Follows the encoder — CBR for hardware, CRF for x264."), m_rateCombo},
-        {tr("CRF"), tr("Lower = higher quality. 18–23 is typical (x264 only)."), m_crfEdit},
+        {tr("Rate control"), tr("Recordings hold quality and let size follow the content. "
+                                "A stream holds the bitrate its service expects."), m_rateCombo},
+        {tr("Quality"), tr("Lower is better quality and a larger file. 18 to 23 is typical."),
+         m_crfEdit},
         {tr("Container"), tr("MKV survives crashes; MP4 is more compatible."), m_containerCombo},
     }));
 
@@ -937,11 +940,12 @@ QWidget* SettingsWorkspace::buildAIPage() {
 
 void SettingsWorkspace::updateEncoderDerived() {
     if (!m_encoderCombo) return;
-    const QString id = m_encoderCombo->currentData().toString();
-    const EncoderRegistry::Encoder* enc = EncoderRegistry::find(id);
-    const bool hw = enc && enc->isHardware;
-    if (m_rateCombo) m_rateCombo->setCurrentIndex(hw ? 1 : 0);  // CBR : CRF
-    if (m_crfEdit) m_crfEdit->setEnabled(!hw);                  // CRF only for x264
+    // A recording holds quality whichever encoder makes it, so this no longer
+    // depends on the encoder at all. The quality number applies to every
+    // encoder now as well: NVENC's -qp and libx264's -crf share the same 0 to
+    // 51 scale, so one setting means one thing.
+    if (m_rateCombo) m_rateCombo->setCurrentIndex(0);
+    if (m_crfEdit) m_crfEdit->setEnabled(true);
 }
 
 void SettingsWorkspace::loadRecordingSettings() {

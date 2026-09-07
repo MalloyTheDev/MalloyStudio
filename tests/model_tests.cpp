@@ -263,6 +263,12 @@ private slots:
     // Backend counters survive the sessions that produced them, so a source
     // that is restarted mid-run does not reset what the run captured.
     void captureStatsAccumulateAcrossSessionChurn();
+    // A file holds quality and a stream holds its bitrate, and the encoder
+    // arguments say so.
+    void rateControlFollowsWhereTheMediaIsGoing();
+    // The rawvideo input declares the rate the sink is clocked at, which is
+    // what stops ffmpeg quantising arrivals to its 25 fps default.
+    void inputDeclaresTheConfiguredFrameRate();
 };
 
 // Creates a placeholder media file so a clip can pass the graph builder's
@@ -699,9 +705,17 @@ void MalloyModelTests::encoderRegistryAlwaysListsLibx264() {
     // buildArgs for libx264 must emit -c:v libx264 and -crf
     const EncoderRegistry::Encoder* x264 = EncoderRegistry::find(QStringLiteral("libx264"));
     QVERIFY(x264 != nullptr);
-    const QStringList args = x264->buildArgs(OutputSettings{});
+    const QStringList args = x264->buildArgs(OutputSettings{},
+                                             EncoderRegistry::Destination::File);
     QVERIFY(args.contains(QStringLiteral("libx264")));
     QVERIFY(args.contains(QStringLiteral("-crf")));
+
+    // Software encoders hold quality either way, so the destination changes
+    // nothing for them. Stated as a test because it is a decision and not an
+    // oversight: CRF is already indifferent to the declared input rate.
+    const QStringList streamArgs = x264->buildArgs(OutputSettings{},
+                                                   EncoderRegistry::Destination::Stream);
+    QCOMPARE(streamArgs, args);
 }
 
 void MalloyModelTests::streamSettingsRtmpUrlTemplatesExpandCorrectly() {
@@ -1057,11 +1071,15 @@ void MalloyModelTests::encoderPipelineRespectsRegistryPerCodecArgs() {
     }
 
     // (2) Critical: the same libx264 preset name MUST NOT bleed through when
-    //     hevc_nvenc is selected. NVENC uses `-preset p4 -rc cbr -b:v`. The
-    //     registry's NVENC lambda hard-codes "p4", so even when the saved
+    //     hevc_nvenc is selected. NVENC uses its own `-preset p4` vocabulary.
+    //     The registry's NVENC lambda hard-codes "p4", so even when the saved
     //     OutputSettings.preset is "faster" the emitted args never contain
     //     "-preset faster". (Test only runs when NVENC is available — most
     //     CI machines won't have it, in which case we skip silently.)
+    //
+    //     This target is a file, so the rate control is a quality target and
+    //     not a bitrate. That distinction has its own test; what is checked
+    //     here is that a file never carries a bitrate it did not ask for.
     if (EncoderRegistry::find(QStringLiteral("hevc_nvenc"))) {
         t.output.videoCodec = QStringLiteral("hevc_nvenc");
         t.output.preset     = QStringLiteral("faster");   // libx264 vocab
@@ -1077,8 +1095,10 @@ void MalloyModelTests::encoderPipelineRespectsRegistryPerCodecArgs() {
         QVERIFY(idxPreset >= 0);
         QCOMPARE(args.at(idxPreset + 1), QStringLiteral("p4"));
         QVERIFY(args.contains(QStringLiteral("-rc")));
-        QVERIFY(args.contains(QStringLiteral("cbr")));
-        QVERIFY(args.contains(QStringLiteral("-b:v")));
+        QVERIFY(args.contains(QStringLiteral("constqp")));
+        QVERIFY(args.contains(QStringLiteral("-qp")));
+        QVERIFY(!args.contains(QStringLiteral("-b:v")));
+        QVERIFY(!args.contains(QStringLiteral("cbr")));
     }
 
     // (3) An unknown codec id (corrupted QSettings, future build) must still
@@ -3672,6 +3692,66 @@ void MalloyModelTests::captureStatsAccumulateAcrossSessionChurn() {
     FakeCaptureSession::created.last()->setStats(20, 1);
     QCOMPARE(controller.captureStats().framesProduced, 120);
     QCOMPARE(controller.captureStats().framesDropped, 8);
+}
+
+void MalloyModelTests::rateControlFollowsWhereTheMediaIsGoing() {
+    // Hardware encoders are only present when this machine has them, so the
+    // test asserts on whichever it finds rather than requiring one.
+    const EncoderRegistry::Encoder* hardware = nullptr;
+    for (const auto& e : EncoderRegistry::available()) {
+        if (e.isHardware) { hardware = &e; break; }
+    }
+    if (!hardware) {
+        QSKIP("no hardware encoder on this machine");
+    }
+
+    OutputSettings s;
+    s.bitrateKbps = 4500;
+    s.crf = 23;
+
+    const QStringList file = hardware->buildArgs(s, EncoderRegistry::Destination::File);
+    const QStringList stream = hardware->buildArgs(s, EncoderRegistry::Destination::Stream);
+
+    // A wire holds the bitrate it negotiated.
+    QVERIFY(stream.contains(QStringLiteral("-b:v")));
+    QVERIFY(stream.contains(QStringLiteral("4500k")));
+    QVERIFY(stream.contains(QStringLiteral("-maxrate")));
+
+    // A file holds quality instead, and asks for no bitrate at all. This is
+    // the half that matters for the input rate: a rate target divides its
+    // budget by the declared frame rate, and a quality target does not.
+    QVERIFY(!file.contains(QStringLiteral("-b:v")));
+    QVERIFY(!file.contains(QStringLiteral("-maxrate")));
+    QVERIFY(file.contains(QStringLiteral("23")));
+
+    // Both still name the codec and a pixel format.
+    QVERIFY(file.contains(QStringLiteral("-c:v")));
+    QVERIFY(file.contains(QStringLiteral("-pix_fmt")));
+    QVERIFY(stream.contains(QStringLiteral("-c:v")));
+}
+
+void MalloyModelTests::inputDeclaresTheConfiguredFrameRate() {
+    OutputSettings s;
+
+    s.fps = 120;
+    QCOMPARE(EncoderPipeline::declaredInputFrameRate(s), 120);
+    s.fps = 60;
+    QCOMPARE(EncoderPipeline::declaredInputFrameRate(s), 60);
+    s.fps = 24;
+    QCOMPARE(EncoderPipeline::declaredInputFrameRate(s), 24);
+
+    // Never zero or negative: that is not a legal time base, and a recording
+    // that refuses to start is a worse answer than one that runs at a sane
+    // rate.
+    s.fps = 0;
+    QCOMPARE(EncoderPipeline::declaredInputFrameRate(s), 1);
+    s.fps = -30;
+    QCOMPARE(EncoderPipeline::declaredInputFrameRate(s), 1);
+
+    // And bounded above, because this number is also what the stream path's
+    // rate control divides its budget by.
+    s.fps = 100000;
+    QCOMPARE(EncoderPipeline::declaredInputFrameRate(s), 1000);
 }
 
 QTEST_MAIN(MalloyModelTests)

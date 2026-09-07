@@ -7,7 +7,13 @@
 
 namespace {
 
-// Software encoder arg builders — CRF-based quality, no CBR.
+using Destination = EncoderRegistry::Destination;
+
+// Software encoder arg builders. CRF either way, and deliberately so: it
+// already holds quality constant and is indifferent to the frame rate declared
+// on the input, which is the property that matters here. Whether a stream
+// would be better served by a true constant bitrate from x264 is a separate
+// question about streams and not about this one.
 QStringList buildSoftwareArgs(const OutputSettings& s, const QString& codec) {
     return {
         QStringLiteral("-c:v"),    codec,
@@ -17,34 +23,64 @@ QStringList buildSoftwareArgs(const OutputSettings& s, const QString& codec) {
     };
 }
 
-// Hardware encoder arg builders — CBR with maxrate/bufsize.
-// All HW encoders need the bitrate instead of CRF.
+// Hardware encoder arg builders. A stream gets the constant bitrate its ingest
+// negotiated; a file gets a constant quality target, which is both what a
+// recording wants and the only mode that does not quietly lose bitrate to the
+// frame rate declared on the input. See EncoderRegistry::Destination.
+//
+// The quality number is the same one the software encoders use. NVENC's -qp
+// and libx264's -crf share the 0 to 51 scale, so one setting means the same
+// thing across encoders rather than needing a second one.
+//
+// Verified here on hevc_nvenc: constant quality held 1706 to 1888 kbps across
+// declared input rates from 60 to 100000, where CBR fell from 4508 to 178.
+// The QSV and AMF quality flags are the documented ones for those families and
+// are not verified on this machine, which is equally true of the CBR flags
+// they have always been given.
 QStringList buildHardwareArgs(const OutputSettings& s,
                                const QString& codec,
                                const QString& preset,
-                               bool           nvencStyle) {
+                               bool           nvencStyle,
+                               EncoderRegistry::Destination destination) {
     const int bitrate = std::max(500, s.bitrateKbps);
+    const int quality = std::clamp(s.crf, 0, 51);
+    const bool constantBitrate = destination == EncoderRegistry::Destination::Stream;
+
     if (nvencStyle) {
-        // NVENC uses -preset p1..p7, -rc, -b:v
-        return {
+        // NVENC uses -preset p1..p7 and its own -rc vocabulary.
+        QStringList args{
             QStringLiteral("-c:v"),    codec,
             QStringLiteral("-preset"), preset.isEmpty() ? QStringLiteral("p4") : preset,
-            QStringLiteral("-rc"),     QStringLiteral("cbr"),
-            QStringLiteral("-b:v"),    QStringLiteral("%1k").arg(bitrate),
-            QStringLiteral("-maxrate"), QStringLiteral("%1k").arg(bitrate),
-            QStringLiteral("-bufsize"), QStringLiteral("%1k").arg(bitrate * 2),
-            QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"),
         };
-    } else {
-        // QSV / AMF share the -b:v / -maxrate pattern
-        return {
-            QStringLiteral("-c:v"),    codec,
-            QStringLiteral("-b:v"),    QStringLiteral("%1k").arg(bitrate),
-            QStringLiteral("-maxrate"), QStringLiteral("%1k").arg(bitrate),
-            QStringLiteral("-bufsize"), QStringLiteral("%1k").arg(bitrate * 2),
-            QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"),
-        };
+        if (constantBitrate) {
+            args << QStringLiteral("-rc")      << QStringLiteral("cbr")
+                 << QStringLiteral("-b:v")     << QStringLiteral("%1k").arg(bitrate)
+                 << QStringLiteral("-maxrate") << QStringLiteral("%1k").arg(bitrate)
+                 << QStringLiteral("-bufsize") << QStringLiteral("%1k").arg(bitrate * 2);
+        } else {
+            args << QStringLiteral("-rc") << QStringLiteral("constqp")
+                 << QStringLiteral("-qp") << QString::number(quality);
+        }
+        args << QStringLiteral("-pix_fmt") << QStringLiteral("yuv420p");
+        return args;
     }
+
+    // QSV and AMF share the -b:v / -maxrate pattern for a rate target, and
+    // differ in how they ask for a quality target.
+    QStringList args{QStringLiteral("-c:v"), codec};
+    if (constantBitrate) {
+        args << QStringLiteral("-b:v")     << QStringLiteral("%1k").arg(bitrate)
+             << QStringLiteral("-maxrate") << QStringLiteral("%1k").arg(bitrate)
+             << QStringLiteral("-bufsize") << QStringLiteral("%1k").arg(bitrate * 2);
+    } else if (codec.endsWith(QStringLiteral("_qsv"))) {
+        args << QStringLiteral("-global_quality") << QString::number(quality);
+    } else {
+        args << QStringLiteral("-rc")   << QStringLiteral("cqp")
+             << QStringLiteral("-qp_i") << QString::number(quality)
+             << QStringLiteral("-qp_p") << QString::number(quality);
+    }
+    args << QStringLiteral("-pix_fmt") << QStringLiteral("yuv420p");
+    return args;
 }
 
 // Probe ffmpeg and return the set of available encoder IDs.
@@ -89,14 +125,14 @@ QList<EncoderRegistry::Encoder> buildRegistry() {
         QStringLiteral("libx264"),
         QStringLiteral("libx264 (H.264, software)"),
         false,
-        [](const OutputSettings& s) { return buildSoftwareArgs(s, QStringLiteral("libx264")); },
+        [](const OutputSettings& s, Destination) { return buildSoftwareArgs(s, QStringLiteral("libx264")); },
         QStringLiteral("zerolatency")
     });
     list.push_back({
         QStringLiteral("libx265"),
         QStringLiteral("libx265 (H.265/HEVC, software)"),
         false,
-        [](const OutputSettings& s) { return buildSoftwareArgs(s, QStringLiteral("libx265")); },
+        [](const OutputSettings& s, Destination) { return buildSoftwareArgs(s, QStringLiteral("libx265")); },
         QStringLiteral("zerolatency")
     });
 
@@ -109,9 +145,9 @@ QList<EncoderRegistry::Encoder> buildRegistry() {
             QStringLiteral("h264_nvenc"),
             QStringLiteral("NVIDIA NVENC H.264"),
             true,
-            [](const OutputSettings& s) {
+            [](const OutputSettings& s, Destination d) {
                 return buildHardwareArgs(s, QStringLiteral("h264_nvenc"),
-                                         QStringLiteral("p4"), true);
+                                         QStringLiteral("p4"), true, d);
             },
             QStringLiteral("ull")
         });
@@ -121,9 +157,9 @@ QList<EncoderRegistry::Encoder> buildRegistry() {
             QStringLiteral("hevc_nvenc"),
             QStringLiteral("NVIDIA NVENC H.265/HEVC"),
             true,
-            [](const OutputSettings& s) {
+            [](const OutputSettings& s, Destination d) {
                 return buildHardwareArgs(s, QStringLiteral("hevc_nvenc"),
-                                         QStringLiteral("p4"), true);
+                                         QStringLiteral("p4"), true, d);
             },
             QStringLiteral("ull")
         });
@@ -137,8 +173,8 @@ QList<EncoderRegistry::Encoder> buildRegistry() {
             QStringLiteral("h264_qsv"),
             QStringLiteral("Intel QSV H.264"),
             true,
-            [](const OutputSettings& s) {
-                return buildHardwareArgs(s, QStringLiteral("h264_qsv"), QString(), false);
+            [](const OutputSettings& s, Destination d) {
+                return buildHardwareArgs(s, QStringLiteral("h264_qsv"), QString(), false, d);
             },
             QString()
         });
@@ -148,8 +184,8 @@ QList<EncoderRegistry::Encoder> buildRegistry() {
             QStringLiteral("hevc_qsv"),
             QStringLiteral("Intel QSV H.265/HEVC"),
             true,
-            [](const OutputSettings& s) {
-                return buildHardwareArgs(s, QStringLiteral("hevc_qsv"), QString(), false);
+            [](const OutputSettings& s, Destination d) {
+                return buildHardwareArgs(s, QStringLiteral("hevc_qsv"), QString(), false, d);
             },
             QString()
         });
@@ -163,8 +199,8 @@ QList<EncoderRegistry::Encoder> buildRegistry() {
             QStringLiteral("h264_amf"),
             QStringLiteral("AMD AMF H.264"),
             true,
-            [](const OutputSettings& s) {
-                return buildHardwareArgs(s, QStringLiteral("h264_amf"), QString(), false);
+            [](const OutputSettings& s, Destination d) {
+                return buildHardwareArgs(s, QStringLiteral("h264_amf"), QString(), false, d);
             },
             QString()
         });
@@ -174,8 +210,8 @@ QList<EncoderRegistry::Encoder> buildRegistry() {
             QStringLiteral("hevc_amf"),
             QStringLiteral("AMD AMF H.265/HEVC"),
             true,
-            [](const OutputSettings& s) {
-                return buildHardwareArgs(s, QStringLiteral("hevc_amf"), QString(), false);
+            [](const OutputSettings& s, Destination d) {
+                return buildHardwareArgs(s, QStringLiteral("hevc_amf"), QString(), false, d);
             },
             QString()
         });

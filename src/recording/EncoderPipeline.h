@@ -122,6 +122,30 @@ public:
     // so the redaction itself is testable.
     static QString redactDestination(QString text, const QString& destination);
 
+    // The frame rate to declare on the rawvideo input, for a given output
+    // configuration.
+    //
+    // rawvideo carries no rate of its own, so ffmpeg has to be told one, and
+    // that number is the input's time base: arrivals closer together than
+    // 1/rate land on the same timestamp and `-fps_mode vfr` discards all but
+    // one of them. Left undeclared, ffmpeg assumes 25, which is why every
+    // recording this application made held 25 frames a second whatever it was
+    // configured for and whatever the capture side delivered. Measured: 600
+    // frames in at 60 a second produced 250 out, and 597 out once a rate was
+    // declared.
+    //
+    // The configured output rate is the right number to declare because it is
+    // the rate this application's sink is clocked at, so nothing it produces
+    // can legitimately arrive faster. Declaring more than that would not add
+    // any frames and would cost bitrate on the stream path, where the rate
+    // control divides its budget by exactly this number.
+    //
+    // Clamped because it also has to be a legal time base: a zero or negative
+    // rate from a corrupted setting would make ffmpeg refuse the input
+    // outright, and the recording would fail at start rather than record at
+    // some wrong rate.
+    static int declaredInputFrameRate(const OutputSettings& settings);
+
     // Parses an ffmpeg progress line (one of the ~1 Hz status lines printed to
     // stderr). Returns true on success and populates out-params; on failure
     // returns false and leaves them unchanged. Exposed for unit-testing the
