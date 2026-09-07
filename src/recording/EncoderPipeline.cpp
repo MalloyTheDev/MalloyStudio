@@ -21,6 +21,12 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include <QMutex>
+#include <QQueue>
+#include <QWaitCondition>
+
+#include <atomic>
+
 // Tiny worker that blocks on ConnectNamedPipe so the GUI thread doesn't
 // stall while waiting for ffmpeg to open the audio side of the pipe.
 class PipeAcceptThread : public QThread {
@@ -39,6 +45,124 @@ protected:
     }
 private:
     void* m_pipe;
+};
+
+// Writes PCM to the audio pipe on its own thread.
+//
+// The pipe is created PIPE_WAIT, so WriteFile blocks once its buffer is full
+// and stays blocked until ffmpeg reads. Doing that on the GUI thread deadlocked
+// the application outright: onTickVideo runs on the same thread, so a blocked
+// audio write stopped video reaching ffmpeg's stdin, and ffmpeg then never got
+// far enough to drain the audio pipe that the GUI thread was waiting on.
+// Neither side could move, and both processes stayed alive looking healthy
+// while the recording silently stopped growing.
+//
+// Blocking is fine here, on a thread whose only job is this write. When the
+// encoder stalls for longer than the queue holds, audio is dropped rather than
+// allowed to accumulate: a gap in the recording beats an unbounded buffer, and
+// both beat a hung application.
+class AudioPipeWriter : public QThread {
+    Q_OBJECT
+public:
+    // ~4 s of 48 kHz stereo at the 20 ms chunk size the mixer emits. Reaching
+    // this means ffmpeg has not read audio for four seconds, which is a real
+    // stall rather than ordinary jitter.
+    static constexpr int kMaxQueuedChunks = 200;
+
+    explicit AudioPipeWriter(void* pipe, QObject* parent = nullptr)
+        : QThread(parent), m_pipe(pipe) {}
+
+    void enqueue(const QByteArray& pcm) {
+        QMutexLocker lock(&m_mutex);
+        if (m_stopping) return;
+        while (m_queue.size() >= kMaxQueuedChunks) {
+            m_queue.dequeue();
+            ++m_dropped;
+        }
+        m_queue.enqueue(pcm);
+        m_wake.wakeOne();
+    }
+
+    // Asks the thread to finish. Does not block: the thread may be inside a
+    // WriteFile that only returns once the pipe is broken or drained, so the
+    // caller must disconnect the pipe before joining. Joining first is what
+    // moved the original deadlock from the recording into the stop path.
+    void requestStop() {
+        QMutexLocker lock(&m_mutex);
+        m_stopping = true;
+        m_wake.wakeAll();
+    }
+
+    // Cancels a WriteFile this thread is currently blocked in.
+    //
+    // Needed because the owner cannot break the pipe to free us:
+    // DisconnectNamedPipe on a handle with a synchronous write pending from
+    // another thread waits for that write, which is itself waiting for the
+    // reader, so neither returns. CancelSynchronousIo targets the blocked
+    // thread directly and is the supported way out.
+    void unblockPendingWrite() {
+        HANDLE self = static_cast<HANDLE>(m_selfHandle.load());
+        if (self) CancelSynchronousIo(self);
+    }
+
+    ~AudioPipeWriter() override {
+        HANDLE self = static_cast<HANDLE>(m_selfHandle.exchange(nullptr));
+        if (self) CloseHandle(self);
+    }
+
+    int droppedChunks() const {
+        QMutexLocker lock(&m_mutex);
+        return m_dropped;
+    }
+
+protected:
+    void run() override {
+        // A real handle to this thread, so the owner can cancel a blocking
+        // write from outside. GetCurrentThread() alone is a pseudo-handle and
+        // means nothing to another thread.
+        HANDLE self = nullptr;
+        if (DuplicateHandle(GetCurrentProcess(), GetCurrentThread(),
+                            GetCurrentProcess(), &self, 0, FALSE,
+                            DUPLICATE_SAME_ACCESS)) {
+            m_selfHandle.store(self);
+        }
+
+        for (;;) {
+            QByteArray chunk;
+            {
+                QMutexLocker lock(&m_mutex);
+                while (m_queue.isEmpty() && !m_stopping)
+                    m_wake.wait(&m_mutex);
+                if (m_queue.isEmpty() && m_stopping) return;
+                chunk = m_queue.dequeue();
+            }
+
+            // Partial writes are possible on a byte-mode pipe, so keep going
+            // until the chunk is gone or the pipe fails.
+            qint64 offset = 0;
+            while (offset < chunk.size()) {
+                DWORD written = 0;
+                const BOOL ok = WriteFile(static_cast<HANDLE>(m_pipe),
+                                          chunk.constData() + offset,
+                                          static_cast<DWORD>(chunk.size() - offset),
+                                          &written, nullptr);
+                // A cancelled write reports ERROR_OPERATION_ABORTED and lands
+                // here too, which is the intended exit during shutdown.
+                if (!ok || written == 0) return;   // closed, broken or cancelled
+                offset += written;
+            }
+        }
+    }
+
+private:
+    void*               m_pipe;
+    // Set once at thread start; read by the owning thread to cancel a write.
+    std::atomic<void*>  m_selfHandle{nullptr};
+    mutable QMutex      m_mutex;
+    QWaitCondition      m_wake;
+    QQueue<QByteArray>  m_queue;
+    bool                m_stopping = false;
+    int                 m_dropped = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -259,6 +383,21 @@ void EncoderPipeline::stop() {
     // the server has queued — but if ffmpeg has already started tearing down
     // its audio decoder during shutdown, it stops reading and the flush
     // never returns, hanging the GUI thread indefinitely.
+    // Order matters. The writer may be blocked inside WriteFile waiting for a
+    // reader that is already shutting down, so ask it to stop, then break the
+    // pipe to make that call return, and only then join. Joining first hangs
+    // the GUI thread, which is the same failure this whole path exists to
+    // avoid and is why FlushFileBuffers is not called here either.
+    // Retire the writer completely before touching the pipe. Cancelling its
+    // in-flight write is what makes this join bounded; disconnecting first
+    // hangs, because the disconnect waits on the very write it would free.
+    if (m_audioWriter) {
+        m_audioWriter->requestStop();
+        m_audioWriter->unblockPendingWrite();
+        if (m_audioWriter->wait(3000)) delete m_audioWriter;
+        m_audioWriter = nullptr;   // leaked rather than freed if it never exits
+    }
+
     if (m_audioPipe) {
         DisconnectNamedPipe(static_cast<HANDLE>(m_audioPipe));
     }
@@ -291,6 +430,15 @@ void EncoderPipeline::stop() {
 }
 
 void EncoderPipeline::cleanup() {
+    // Defensive: stop() normally does this, but cleanup() is also reachable
+    // from failed starts where the writer may exist without a stop. Same
+    // ordering rule as stop(): break the pipe before joining.
+    if (m_audioWriter) {
+        m_audioWriter->requestStop();
+        m_audioWriter->unblockPendingWrite();
+        if (m_audioWriter->wait(3000)) delete m_audioWriter;
+        m_audioWriter = nullptr;
+    }
     if (m_audioPipe) {
         CloseHandle(static_cast<HANDLE>(m_audioPipe));
         m_audioPipe = nullptr;
@@ -386,22 +534,23 @@ void EncoderPipeline::onMixedSamples(QByteArray pcm) {
 }
 
 bool EncoderPipeline::writeAudioBytes(const QByteArray& pcm) {
-    if (!m_audioPipe || pcm.isEmpty()) return false;
-    DWORD written = 0;
-    BOOL ok = WriteFile(static_cast<HANDLE>(m_audioPipe),
-                        pcm.constData(),
-                        static_cast<DWORD>(pcm.size()),
-                        &written, nullptr);
-    if (!ok) {
-        // Don't tear down here — ffmpeg might just be slow. Surface on next stop.
-        return false;
-    }
+    if (!m_audioWriter || pcm.isEmpty()) return false;
+    // Hands off and returns immediately. The blocking WriteFile happens on the
+    // writer's own thread; see AudioPipeWriter for why that separation is not
+    // optional.
+    m_audioWriter->enqueue(pcm);
     return true;
 }
 
 void EncoderPipeline::onPipeConnected() {
     m_pipeReady = true;
     if (m_pipeWatchdog) m_pipeWatchdog->stop();   // cancel the 5 s timeout
+
+    // Only now is there a reader on the other end, so this is the earliest
+    // point a write can succeed.
+    m_audioWriter = new AudioPipeWriter(m_audioPipe);
+    m_audioWriter->start();
+
     if (m_audio) {
         connect(m_audio, &TimedPcmSource::pcmReady,
                 this,    &EncoderPipeline::onMixedSamples,

@@ -149,6 +149,10 @@ private:
     QThread*  m_pipeAcceptor = nullptr;
 
     void*             m_audioPipe = nullptr;  // HANDLE; void* to avoid windows.h in header
+    // Owns the blocking WriteFile on the audio pipe. Defined in the .cpp
+    // because it needs windows.h. Never write to the pipe from this class's
+    // own thread: see AudioPipeWriter for the deadlock that caused.
+    class AudioPipeWriter* m_audioWriter = nullptr;
     TimedFrameSource* m_frames = nullptr;
     TimedPcmSource*   m_audio  = nullptr;
 
