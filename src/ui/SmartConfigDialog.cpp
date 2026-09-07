@@ -1,5 +1,6 @@
 #include "ui/SmartConfigDialog.h"
 
+#include "audio/AudioController.h"
 #include "project/ByteSize.h"
 #include "ui/Theme.h"
 
@@ -11,7 +12,10 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSpinBox>
+#include <QTimer>
 #include <QVBoxLayout>
+
+#include <algorithm>
 
 namespace {
 
@@ -50,7 +54,7 @@ QWidget* proposalRow(const Recommendation::Note& note, const QString& currentVal
 }  // namespace
 
 SmartConfigDialog::SmartConfigDialog(const SystemProfile& profile, const OutputSettings& current,
-                                     QWidget* parent)
+                                     AudioController* audio, QWidget* parent)
     : QDialog(parent), m_profile(profile), m_current(current) {
     setWindowTitle(tr("Recommended settings"));
     resize(680, 640);
@@ -74,11 +78,17 @@ SmartConfigDialog::SmartConfigDialog(const SystemProfile& profile, const OutputS
         detected << tr("Display: %1 x %2").arg(profile.monitorWidth).arg(profile.monitorHeight);
     if (!profile.microphonesChecked)
         detected << tr("Microphone: not checked");
+    else if (profile.microphoneName.isEmpty())
+        detected << tr("Microphone: none set up");
+    else if (!profile.microphoneConnected)
+        detected << tr("Microphone: %1 (device unavailable)").arg(profile.microphoneName);
     else
-        detected << (profile.microphoneName.isEmpty()
-                         ? tr("Microphone: none detected")
-                         : tr("Microphone: %1").arg(profile.microphoneName));
-    detected << (profile.hasCamera ? tr("Camera: detected") : tr("Camera: none detected"));
+        detected << tr("Microphone: %1").arg(profile.microphoneName);
+
+    if (!profile.camerasChecked)
+        detected << tr("Camera: not checked");
+    else
+        detected << (profile.hasCamera ? tr("Camera: detected") : tr("Camera: none detected"));
     if (profile.freeDiskBytes > 0)
         detected << tr("Free space: %1 on %2")
                         .arg(formatByteSize(profile.freeDiskBytes), profile.recordingVolume);
@@ -113,6 +123,13 @@ SmartConfigDialog::SmartConfigDialog(const SystemProfile& profile, const OutputS
         rebuild();
     });
 
+    // ---- Microphone signal check ----------------------------------------
+    m_micWatch = text(QString(), QStringLiteral("dim"), 11);
+    m_micWatch->setWordWrap(true);
+    m_micWatch->setVisible(false);
+    outer->addWidget(m_micWatch);
+    watchMicrophone(audio);
+
     // ---- Proposals -------------------------------------------------------
     auto* scroll = new QScrollArea;
     scroll->setWidgetResizable(true);
@@ -132,6 +149,38 @@ SmartConfigDialog::SmartConfigDialog(const SystemProfile& profile, const OutputS
     outer->addWidget(buttons);
 
     rebuild();
+}
+
+void SmartConfigDialog::watchMicrophone(AudioController* audio) {
+    // Only worth doing when there is a connected input to watch. Without one
+    // the peak stays unobserved and the recommendation says nothing about it.
+    if (!audio || !m_profile.microphonesChecked
+        || m_profile.microphoneName.isEmpty() || !m_profile.microphoneConnected)
+        return;
+
+    constexpr int kWatchMs = 1500;   // long enough to cover a pause in speech
+
+    m_micWatch->setText(tr("Listening to %1 to check it is producing sound...")
+                            .arg(m_profile.microphoneName));
+    m_micWatch->setVisible(true);
+
+    connect(audio, &AudioController::levelsUpdated, this,
+            [this](const QString&, float peakL, float peakR) {
+        m_micPeak = std::max({m_micPeak, peakL, peakR});
+    });
+
+    QTimer::singleShot(kWatchMs, this, [this] {
+        // Record what was actually seen, then let the recommender decide what
+        // that means. Zero here is a measurement, not an absence of one.
+        m_profile.micPeakObserved = m_micPeak;
+        m_micWatch->setText(m_micPeak > 0.0f
+            ? tr("%1 is producing sound.").arg(m_profile.microphoneName)
+            : tr("No sound arrived from %1 in the last %2 seconds.")
+                  .arg(m_profile.microphoneName).arg(kWatchMs / 1000.0, 0, 'f', 1));
+        Theme::setTone(m_micWatch, m_micPeak > 0.0f ? QStringLiteral("dim")
+                                                    : QStringLiteral("warn"));
+        rebuild();
+    });
 }
 
 void SmartConfigDialog::rebuild() {

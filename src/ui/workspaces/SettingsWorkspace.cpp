@@ -614,7 +614,7 @@ QWidget* SettingsWorkspace::buildVideoPage() {
     auto* recommend = new QPushButton(tr("Recommend settings for this PC"));
     recommend->setCursor(Qt::PointingHandCursor);
     connect(recommend, &QPushButton::clicked, this, [this] {
-        SmartConfigDialog dlg(SystemProbe::detect(m_audio), OutputSettings::load(), this);
+        SmartConfigDialog dlg(SystemProbe::detect(m_audio), OutputSettings::load(), m_audio, this);
         if (dlg.exec() != QDialog::Accepted) return;
         dlg.chosenSettings().save();
         emit recordingSettingsApplied();   // MainWindow reloads and re-applies

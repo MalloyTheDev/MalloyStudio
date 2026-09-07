@@ -3230,6 +3230,10 @@ static SystemProfile makeStrongProfile() {
     p.monitorHeight = 1440;
     p.microphoneName = QStringLiteral("Shure SM7B");
     p.microphonesChecked = true;
+    p.microphoneConnected = true;
+    p.micPeakObserved = 0.35f;     // watched, and it was producing sound
+    p.camerasChecked = true;
+    p.hasCamera = true;
     p.freeDiskBytes = 500LL * 1024 * 1024 * 1024;
     p.recordingVolume = QStringLiteral("D:\\");
     p.uploadKbps = 20000;
@@ -3371,7 +3375,60 @@ void MalloyModelTests::smartConfigWarnsRatherThanGuessing() {
         SystemProfile p = makeWeakProfile();
         p.microphonesChecked = false;
         const Recommendation r = SettingsRecommender::recommend(p, current);
-        QVERIFY(r.warnings.filter(QStringLiteral("microphone")).isEmpty());
+        QVERIFY(r.warnings.filter(QStringLiteral("microphone"), Qt::CaseInsensitive).isEmpty());
+    }
+
+    // Nor must an unchecked machine be told it has no camera. Camera
+    // enumeration is slow and often has not run, and a cold cache is not
+    // evidence of absence.
+    {
+        SystemProfile p = makeWeakProfile();
+        p.camerasChecked = false;
+        p.hasCamera = false;
+        const Recommendation r = SettingsRecommender::recommend(p, current);
+        QVERIFY(r.warnings.filter(QStringLiteral("camera"), Qt::CaseInsensitive).isEmpty());
+
+        p.camerasChecked = true;   // now something looked, so saying so is fair
+        const Recommendation r2 = SettingsRecommender::recommend(p, current);
+        QCOMPARE(r2.warnings.filter(QStringLiteral("camera"), Qt::CaseInsensitive).size(), 1);
+    }
+
+    // A configured input whose device has gone away is a different problem
+    // from having no input at all, and gets a different warning.
+    {
+        SystemProfile p = makeWeakProfile();
+        p.microphonesChecked = true;
+        p.microphoneName = QStringLiteral("Focusrite Input 1");
+        p.microphoneConnected = false;
+        const Recommendation r = SettingsRecommender::recommend(p, current);
+        QCOMPARE(r.warnings.filter(QStringLiteral("not available")).size(), 1);
+        QVERIFY(r.warnings.filter(QStringLiteral("no microphone is set up"),
+                                  Qt::CaseInsensitive).isEmpty());
+    }
+
+    // The powered-off microphone on a live interface. Connected, enumerated,
+    // and producing nothing. This is only sayable because something watched
+    // the input; an unobserved peak must stay silent about it.
+    {
+        SystemProfile p = makeWeakProfile();
+        p.microphonesChecked = true;
+        p.microphoneName = QStringLiteral("Analogue 1 + 2");
+        p.microphoneConnected = true;
+
+        p.micPeakObserved = -1.0f;   // nobody listened
+        const Recommendation unwatched = SettingsRecommender::recommend(p, current);
+        QVERIFY(unwatched.warnings.filter(QStringLiteral("no sound arrived"),
+                                          Qt::CaseInsensitive).isEmpty());
+
+        p.micPeakObserved = 0.0f;    // listened, heard nothing
+        const Recommendation silent = SettingsRecommender::recommend(p, current);
+        QCOMPARE(silent.warnings.filter(QStringLiteral("no sound arrived"),
+                                        Qt::CaseInsensitive).size(), 1);
+
+        p.micPeakObserved = 0.4f;    // listened, heard something
+        const Recommendation working = SettingsRecommender::recommend(p, current);
+        QVERIFY(working.warnings.filter(QStringLiteral("no sound arrived"),
+                                        Qt::CaseInsensitive).isEmpty());
     }
 
     // A machine with no encoders at all must not propose an empty codec.

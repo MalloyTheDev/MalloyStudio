@@ -28,12 +28,29 @@ struct SystemProfile {
     int     cpuThreads = 0;
     int     monitorWidth = 0;
     int     monitorHeight = 0;
-    QString microphoneName;          // empty when nothing is connected
+    // The capture input the user has actually configured in the mixer, not
+    // merely the first one the machine enumerates. Empty when none is set up.
+    QString microphoneName;
     // Whether inputs were actually enumerated. Without this an unchecked
     // machine and one with no microphone look identical, and the user gets told
     // they have no microphone when nobody looked.
     bool    microphonesChecked = false;
+    // False when the configured input exists but its device has gone away.
+    bool    microphoneConnected = false;
+
+    // Loudest peak seen on the configured input while it was watched, 0 to 1.
+    //
+    // Negative means nobody watched. That distinction carries the whole point:
+    // an audio interface enumerates and reports itself connected whether or not
+    // a microphone is plugged into it and switched on, so "a device exists" is
+    // not the same claim as "sound is arriving". Only an observation over a
+    // window can tell those apart, and a single instantaneous read cannot,
+    // because silence between words reads identically to a dead input.
+    float   micPeakObserved = -1.0f;
+
     bool    hasCamera = false;
+    // As with microphones: nothing enumerated is not the same as none present.
+    bool    camerasChecked = false;
     qint64  freeDiskBytes = 0;
     QString recordingVolume;
 

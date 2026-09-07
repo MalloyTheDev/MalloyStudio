@@ -1,6 +1,7 @@
 #include "platform/SmartConfig.h"
 
 #include "audio/AudioController.h"
+#include "audio/AudioInput.h"
 #include "capture/CameraCapture.h"
 #include "capture/MonitorInfo.h"
 #include "project/ByteSize.h"
@@ -69,13 +70,23 @@ SystemProfile SystemProbe::detect(AudioController* audio) {
     }
 
     // Cameras come from the cache, which is warmed off the UI thread; probing
-    // here would block for seconds on a machine with no camera.
+    // here would block for seconds on a machine with no camera. An empty cache
+    // means "none present" only once something has actually looked.
+    p.camerasChecked = CameraCapture::hasEnumerated();
     p.hasCamera = !CameraCapture::cachedDevices().isEmpty();
 
     if (audio) {
         p.microphonesChecked = true;
-        const auto devices = audio->enumerateInputDevices();
-        if (!devices.isEmpty()) p.microphoneName = devices.first().second;
+        // The configured capture input, not the first device the machine
+        // happens to enumerate. Those differ on any machine with more than one
+        // input, and the configured one is what would actually be recorded.
+        // loopback inputs are desktop audio, not microphones.
+        for (const AudioInput& in : audio->inputs()) {
+            if (in.loopback) continue;
+            p.microphoneName = in.name;
+            p.microphoneConnected = in.connected;
+            break;
+        }
     }
 
     const QString dir = RecentRecordings::outputDir();
@@ -200,11 +211,31 @@ Recommendation SettingsRecommender::recommend(const SystemProfile& profile,
     rec.notes.push_back({QObject::tr("Audio bitrate"), describeKbps(160),
                          QObject::tr("Transparent for speech and music, and a small share of "
                                      "the total.")});
-    // Only say this when inputs were actually enumerated: claiming there is no
-    // microphone because nobody looked is worse than saying nothing.
-    if (profile.microphonesChecked && profile.microphoneName.isEmpty()) {
-        rec.warnings << QObject::tr("No microphone was detected, so only desktop audio will be "
-                                    "captured.");
+    // Three different facts, kept apart because they call for different
+    // actions and because saying the wrong one is worse than saying nothing.
+    if (profile.microphonesChecked) {
+        if (profile.microphoneName.isEmpty()) {
+            rec.warnings << QObject::tr("No microphone is set up, so only desktop audio will be "
+                                        "captured.");
+        } else if (!profile.microphoneConnected) {
+            rec.warnings << QObject::tr("%1 is set up but its device is not available, so nothing "
+                                        "would be captured from it.").arg(profile.microphoneName);
+        } else if (profile.micPeakObserved == 0.0f) {
+            // Only reachable after something watched the input for a while.
+            // An interface reports itself connected whether or not the
+            // microphone on it is switched on, and this is the difference.
+            rec.warnings << QObject::tr("%1 is connected but no sound arrived from it while it was "
+                                        "checked. If it is an interface, make sure the microphone "
+                                        "is switched on and phantom power is up.")
+                                .arg(profile.microphoneName);
+        }
+    }
+
+    // Said only when something looked. Cameras enumerate slowly, so the cache
+    // is often cold, and a cold cache is not evidence of an absent camera.
+    if (profile.camerasChecked && !profile.hasCamera) {
+        rec.warnings << QObject::tr("No camera was detected. Recording will capture the screen "
+                                    "and audio only.");
     }
 
     // ---- Keyframes -------------------------------------------------------
