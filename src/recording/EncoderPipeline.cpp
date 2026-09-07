@@ -28,24 +28,110 @@
 
 #include <atomic>
 
+// ---------------------------------------------------------------------------
+// One video frame on the wire.
+//
+// Two threads write frames: the transport, for every ordinary frame, and the
+// accept thread, for the frame that primes the pipe. They have to serialise
+// identically rather than merely similarly, because rawvideo carries no
+// framing whatsoever. The far end counts bytes and nothing else, so a frame
+// written by different rules than the rest does not corrupt only itself: it
+// shifts every frame after it for the length of the recording, and the result
+// looks like a decoder bug rather than a writer bug.
+// ---------------------------------------------------------------------------
+namespace {
+
+// Every byte, or a failure. A pipe may take a write in pieces, so a short
+// write is ordinary and only a refusal is fatal.
+bool writeAllToPipe(void* pipe, const char* data, qint64 bytes) {
+    qint64 offset = 0;
+    while (offset < bytes) {
+        DWORD written = 0;
+        const BOOL ok = WriteFile(static_cast<HANDLE>(pipe), data + offset,
+                                  static_cast<DWORD>(bytes - offset), &written, nullptr);
+        if (!ok || written == 0) return false;
+        offset += written;
+    }
+    return true;
+}
+
+// Serialises one frame into the pipe.
+//
+// Checked, never corrected. Converting here would hide a caller that had
+// stopped honouring the contract, and would spend a full frame of work on
+// whichever thread happened to be writing.
+bool writeFrameToPipe(void* pipe, const QImage& frame) {
+    if (!EncoderPipeline::conformsToPipeDeclaration(frame)) return false;
+
+    // Rows go one at a time only when Qt has padded them; a tightly packed
+    // image is a single call. Asked of the image rather than inferred from its
+    // total size, because the property that matters is the stride, and the
+    // stride is precisely what rawvideo has no way to express.
+    //
+    // constBits and constScanLine, never bits or scanLine: the non-const
+    // accessors detach, which would copy eight megabytes on the writing thread
+    // and defeat the point of handing the frame over instead of copying it.
+    const qint64 rowBytes = qint64(frame.width()) * (frame.depth() / 8);
+    if (EncoderPipeline::isTightlyPacked(frame))
+        return writeAllToPipe(pipe, reinterpret_cast<const char*>(frame.constBits()),
+                              rowBytes * frame.height());
+    for (int y = 0; y < frame.height(); ++y)
+        if (!writeAllToPipe(pipe, reinterpret_cast<const char*>(frame.constScanLine(y)),
+                            rowBytes))
+            return false;
+    return true;
+}
+
+}  // namespace
+
 // Tiny worker that blocks on ConnectNamedPipe so the GUI thread doesn't
 // stall while waiting for ffmpeg to open the audio side of the pipe.
 class PipeAcceptThread : public QThread {
     Q_OBJECT
 public:
-    explicit PipeAcceptThread(void* pipe, QObject* parent = nullptr)
-        : QThread(parent), m_pipe(pipe) {}
+    // Optionally writes a first payload as soon as the pipe is connected.
+    //
+    // ffmpeg opens its inputs in order and each open blocks until bytes
+    // arrive, so nothing reaches the second input until the first has
+    // produced some. Video is the first input, and its writer is not created
+    // until the connection is signalled across to the thread that owns the
+    // pipeline; if that thread is busy, the first video byte is late, ffmpeg
+    // never gets as far as opening the audio pipe, and the audio watchdog
+    // fails a recording that was about to work.
+    //
+    // Priming here removes the dependency: the bytes go out on this thread,
+    // the moment there is a reader, whatever else is happening.
+    explicit PipeAcceptThread(void* pipe, QImage priming = {}, QObject* parent = nullptr)
+        : QThread(parent), m_pipe(pipe), m_priming(std::move(priming)) {}
 signals:
-    void connectedOk();
+    // Carries how many video frames this thread put on the wire before any
+    // transport existed: one for a primed pipe, zero otherwise. It travels with
+    // the signal rather than being read back off this object afterwards, so the
+    // transport can be opened with a truthful count without anyone having to
+    // reason about whether this thread is still alive.
+    void connectedOk(int primedFrames);
     void connectFailed();
 protected:
     void run() override {
         BOOL ok = ConnectNamedPipe(static_cast<HANDLE>(m_pipe), nullptr);
-        if (ok || GetLastError() == ERROR_PIPE_CONNECTED) emit connectedOk();
-        else emit connectFailed();
+        if (!ok && GetLastError() != ERROR_PIPE_CONNECTED) {
+            emit connectFailed();
+            return;
+        }
+        int primed = 0;
+        if (!m_priming.isNull()) {
+            // A failure here means the reader went away between connecting and
+            // reading, which the pipeline discovers on its own first write.
+            // Reporting nothing written keeps the frame count honest either
+            // way, and the warning says which of the two happened.
+            if (writeFrameToPipe(m_pipe, m_priming)) primed = 1;
+            else qWarning("video pipe priming frame was not written");
+        }
+        emit connectedOk(primed);
     }
 private:
-    void* m_pipe;
+    void*  m_pipe;
+    QImage m_priming;
 };
 
 // Writes PCM to the audio pipe on its own thread.
@@ -200,8 +286,13 @@ public:
     // encoder costs frames rather than memory.
     static constexpr int kMaxQueuedFrames = 3;
 
-    explicit VideoPipeWriter(void* pipe, QObject* parent = nullptr)
-        : QThread(parent), m_pipe(pipe) {}
+    // alreadyWritten is what reached the pipe before this thread existed: the
+    // priming frame, where there was one. It is counted here rather than
+    // ignored because it is a real completed write of real media, and a
+    // transport that reported everything except the first frame would make
+    // PIPE WRITE quietly false in every recording.
+    explicit VideoPipeWriter(void* pipe, int alreadyWritten = 0, QObject* parent = nullptr)
+        : QThread(parent), m_pipe(pipe), m_written(alreadyWritten) {}
 
     // Hands a frame to the transport, or refuses it. Never blocks: the caller
     // is the thread that composes, and it must not wait on a pipe.
@@ -220,16 +311,22 @@ public:
     // it; and this thread only ever reads through const accessors. Both halves
     // are required.
     bool trySubmit(QImage frame) {
-        // The format is a contract with ffmpeg, agreed when the arguments were
+        // The shape is a contract with ffmpeg, agreed when the arguments were
         // built, and a mismatch here would be encoded as though it matched.
-        // Refused rather than converted: converting would put a full frame of
+        // Refused rather than corrected: correcting would put a full frame of
         // work back on the thread this class exists to keep free, and would
         // hide a caller that had stopped honouring the contract.
-        if (frame.format() != EncoderPipeline::rawVideoFormat()) {
+        //
+        // Refusing at admission rather than at the write is what lets the
+        // caller count the frame as dropped and lets the writer treat any later
+        // failure as the pipe rather than the picture.
+        if (!EncoderPipeline::conformsToPipeDeclaration(frame)) {
             if (!m_warnedFormat.exchange(true)) {
-                qWarning("video transport refused a frame in format %d; the pipe "
-                         "was declared as %d",
-                         int(frame.format()), int(EncoderPipeline::rawVideoFormat()));
+                qWarning("video transport refused a %dx%d frame in format %d; the pipe "
+                         "was declared as %dx%d in format %d",
+                         frame.width(), frame.height(), int(frame.format()),
+                         int(MalloyCanvas::Width), int(MalloyCanvas::Height),
+                         int(EncoderPipeline::rawVideoFormat()));
             }
             return false;
         }
@@ -255,10 +352,15 @@ public:
         return total;
     }
 
-    // Frames this thread actually finished writing into the pipe. Distinct
-    // from what the pipeline accepted: acceptance is a promise to carry the
-    // frame, and this is the carrying. The gap between them is the transport's
-    // own backlog, which is the thing that used to be invisible.
+    // Video frames that have reached the pipe: every one this thread finished
+    // writing, plus the priming frame the accept thread wrote before this
+    // thread existed. Distinct from what the pipeline accepted, because
+    // acceptance is a promise to carry a frame and this is the carrying, and
+    // the gap between them is the transport's own backlog.
+    //
+    // The prime is counted here and deliberately not in ENC ACCEPT. It is a
+    // completed write of real media, so PIPE WRITE owes it; it never passed
+    // through the bounded admission this class offers, so ENC ACCEPT does not.
     int framesWritten() const { return m_written.load(std::memory_order_relaxed); }
 
     void requestStop() {
@@ -301,41 +403,14 @@ protected:
 
             FrameProfile::Scoped timing(FrameProfile::Stage::PipeWrite);
 
-            // Rows go one at a time only when Qt has padded them; a tightly
-            // packed image is one call. Asked of the image rather than inferred
-            // from its total size, because the property that matters is the
-            // stride and that is what rawvideo has no way to express.
-            //
-            // constBits and constScanLine, never bits or scanLine: the
-            // non-const accessors detach, which would copy eight megabytes on
-            // this thread and defeat the point of handing the frame over.
-            const qint64 rowBytes = qint64(frame.width()) * (frame.depth() / 8);
-            bool ok = true;
-            if (EncoderPipeline::isTightlyPacked(frame)) {
-                ok = writeAll(reinterpret_cast<const char*>(frame.constBits()),
-                              rowBytes * frame.height());
-            } else {
-                for (int y = 0; y < frame.height() && ok; ++y)
-                    ok = writeAll(reinterpret_cast<const char*>(frame.constScanLine(y)), rowBytes);
-            }
-            if (!ok) return;   // pipe closed, broken, or the write was cancelled
+            // Everything in the queue conformed at admission, so a refusal here
+            // is the pipe: closed, broken, or the write was cancelled.
+            if (!writeFrameToPipe(m_pipe, frame)) return;
             m_written.fetch_add(1, std::memory_order_relaxed);
         }
     }
 
 private:
-    bool writeAll(const char* data, qint64 bytes) {
-        qint64 offset = 0;
-        while (offset < bytes) {
-            DWORD written = 0;
-            const BOOL ok = WriteFile(static_cast<HANDLE>(m_pipe), data + offset,
-                                      static_cast<DWORD>(bytes - offset), &written, nullptr);
-            if (!ok || written == 0) return false;
-            offset += written;
-        }
-        return true;
-    }
-
     void*              m_pipe;
     std::atomic<bool>  m_warnedFormat{false};
     std::atomic<void*> m_selfHandle{nullptr};
@@ -415,6 +490,12 @@ QStringList buildInputArgs(const OutputSettings& s, const QString& videoPipeName
     };
 }
 } // namespace
+
+bool EncoderPipeline::conformsToPipeDeclaration(const QImage& frame) {
+    return frame.format() == rawVideoFormat()
+           && frame.width() == int(MalloyCanvas::Width)
+           && frame.height() == int(MalloyCanvas::Height);
+}
 
 bool EncoderPipeline::isTightlyPacked(const QImage& frame) {
     if (frame.isNull()) return false;
@@ -615,7 +696,62 @@ bool EncoderPipeline::start(const Target& target,
     //
     // ffmpeg opens its inputs in order and blocks on each until the server
     // side accepts, so both acceptors have to be waiting at once.
-    auto* videoAccept = new PipeAcceptThread(m_videoPipe);
+    // One frame, ready before ffmpeg is asked for anything, so its first input
+    // can open without waiting on this thread.
+    //
+    // This frame is media, not a transport trick. rawvideo has no bytes that
+    // are not picture, so anything written here becomes the recording's first
+    // frame, and ffmpeg stamps it from the wall clock when it reads it, the
+    // same as every other frame. It is therefore the current composition where
+    // there is one, and black only when nothing has been composed yet, which
+    // is what the tick below would have sent in the same situation.
+    //
+    // Its sequence is taken before the picture rather than after. If a new
+    // composition lands between the two reads, the sequence recorded is the
+    // older one and the next tick simply sends the newer picture; taking them
+    // the other way round could record a sequence newer than the frame
+    // actually sent and silently skip a composition.
+    //
+    // Counted as a write and not as an acceptance. It is a completed write of
+    // real media, so PIPE WRITE includes it once the transport opens; it never
+    // passed through the bounded admission that ENC ACCEPT describes, so that
+    // counter is left alone. The relationship is then stateable rather than
+    // approximate: PIPE WRITE is the ordinary completed writes plus a
+    // successful prime, and no recording carries a silent extra frame.
+    const quint64 primedSequence = m_frames ? m_frames->compositionSequence() : 0;
+    QImage priming = m_frames ? m_frames->currentFrame() : QImage();
+    if (priming.isNull()) {
+        priming = QImage(int(MalloyCanvas::Width), int(MalloyCanvas::Height),
+                         rawVideoFormat());
+        priming.fill(Qt::black);
+    } else {
+        // The same preparation an ordinary frame gets in onTickVideo, for the
+        // same reasons: the declared pixel format, and the declared resolution.
+        // Format alone is not enough, because a first frame of the right format
+        // and the wrong size is written without complaint and displaces every
+        // frame after it.
+        if (priming.format() != rawVideoFormat())
+            priming = priming.convertToFormat(rawVideoFormat());
+        if (priming.width() != int(MalloyCanvas::Width)
+            || priming.height() != int(MalloyCanvas::Height))
+            priming = priming.scaled(int(MalloyCanvas::Width), int(MalloyCanvas::Height),
+                                     Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+
+        // A private buffer, unconditionally. The queue can rely on its frames
+        // being fresh conversions that nothing else holds, but this one may be
+        // the compositor's own image where no conversion was needed, and it is
+        // about to be read on another thread while composition carries on.
+        // Detaching costs one frame copy, once, before the recording starts.
+        priming = priming.copy();
+    }
+
+    // The primed picture has been sent, so the tick that follows must not send
+    // it again. Without this the recording opens with the same image twice, a
+    // few milliseconds apart, because the sink still believed it had sent
+    // nothing.
+    m_lastSentSequence = primedSequence;
+
+    auto* videoAccept = new PipeAcceptThread(m_videoPipe, std::move(priming));
     m_videoAcceptor = videoAccept;
     connect(videoAccept, &PipeAcceptThread::connectedOk,
             this, &EncoderPipeline::onVideoPipeConnected);
@@ -974,10 +1110,11 @@ bool EncoderPipeline::writeAudioBytes(const QByteArray& pcm) {
     return true;
 }
 
-void EncoderPipeline::onVideoPipeConnected() {
+void EncoderPipeline::onVideoPipeConnected(int primedFrames) {
     // ffmpeg has opened the video pipe, so there is a reader and writing can
-    // begin. The writer owns the handle from here.
-    m_videoWriter = new VideoPipeWriter(m_videoPipe);
+    // begin. The writer owns the handle from here, and starts its count from
+    // the frame the accept thread already put on the wire.
+    m_videoWriter = new VideoPipeWriter(m_videoPipe, primedFrames);
     m_videoWriter->start();
 }
 

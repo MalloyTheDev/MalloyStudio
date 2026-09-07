@@ -149,6 +149,16 @@ public:
     // rather than trusted.
     static bool isTightlyPacked(const QImage& frame);
 
+    // Whether a frame is shaped the way the pipe was declared to ffmpeg. The
+    // resolution belongs in this test as much as the pixel format does: both
+    // are named in the arguments, and rawvideo can neither correct nor even
+    // notice a frame that disagrees with either. A frame of the right format
+    // and the wrong size is written without complaint and displaces every
+    // frame after it, which reads as a decoder fault rather than a writer one.
+    //
+    // Pure, for the same reason as the rule above.
+    static bool conformsToPipeDeclaration(const QImage& frame);
+
     // The frame rate to declare on the rawvideo input, for a given output
     // configuration.
     //
@@ -191,7 +201,7 @@ private slots:
     void onFfmpegError();
     void onFfmpegFinished(int exitCode);
     void onPipeConnected();
-    void onVideoPipeConnected();
+    void onVideoPipeConnected(int primedFrames);
     void onPipeConnectFailed();
     void onFfmpegStderrReady();
 

@@ -279,6 +279,7 @@ private slots:
     void compositionFollowsConsumersNotPaintEvents();
     // rawvideo cannot express a stride, so a padded frame has to be sent a
     // row at a time rather than as one block.
+    void rawVideoDeclarationCoversSizeNotOnlyFormat();
     void rawVideoNeedsTightlyPackedRows();
     // A settings control must be able to show the rate that is stored,
     // because the page writes back what it shows.
@@ -3856,6 +3857,39 @@ void MalloyModelTests::compositionFollowsConsumersNotPaintEvents() {
     // watching. This is what keeps a repaint from being mistaken for new media.
     QVERIFY(!PreviewWidget::compositionRequired(true, true, true, /*contentAdvanced=*/false));
     QVERIFY(!PreviewWidget::compositionRequired(false, false, true, false));
+}
+
+void MalloyModelTests::rawVideoDeclarationCoversSizeNotOnlyFormat() {
+    // What the arguments promise ffmpeg: this format, at this resolution.
+    QImage good(int(MalloyCanvas::Width), int(MalloyCanvas::Height),
+                EncoderPipeline::rawVideoFormat());
+    QVERIFY(EncoderPipeline::conformsToPipeDeclaration(good));
+
+    // The format alone is not the contract. rawvideo has no framing, so the
+    // far end counts bytes: a frame of the right format and the wrong size is
+    // accepted silently and shifts every frame after it for the rest of the
+    // recording. This is the case the priming path got wrong by fixing up the
+    // format and not the size.
+    QImage tooSmall(1280, 720, EncoderPipeline::rawVideoFormat());
+    QVERIFY2(!EncoderPipeline::conformsToPipeDeclaration(tooSmall),
+             "a frame of the declared format but the wrong size must be "
+             "refused: it displaces every frame after it");
+
+    QImage tooWide(int(MalloyCanvas::Width) + 1, int(MalloyCanvas::Height),
+                   EncoderPipeline::rawVideoFormat());
+    QVERIFY(!EncoderPipeline::conformsToPipeDeclaration(tooWide));
+
+    // Nor is the size alone the contract. Premultiplied alpha is the trap
+    // here, because it is what the compositor paints onto and it differs from
+    // the declared format only in how the samples are interpreted.
+    QImage premultiplied(int(MalloyCanvas::Width), int(MalloyCanvas::Height),
+                         QImage::Format_ARGB32_Premultiplied);
+    QVERIFY2(!EncoderPipeline::conformsToPipeDeclaration(premultiplied),
+             "the compositor's own format is not the declared one, and would "
+             "darken every pixel with alpha below full");
+
+    // A null frame declares nothing and conforms to nothing.
+    QVERIFY(!EncoderPipeline::conformsToPipeDeclaration(QImage()));
 }
 
 void MalloyModelTests::rawVideoNeedsTightlyPackedRows() {
