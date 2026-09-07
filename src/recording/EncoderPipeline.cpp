@@ -210,6 +210,15 @@ public:
     // shared, so this transfers ownership without copying eight megabytes,
     // which is one full frame copy less than the old path paid on the GUI
     // thread.
+    //
+    // The invariant that makes that true: once a frame is accepted here, its
+    // pixel storage is not written to by anyone until the writer has finished
+    // with it. Sharing is not ownership, and if the producer kept a reference
+    // and modified it, Qt would detach and pay for the copy after all, on
+    // whichever thread touched it. Today the producer hands over the result of
+    // convertToFormat, which is a fresh buffer nothing else holds, and moves
+    // it; and this thread only ever reads through const accessors. Both halves
+    // are required.
     bool trySubmit(QImage frame) {
         QMutexLocker lock(&m_mutex);
         if (m_stopping) return false;
@@ -278,14 +287,20 @@ protected:
 
             FrameProfile::Scoped timing(FrameProfile::Stage::PipeWrite);
 
-            // Rows are written one by one only when Qt has padded them;
-            // normally the image is contiguous and goes in a single call.
-            const qint64 expected = qint64(frame.width()) * frame.height() * 4;
+            // Rows go one at a time only when Qt has padded them; a tightly
+            // packed image is one call. Asked of the image rather than inferred
+            // from its total size, because the property that matters is the
+            // stride and that is what rawvideo has no way to express.
+            //
+            // constBits and constScanLine, never bits or scanLine: the
+            // non-const accessors detach, which would copy eight megabytes on
+            // this thread and defeat the point of handing the frame over.
+            const qint64 rowBytes = qint64(frame.width()) * (frame.depth() / 8);
             bool ok = true;
-            if (frame.sizeInBytes() == expected) {
-                ok = writeAll(reinterpret_cast<const char*>(frame.constBits()), expected);
+            if (EncoderPipeline::isTightlyPacked(frame)) {
+                ok = writeAll(reinterpret_cast<const char*>(frame.constBits()),
+                              rowBytes * frame.height());
             } else {
-                const qint64 rowBytes = qint64(frame.width()) * 4;
                 for (int y = 0; y < frame.height() && ok; ++y)
                     ok = writeAll(reinterpret_cast<const char*>(frame.constScanLine(y)), rowBytes);
             }
@@ -385,6 +400,14 @@ QStringList buildInputArgs(const OutputSettings& s, const QString& videoPipeName
     };
 }
 } // namespace
+
+bool EncoderPipeline::isTightlyPacked(const QImage& frame) {
+    if (frame.isNull()) return false;
+    // depth() is in bits per pixel, and rawvideo wants exactly that many bytes
+    // per pixel per row with no padding between rows.
+    const qint64 rowBytes = qint64(frame.width()) * (frame.depth() / 8);
+    return frame.bytesPerLine() == rowBytes;
+}
 
 int EncoderPipeline::declaredInputFrameRate(const OutputSettings& settings) {
     // 1000 is an upper bound rather than a target: past it the time base gets

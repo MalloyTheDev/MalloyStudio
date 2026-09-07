@@ -277,6 +277,9 @@ private slots:
     // Composition happens because somebody consumes it, never because a
     // widget was painted. The rule that decides is this one.
     void compositionFollowsConsumersNotPaintEvents();
+    // rawvideo cannot express a stride, so a padded frame has to be sent a
+    // row at a time rather than as one block.
+    void rawVideoNeedsTightlyPackedRows();
 };
 
 // Creates a placeholder media file so a clip can pass the graph builder's
@@ -3848,6 +3851,41 @@ void MalloyModelTests::compositionFollowsConsumersNotPaintEvents() {
     // watching. This is what keeps a repaint from being mistaken for new media.
     QVERIFY(!PreviewWidget::compositionRequired(true, true, true, /*contentAdvanced=*/false));
     QVERIFY(!PreviewWidget::compositionRequired(false, false, true, false));
+}
+
+void MalloyModelTests::rawVideoNeedsTightlyPackedRows() {
+    // An ordinary four byte frame is naturally tight: 1920 pixels at 4 bytes
+    // is already aligned, which is why this has never gone wrong in practice.
+    QImage ordinary(1920, 1080, QImage::Format_ARGB32);
+    QVERIFY(EncoderPipeline::isTightlyPacked(ordinary));
+    QCOMPARE(ordinary.bytesPerLine(), 1920 * 4);
+
+    // An odd width in the same format is still tight, because four byte pixels
+    // never need padding to reach a four byte boundary.
+    QImage odd(1919, 1080, QImage::Format_ARGB32);
+    QVERIFY(EncoderPipeline::isTightlyPacked(odd));
+
+    // A padded image is what the row by row path exists for. Built over a
+    // buffer with a deliberately wider stride, since Qt will not produce one
+    // for this format on its own.
+    const int width = 640, height = 8;
+    const int paddedStride = width * 4 + 64;
+    QByteArray storage(paddedStride * height, 0);
+    QImage padded(reinterpret_cast<uchar*>(storage.data()), width, height,
+                  paddedStride, QImage::Format_ARGB32);
+    QVERIFY(!padded.isNull());
+    QCOMPARE(padded.bytesPerLine(), paddedStride);
+    QVERIFY2(!EncoderPipeline::isTightlyPacked(padded),
+             "a padded frame must not be written as one block: ffmpeg would "
+             "read the padding as picture and shear the image");
+
+    // A three byte format pads to a four byte boundary at odd widths, which is
+    // the case that would arise if the canvas ever stopped being 32 bit.
+    QImage rgb888(1919, 4, QImage::Format_RGB888);
+    QCOMPARE(rgb888.bytesPerLine() % 4, 0);
+    QVERIFY(!EncoderPipeline::isTightlyPacked(rgb888));
+
+    QVERIFY(!EncoderPipeline::isTightlyPacked(QImage()));
 }
 
 QTEST_MAIN(MalloyModelTests)

@@ -123,6 +123,19 @@ public:
     // so the redaction itself is testable.
     static QString redactDestination(QString text, const QString& destination);
 
+    // Whether a frame can go into a rawvideo stream as one contiguous block.
+    //
+    // rawvideo has no notion of stride: every row must be exactly width times
+    // the pixel size, with nothing between them. QImage is allowed to pad rows
+    // for alignment, and when it does, writing the buffer whole would feed
+    // ffmpeg the padding as if it were picture and shear the image. Four byte
+    // formats at ordinary widths are naturally tight, which is why this has
+    // never been seen, and is also why it would be found the hard way.
+    //
+    // Pure, so the rule can be checked against a deliberately padded image
+    // rather than trusted.
+    static bool isTightlyPacked(const QImage& frame);
+
     // The frame rate to declare on the rawvideo input, for a given output
     // configuration.
     //
