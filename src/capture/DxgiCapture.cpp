@@ -201,7 +201,7 @@ void DxgiCapture::run() {
                 // Skip rather than queue when the consumer is already behind.
                 // See inFlightCounter() for why this bound exists.
                 if (m_inFlight->load(std::memory_order_acquire) >= kMaxInFlightFrames) {
-                    m_droppedForBacklog.fetch_add(1, std::memory_order_relaxed);
+                    m_droppedBeforeComposition.fetch_add(1, std::memory_order_relaxed);
                 } else {
                     m_inFlight->fetch_add(1, std::memory_order_release);
                     emit frameReady(frame);

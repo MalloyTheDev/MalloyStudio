@@ -57,7 +57,7 @@ StudioStatusBar::StudioStatusBar(QWidget* parent) : QWidget(parent) {
     row->addWidget(makeStat(QStringLiteral("BITRATE"), &m_bitrate));
     // Losing frames is not the normal case, so this stays out of the way until
     // it happens rather than sitting at zero and training the eye to skip it.
-    m_dropStat = makeStat(QStringLiteral("DROPPED"), &m_drops);
+    m_dropStat = makeStat(QStringLiteral("ENC DROP"), &m_drops);
     m_dropStat->setVisible(false);
     row->addWidget(m_dropStat);
 
@@ -187,7 +187,7 @@ void StudioStatusBar::tickStats() {
 }
 
 void StudioStatusBar::setEncodeStats(int bitrateKbps, int droppedFrames, int encodeFps,
-                                     int backlogDrops) {
+                                     int composedFramesRejected) {
     Q_UNUSED(droppedFrames);   // ffmpeg's own count, shown by ControlsBar
 
     // ffmpeg reports several times a second and often omits a field on its
@@ -202,12 +202,15 @@ void StudioStatusBar::setEncodeStats(int bitrateKbps, int droppedFrames, int enc
                                 : kNoValue);
     setIfChanged(m_fps, encodeFps > 0 ? QString::number(encodeFps) : kNoValue);
 
-    // Frames this machine could not hand to the encoder. Silent frame loss is
-    // its own dishonesty, so once it starts the count stays on screen.
+    // Pictures this machine composed and could not hand to the encoder. Named
+    // ENC DROP rather than DROPPED so it cannot be confused with frames a
+    // capture backend lost before composition, which would read CAP DROP.
+    // Silent frame loss is its own dishonesty, so once it starts the count
+    // stays on screen.
     if (m_dropStat && m_drops) {
-        if (backlogDrops > 0) {
+        if (composedFramesRejected > 0) {
             m_dropStat->setVisible(true);
-            setIfChanged(m_drops, QString::number(backlogDrops));
+            setIfChanged(m_drops, QString::number(composedFramesRejected));
             Theme::setTone(m_drops, QStringLiteral("warn"));
         }
     }

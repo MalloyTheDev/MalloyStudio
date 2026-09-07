@@ -68,12 +68,17 @@ signals:
     // running). droppedFrames is 0 if ffmpeg's line omits a `drop=` token, and
     // encodeFps is 0 if it omits `fps=`. Slots may take fewer arguments.
     //
-    // backlogDrops is a different fact from droppedFrames and the two are kept
-    // apart deliberately: droppedFrames is what ffmpeg discarded, backlogDrops
-    // is what this application never handed it because ffmpeg was not keeping
-    // up. They have different causes and different fixes, so summing them
-    // would hide which one is happening.
-    void progress(int bitrateKbps, int droppedFrames, int encodeFps, int backlogDrops);
+    // Three different facts, kept apart deliberately, because they have
+    // different causes and different fixes and summing them hides which is
+    // happening:
+    //
+    //   droppedFrames           what ffmpeg itself discarded
+    //   composedFramesRejected  pictures this application composed and never
+    //                           handed over, because the encoder input was full
+    //   (backend counters)      frames a capture backend produced and lost
+    //                           before composition, reported by the backend
+    void progress(int bitrateKbps, int droppedFrames, int encodeFps,
+                  int composedFramesRejected);
 
 protected:
     // The audio pipe name (filled in by start()). Subclasses pass this to
@@ -143,17 +148,24 @@ public:
     Cadence m_cadence = Cadence::ConstantRate;
 
 public:
-    // Pure: whether a sink on this cadence should write the frame it is
+    // Pure: whether a sink on this cadence should write the picture it is
     // currently looking at. Exposed so the rule can be tested without a
     // running pipeline, because it is the rule and not the plumbing that
     // decides whether a recording is honest.
-    static bool shouldWriteFrame(Cadence cadence, quint64 sourceSequence,
-                                 quint64 lastSentSequence);
+    //
+    // cadenceDue is the sink's own clock saying a frame is owed. It is a
+    // separate input from the sequence on purpose: a constant-rate sink owns
+    // its presentation clock, and a source producing a new picture must never
+    // advance it. Today the timer only fires when a frame is due so this is
+    // always true, but writing the rule this way means an event-driven tick
+    // cannot quietly turn a capture event into a stream clock tick.
+    static bool shouldWriteFrame(Cadence cadence, quint64 compositionSequence,
+                                 quint64 lastSentSequence, bool cadenceDue);
 
 private:
 
-    // The sequence of the last frame actually written, so FollowSource can
-    // tell a new picture from the same one polled again.
+    // The composition sequence of the last frame actually written, so
+    // FollowSource can tell a new picture from the same one polled again.
     quint64 m_lastSentSequence = 0;
 
     // How much unwritten video may sit in QProcess's buffer before frames are
@@ -162,10 +174,15 @@ private:
     // buffer become unbounded; at 1080p it caps the backlog near 25 MB.
     static constexpr qint64 kMaxWriteBacklogFrames = 3;
 
-    // Frames this application never sent because the buffer was already full.
-    // This is media that existed and was lost, which is what progress()
-    // reports and what the status bar shows.
-    int m_backlogDrops = 0;
+    // Composed pictures that existed and were never handed to the encoder
+    // because its input buffer was already full. This is media loss, and it is
+    // what progress() reports and the status bar shows as ENC DROP.
+    //
+    // Distinct from frames a capture backend produced and lost before
+    // composition, which is the backend's own counter and would read CAP DROP.
+    // Keeping the two apart is what lets a future report say whether a
+    // recording lost content at the source or at the encoder.
+    int m_composedFramesRejected = 0;
 
     // Timer opportunities where the source had produced nothing new. Counted
     // separately and deliberately not reported as drops: no media existed, so

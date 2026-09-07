@@ -1580,38 +1580,62 @@ void MalloyModelTests::streamProgressLineParsesBitrateAndDrops() {
 
 void MalloyModelTests::sinkCadenceDecidesWhenAFrameIsDue() {
     using Cadence = EncoderPipeline::Cadence;
+    constexpr bool kDue    = true;
+    constexpr bool kNotDue = false;
     const quint64 unsequenced = TimedFrameSource::kUnsequenced;
 
-    // A stream owes its ingest a frame every tick. The screen standing still
-    // is not a reason to stop sending, so the latest picture is repeated and
-    // the answer is always yes.
-    QVERIFY(EncoderPipeline::shouldWriteFrame(Cadence::ConstantRate, 7, 7));
-    QVERIFY(EncoderPipeline::shouldWriteFrame(Cadence::ConstantRate, 8, 7));
-    QVERIFY(EncoderPipeline::shouldWriteFrame(Cadence::ConstantRate, unsequenced, 0));
+    // --- A file follows the composition ----------------------------------
+    // The same picture is not new media, and writing it again would be
+    // inventing content rather than recording it. The wall-clock timestamps on
+    // the input carry the gap instead.
+    QVERIFY(!EncoderPipeline::shouldWriteFrame(Cadence::FollowSource, 7, 7, kDue));
+    QVERIFY(EncoderPipeline::shouldWriteFrame(Cadence::FollowSource, 8, 7, kDue));
 
-    // A file follows the source. The same sequence is the same picture, and
-    // writing it again would invent media rather than capture it.
-    QVERIFY(!EncoderPipeline::shouldWriteFrame(Cadence::FollowSource, 7, 7));
-    QVERIFY(EncoderPipeline::shouldWriteFrame(Cadence::FollowSource, 8, 7));
+    // A gap in the sequence still means something new to record. Whatever was
+    // skipped was lost upstream, and refusing to write what did arrive would
+    // compound that loss rather than report it.
+    QVERIFY(EncoderPipeline::shouldWriteFrame(Cadence::FollowSource, 40, 7, kDue));
 
-    // The first frame of a run, before anything has been sent.
-    QVERIFY(EncoderPipeline::shouldWriteFrame(Cadence::FollowSource, 1, 0));
+    // The first frame of a run, before anything has been written.
+    QVERIFY(EncoderPipeline::shouldWriteFrame(Cadence::FollowSource, 1, 0, kDue));
 
-    // A source that does not sequence cannot say whether the picture is new,
-    // so every observation has to count as new. This is the behaviour that
-    // predates sequencing and it must not silently start dropping frames.
-    QVERIFY(EncoderPipeline::shouldWriteFrame(Cadence::FollowSource, unsequenced, unsequenced));
+    // --- A stream owns its presentation clock ----------------------------
+    // Due, and the picture has not moved: send the latest one again, because
+    // the ingest negotiated a rate and silence is not a frame.
+    QVERIFY(EncoderPipeline::shouldWriteFrame(Cadence::ConstantRate, 7, 7, kDue));
 
-    // And the contract's own default, so a source that ignores the new method
+    // Not due: send nothing, whatever the compositor has been doing.
+    QVERIFY(!EncoderPipeline::shouldWriteFrame(Cadence::ConstantRate, 7, 7, kNotDue));
+
+    // The case worth pinning down. A newly composed picture must NOT pull a
+    // stream frame forward. If a source event could make a frame due, the
+    // presentation clock would belong to the source rather than to the sink,
+    // and the negotiated cadence would drift with whatever the screen happened
+    // to be doing.
+    QVERIFY(!EncoderPipeline::shouldWriteFrame(Cadence::ConstantRate, 99, 7, kNotDue));
+
+    // --- Sources that do not sequence ------------------------------------
+    // Unsequenced means the source cannot say whether this picture is new, so
+    // every observation counts as new. This is the behaviour that predates
+    // sequencing, and it must not silently start dropping frames.
+    QVERIFY(EncoderPipeline::shouldWriteFrame(Cadence::FollowSource,
+                                              unsequenced, unsequenced, kDue));
+    // Even unsequenced, a stream still answers to its own clock.
+    QVERIFY(EncoderPipeline::shouldWriteFrame(Cadence::ConstantRate,
+                                              unsequenced, unsequenced, kDue));
+    QVERIFY(!EncoderPipeline::shouldWriteFrame(Cadence::ConstantRate,
+                                               unsequenced, unsequenced, kNotDue));
+
+    // And the contract's own default, so a source that ignores the method
     // keeps working.
     struct Unsequenced : TimedFrameSource {
         QImage currentFrame() override { return {}; }
         int nativeWidth() const override { return 1920; }
         int nativeHeight() const override { return 1080; }
     } src;
-    QCOMPARE(src.frameSequence(), TimedFrameSource::kUnsequenced);
+    QCOMPARE(src.compositionSequence(), TimedFrameSource::kUnsequenced);
     QVERIFY(EncoderPipeline::shouldWriteFrame(Cadence::FollowSource,
-                                              src.frameSequence(), 0));
+                                              src.compositionSequence(), 0, kDue));
 }
 
 void MalloyModelTests::machineLoadReportsUnknownRatherThanGuessing() {

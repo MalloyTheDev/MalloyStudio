@@ -56,14 +56,27 @@ public:
     // encoder may call this from a worker timer thread.
     virtual QImage currentFrame() = 0;
 
-    // Increments once per newly composed frame and never otherwise, so an
-    // unchanged value means the consumer has already seen this picture.
+    // Increments once per newly composed picture and never otherwise, so an
+    // unchanged value means the consumer has already seen this result.
+    //
+    // Composition, not capture, and the two are deliberately not the same
+    // number:
+    //
+    //   a new game frame            both advance
+    //   static game, moving overlay composition advances, capture does not
+    //   a selection handle moving   neither advances
+    //
+    // A recorder wants this one, because it asks whether the encoded picture
+    // would differ. Diagnosing a capture backend wants the other, because it
+    // asks whether a backend frame was produced and then lost. Naming this
+    // precisely now is cheaper than retrofitting the distinction once several
+    // capture backends depend on it.
     //
     // kUnsequenced means the source does not track this, and consumers must
     // then treat every observation as new, which is the behaviour that
     // predates this method.
     static constexpr quint64 kUnsequenced = 0;
-    virtual quint64 frameSequence() const { return kUnsequenced; }
+    virtual quint64 compositionSequence() const { return kUnsequenced; }
 
     // Native source dimensions — used by the encoder to size the raw video
     // stdin and the optional scale filter. The compositor canvas is 1920x1080

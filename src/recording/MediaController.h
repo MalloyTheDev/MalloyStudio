@@ -72,8 +72,8 @@ signals:
     // report, because the status bar is just as wrong sitting at a made-up
     // number while recording as while streaming. Slots may take fewer
     // arguments than the signal carries.
-    void streamingProgress(int bitrateKbps, int droppedFrames, int encodeFps, int backlogDrops);
-    void recordingProgress(int bitrateKbps, int droppedFrames, int encodeFps, int backlogDrops);
+    void streamingProgress(int bitrateKbps, int droppedFrames, int encodeFps, int composedFramesRejected);
+    void recordingProgress(int bitrateKbps, int droppedFrames, int encodeFps, int composedFramesRejected);
 
     void replaySaved(QString path);
 

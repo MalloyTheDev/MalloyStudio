@@ -321,7 +321,7 @@ bool EncoderPipeline::start(const Target& target,
     m_cadence = (m_target.kind == Target::Kind::File) ? Cadence::FollowSource
                                                       : Cadence::ConstantRate;
     m_lastSentSequence = 0;
-    m_backlogDrops = 0;
+    m_composedFramesRejected = 0;
     m_idleTicks = 0;
 
     QStringList args = buildInputArgs(m_target.output, m_audioPipeName);
@@ -493,18 +493,21 @@ void EncoderPipeline::cleanup() {
     m_pipeAcceptor = nullptr;
 }
 
-bool EncoderPipeline::shouldWriteFrame(Cadence cadence, quint64 sourceSequence,
-                                       quint64 lastSentSequence) {
-    // A stream owes its ingest a frame every tick regardless of whether the
-    // picture moved, so the latest one is repeated.
-    if (cadence == Cadence::ConstantRate) return true;
+bool EncoderPipeline::shouldWriteFrame(Cadence cadence, quint64 compositionSequence,
+                                       quint64 lastSentSequence, bool cadenceDue) {
+    // A stream owes its ingest a frame whenever its own clock says one is due,
+    // and owes nothing when it does not, whatever the compositor has been
+    // doing. The sequence is deliberately not consulted: repeating the latest
+    // picture keeps the negotiated rate, and letting a new picture pull a
+    // frame forward would put the presentation clock in the source's hands.
+    if (cadence == Cadence::ConstantRate) return cadenceDue;
 
-    // A source that does not sequence its frames cannot say whether this one
+    // A source that does not sequence its pictures cannot say whether this one
     // is new, so the only safe reading is that it is.
-    if (sourceSequence == TimedFrameSource::kUnsequenced) return true;
+    if (compositionSequence == TimedFrameSource::kUnsequenced) return true;
 
     // Otherwise the same sequence means the same picture, already recorded.
-    return sourceSequence != lastSentSequence;
+    return compositionSequence != lastSentSequence;
 }
 
 void EncoderPipeline::onTickVideo() {
@@ -527,8 +530,10 @@ void EncoderPipeline::onTickVideo() {
     // A stream skips this test: its ingest expects frames at the negotiated
     // rate whether or not anything moved, so the latest picture is repeated.
     {
-        const quint64 seq = m_frames->frameSequence();
-        if (!shouldWriteFrame(m_cadence, seq, m_lastSentSequence)) {
+        // The timer only fires when this sink's clock says a frame is due, so
+        // reaching here is what "due" means today.
+        const quint64 seq = m_frames->compositionSequence();
+        if (!shouldWriteFrame(m_cadence, seq, m_lastSentSequence, /*cadenceDue=*/true)) {
             ++m_idleTicks;
             return;
         }
@@ -565,7 +570,7 @@ void EncoderPipeline::onTickVideo() {
     // would freeze the preview and the interface.
     const qint64 canvasBytes = qint64(MalloyCanvas::Width) * MalloyCanvas::Height * 4;
     if (m_ffmpeg->bytesToWrite() > kMaxWriteBacklogFrames * canvasBytes) {
-        ++m_backlogDrops;
+        ++m_composedFramesRejected;
         return;
     }
 
@@ -779,7 +784,7 @@ bool EncoderPipeline::tryParseProgressLine(QStringView line,
 void EncoderPipeline::parseProgressLine(QStringView line) {
     int kbps = 0, drops = 0, fps = 0;
     if (tryParseProgressLine(line, &kbps, &drops, &fps))
-        emit progress(kbps, drops, fps, m_backlogDrops);
+        emit progress(kbps, drops, fps, m_composedFramesRejected);
 }
 
 // PipeAcceptThread is a QObject defined in this .cpp file; AUTOMOC generates

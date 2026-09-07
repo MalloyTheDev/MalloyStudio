@@ -49,7 +49,7 @@ public:
     // frame (same as cachedComposedFrame). Native dimensions are the canvas
     // constants since PreviewWidget always composes at canvas resolution.
     QImage currentFrame() override { return cachedComposedFrame(); }
-    quint64 frameSequence() const override { return m_composedSequence.load(); }
+    quint64 compositionSequence() const override { return m_composedSequence.load(); }
     int    nativeWidth()  const override { return static_cast<int>(MalloyCanvas::Width); }
     int    nativeHeight() const override { return static_cast<int>(MalloyCanvas::Height); }
 
