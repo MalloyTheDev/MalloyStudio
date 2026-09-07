@@ -33,10 +33,17 @@ PreviewWidget::PreviewWidget(SceneCollection* scenes, Role role, QWidget* parent
     p.setColor(QPalette::Window, QColor(30, 30, 30));
     setPalette(p);
 
-    connect(m_scenes, &SceneCollection::itemsChanged, this, qOverload<>(&PreviewWidget::update));
-    connect(m_scenes, &SceneCollection::currentChanged, this, [this](int){ update(); });
-    connect(m_scenes, &SceneCollection::programChanged, this, [this](int){ update(); });
-    connect(m_scenes, &SceneCollection::previewChanged, this, [this](int){ update(); });
+    // Content changes bump the sequence; itemSelectionChanged below does not,
+    // because selection handles are drawn in widget coordinates and never
+    // reach the composed frame.
+    connect(m_scenes, &SceneCollection::itemsChanged, this,
+            [this]{ markContentChanged(); update(); });
+    connect(m_scenes, &SceneCollection::currentChanged, this,
+            [this](int){ markContentChanged(); update(); });
+    connect(m_scenes, &SceneCollection::programChanged, this,
+            [this](int){ markContentChanged(); update(); });
+    connect(m_scenes, &SceneCollection::previewChanged, this,
+            [this](int){ markContentChanged(); update(); });
     connect(m_scenes, &SceneCollection::itemSelectionChanged, this, [this](int){ update(); });
     connect(m_scenes, &SceneCollection::collectionReset, this, [this]{
         m_imageCache.clear();
@@ -55,6 +62,7 @@ void PreviewWidget::setSceneName(const QString& name) {
 }
 
 void PreviewWidget::updateFrame(int adapterIndex, int outputIndex, QImage frame) {
+    markContentChanged();
     QMutexLocker lock(&m_frameMutex);
     m_frames.insert(frameKey(adapterIndex, outputIndex), std::move(frame));
     lock.unlock();
@@ -62,6 +70,7 @@ void PreviewWidget::updateFrame(int adapterIndex, int outputIndex, QImage frame)
 }
 
 void PreviewWidget::clearFrame(int adapterIndex, int outputIndex) {
+    markContentChanged();
     QMutexLocker lock(&m_frameMutex);
     m_frames.remove(frameKey(adapterIndex, outputIndex));
     lock.unlock();
@@ -69,6 +78,7 @@ void PreviewWidget::clearFrame(int adapterIndex, int outputIndex) {
 }
 
 void PreviewWidget::clearFrames() {
+    markContentChanged();
     QMutexLocker lock(&m_frameMutex);
     m_frames.clear();
     m_windowFrames.clear();
@@ -78,6 +88,7 @@ void PreviewWidget::clearFrames() {
 }
 
 void PreviewWidget::updateWindowFrame(quintptr hwnd, QImage frame) {
+    markContentChanged();
     QMutexLocker lock(&m_frameMutex);
     m_windowFrames.insert(hwnd, std::move(frame));
     lock.unlock();
@@ -85,6 +96,7 @@ void PreviewWidget::updateWindowFrame(quintptr hwnd, QImage frame) {
 }
 
 void PreviewWidget::clearWindowFrame(quintptr hwnd) {
+    markContentChanged();
     QMutexLocker lock(&m_frameMutex);
     m_windowFrames.remove(hwnd);
     lock.unlock();
@@ -92,6 +104,7 @@ void PreviewWidget::clearWindowFrame(quintptr hwnd) {
 }
 
 void PreviewWidget::updateCameraFrame(QString deviceId, QImage frame) {
+    markContentChanged();
     QMutexLocker lock(&m_frameMutex);
     m_cameraFrames.insert(deviceId, std::move(frame));
     lock.unlock();
@@ -99,6 +112,7 @@ void PreviewWidget::updateCameraFrame(QString deviceId, QImage frame) {
 }
 
 void PreviewWidget::clearCameraFrame(QString deviceId) {
+    markContentChanged();
     QMutexLocker lock(&m_frameMutex);
     m_cameraFrames.remove(deviceId);
     lock.unlock();
@@ -119,6 +133,7 @@ void PreviewWidget::beginFadeTransition(QImage from, int durationMs) {
     m_transTimeline->setEasingCurve(QEasingCurve::InOutSine);
     connect(m_transTimeline, &QTimeLine::valueChanged, this, [this](qreal v) {
         m_transFactor = static_cast<float>(v);
+        markContentChanged();   // the blend itself changes the picture
         update();
     });
     connect(m_transTimeline, &QTimeLine::finished, this, &PreviewWidget::cancelTransition);
@@ -246,6 +261,12 @@ void PreviewWidget::paintEvent(QPaintEvent*) {
     if (m_role == Role::Program) {
         QMutexLocker lock(&m_composedMutex);
         m_composedFrame = composed;
+        // The composed frame is labelled with the content it represents, not
+        // with how many times the widget happened to repaint. A repaint caused
+        // by a selection handle moving produces the same picture, and a
+        // recorder that treated it as new would be inventing media.
+        m_composedSequence.store(m_contentSequence.load(std::memory_order_acquire),
+                                 std::memory_order_release);
     }
 
     // --- 3. Blit composed image to widget; selection handles drawn last

@@ -130,6 +130,10 @@ private slots:
     // Machine load: the pure percentage math, including every case where two
     // readings say nothing and the honest answer is to report unknown.
     void machineLoadReportsUnknownRatherThanGuessing();
+    // Capture cadence belongs to the source, output cadence to the sink. This
+    // is the rule that separates them, and getting it wrong either invents
+    // media or starves an ingest.
+    void sinkCadenceDecidesWhenAFrameIsDue();
     // v7 Tier 4: the audio.mute.<id> action dispatch toggles the matching
     // AudioController input's mute flag. Tests the contract MainWindow's
     // hotkey dispatcher relies on without spinning up the global hotkey
@@ -1572,6 +1576,42 @@ void MalloyModelTests::streamProgressLineParsesBitrateAndDrops() {
         QCOMPARE(drops, 99);
         QCOMPARE(fps, 99);
     }
+}
+
+void MalloyModelTests::sinkCadenceDecidesWhenAFrameIsDue() {
+    using Cadence = EncoderPipeline::Cadence;
+    const quint64 unsequenced = TimedFrameSource::kUnsequenced;
+
+    // A stream owes its ingest a frame every tick. The screen standing still
+    // is not a reason to stop sending, so the latest picture is repeated and
+    // the answer is always yes.
+    QVERIFY(EncoderPipeline::shouldWriteFrame(Cadence::ConstantRate, 7, 7));
+    QVERIFY(EncoderPipeline::shouldWriteFrame(Cadence::ConstantRate, 8, 7));
+    QVERIFY(EncoderPipeline::shouldWriteFrame(Cadence::ConstantRate, unsequenced, 0));
+
+    // A file follows the source. The same sequence is the same picture, and
+    // writing it again would invent media rather than capture it.
+    QVERIFY(!EncoderPipeline::shouldWriteFrame(Cadence::FollowSource, 7, 7));
+    QVERIFY(EncoderPipeline::shouldWriteFrame(Cadence::FollowSource, 8, 7));
+
+    // The first frame of a run, before anything has been sent.
+    QVERIFY(EncoderPipeline::shouldWriteFrame(Cadence::FollowSource, 1, 0));
+
+    // A source that does not sequence cannot say whether the picture is new,
+    // so every observation has to count as new. This is the behaviour that
+    // predates sequencing and it must not silently start dropping frames.
+    QVERIFY(EncoderPipeline::shouldWriteFrame(Cadence::FollowSource, unsequenced, unsequenced));
+
+    // And the contract's own default, so a source that ignores the new method
+    // keeps working.
+    struct Unsequenced : TimedFrameSource {
+        QImage currentFrame() override { return {}; }
+        int nativeWidth() const override { return 1920; }
+        int nativeHeight() const override { return 1080; }
+    } src;
+    QCOMPARE(src.frameSequence(), TimedFrameSource::kUnsequenced);
+    QVERIFY(EncoderPipeline::shouldWriteFrame(Cadence::FollowSource,
+                                              src.frameSequence(), 0));
 }
 
 void MalloyModelTests::machineLoadReportsUnknownRatherThanGuessing() {

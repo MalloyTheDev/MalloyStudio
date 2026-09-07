@@ -129,6 +129,33 @@ private:
     // video input never starves. See onTickVideo for why that matters.
     QImage m_blackFrame;
 
+public:
+    // How this sink decides when a frame is due.
+    //
+    // A file follows the source: a picture that has not changed is not new
+    // media, so nothing is written and the wall-clock timestamps carry the
+    // gap. A stream keeps its own cadence: an ingest has negotiated a rate and
+    // needs frames at that rate however seldom the screen changes, so the
+    // latest picture is repeated to fill the time. The same fps number means
+    // different things on the two paths, which is why they are not the same
+    // decision.
+    enum class Cadence { FollowSource, ConstantRate };
+    Cadence m_cadence = Cadence::ConstantRate;
+
+public:
+    // Pure: whether a sink on this cadence should write the frame it is
+    // currently looking at. Exposed so the rule can be tested without a
+    // running pipeline, because it is the rule and not the plumbing that
+    // decides whether a recording is honest.
+    static bool shouldWriteFrame(Cadence cadence, quint64 sourceSequence,
+                                 quint64 lastSentSequence);
+
+private:
+
+    // The sequence of the last frame actually written, so FollowSource can
+    // tell a new picture from the same one polled again.
+    quint64 m_lastSentSequence = 0;
+
     // How much unwritten video may sit in QProcess's buffer before frames are
     // dropped instead of queued, counted in whole frames. Three is enough to
     // ride out scheduling jitter and a slow encoder tick without letting the
@@ -136,8 +163,15 @@ private:
     static constexpr qint64 kMaxWriteBacklogFrames = 3;
 
     // Frames this application never sent because the buffer was already full.
-    // Reported through progress() so a run that cannot keep up says so.
+    // This is media that existed and was lost, which is what progress()
+    // reports and what the status bar shows.
     int m_backlogDrops = 0;
+
+    // Timer opportunities where the source had produced nothing new. Counted
+    // separately and deliberately not reported as drops: no media existed, so
+    // none was lost, and conflating the two is what made a healthy recording
+    // look like it was shedding nine frames in ten.
+    int m_idleTicks = 0;
 
     QString  m_ffmpegPath;
     Target   m_target;

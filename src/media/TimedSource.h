@@ -39,7 +39,15 @@ struct ReplayFrame {
     qint64     ptsUs = 0;
 };
 
-// Frame producer. Encoder pulls currentFrame() on its render timer.
+// Frame producer.
+//
+// Capture cadence belongs to the source and output cadence belongs to the
+// sink, and they are not the same number. A screen that changes twelve times a
+// second produces twelve frames however often a consumer asks, and a stream
+// that has negotiated sixty needs sixty however seldom the screen changes.
+// frameSequence() is what lets a consumer tell those apart: it distinguishes a
+// new frame from the same frame observed again, so a recording can follow the
+// source while a stream keeps its own cadence.
 class TimedFrameSource {
 public:
     virtual ~TimedFrameSource() = default;
@@ -47,6 +55,15 @@ public:
     // The most recently composed canvas frame. Must be thread-safe; the
     // encoder may call this from a worker timer thread.
     virtual QImage currentFrame() = 0;
+
+    // Increments once per newly composed frame and never otherwise, so an
+    // unchanged value means the consumer has already seen this picture.
+    //
+    // kUnsequenced means the source does not track this, and consumers must
+    // then treat every observation as new, which is the behaviour that
+    // predates this method.
+    static constexpr quint64 kUnsequenced = 0;
+    virtual quint64 frameSequence() const { return kUnsequenced; }
 
     // Native source dimensions — used by the encoder to size the raw video
     // stdin and the optional scale filter. The compositor canvas is 1920x1080

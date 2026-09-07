@@ -5,6 +5,8 @@
 #include <QHash>
 #include <QImage>
 #include <QMutex>
+
+#include <atomic>
 #include <QQueue>
 #include <QRectF>
 #include <QString>
@@ -47,6 +49,7 @@ public:
     // frame (same as cachedComposedFrame). Native dimensions are the canvas
     // constants since PreviewWidget always composes at canvas resolution.
     QImage currentFrame() override { return cachedComposedFrame(); }
+    quint64 frameSequence() const override { return m_composedSequence.load(); }
     int    nativeWidth()  const override { return static_cast<int>(MalloyCanvas::Width); }
     int    nativeHeight() const override { return static_cast<int>(MalloyCanvas::Height); }
 
@@ -113,6 +116,15 @@ private:
     // Cached most-recent composed canvas (post-overlay). Recorder pulls.
     mutable QMutex m_composedMutex;
     QImage         m_composedFrame;
+    // Sequence of the content currently composed, so the encoder can tell a
+    // newly composed picture from the same one polled again.
+    std::atomic<quint64> m_composedSequence{1};
+    // Bumped by whatever changes what the canvas would look like: a captured
+    // frame arriving, a scene edit, a transition step. Not bumped by repaints
+    // that leave the picture identical.
+    std::atomic<quint64> m_contentSequence{1};
+
+    void markContentChanged() { m_contentSequence.fetch_add(1, std::memory_order_release); }
 
     // Replay buffer (Program role only). JPEG ring capped by time span.
     QTimer*             m_replayTimer   = nullptr;

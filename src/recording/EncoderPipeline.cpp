@@ -317,6 +317,13 @@ bool EncoderPipeline::start(const Target& target,
     m_audioPipe = pipe;
 
     // --- 2. Spawn ffmpeg with common input args + subclass-supplied output args ---
+    // A file follows the source; a stream holds its own cadence. See Cadence.
+    m_cadence = (m_target.kind == Target::Kind::File) ? Cadence::FollowSource
+                                                      : Cadence::ConstantRate;
+    m_lastSentSequence = 0;
+    m_backlogDrops = 0;
+    m_idleTicks = 0;
+
     QStringList args = buildInputArgs(m_target.output, m_audioPipeName);
     args << buildOutputArgs(m_target);
 
@@ -486,6 +493,20 @@ void EncoderPipeline::cleanup() {
     m_pipeAcceptor = nullptr;
 }
 
+bool EncoderPipeline::shouldWriteFrame(Cadence cadence, quint64 sourceSequence,
+                                       quint64 lastSentSequence) {
+    // A stream owes its ingest a frame every tick regardless of whether the
+    // picture moved, so the latest one is repeated.
+    if (cadence == Cadence::ConstantRate) return true;
+
+    // A source that does not sequence its frames cannot say whether this one
+    // is new, so the only safe reading is that it is.
+    if (sourceSequence == TimedFrameSource::kUnsequenced) return true;
+
+    // Otherwise the same sequence means the same picture, already recorded.
+    return sourceSequence != lastSentSequence;
+}
+
 void EncoderPipeline::onTickVideo() {
     if (!m_running || !m_frames || !m_ffmpeg) return;
     if (m_ffmpeg->state() != QProcess::Running) return;
@@ -497,6 +518,23 @@ void EncoderPipeline::onTickVideo() {
     // stall the whole process before its transcode loop, silently, for the
     // length of the run. RingTimedFrameSource pre-fills a black frame for the
     // same reason.
+    // Nothing new to record. The timer runs at the configured rate, but the
+    // desktop produces frames at its own, and writing the same picture again
+    // would be inventing media rather than capturing it. The wall-clock
+    // timestamps on the input carry the gap, so the recording still lasts as
+    // long as the session.
+    //
+    // A stream skips this test: its ingest expects frames at the negotiated
+    // rate whether or not anything moved, so the latest picture is repeated.
+    {
+        const quint64 seq = m_frames->frameSequence();
+        if (!shouldWriteFrame(m_cadence, seq, m_lastSentSequence)) {
+            ++m_idleTicks;
+            return;
+        }
+        m_lastSentSequence = seq;
+    }
+
     QImage frame = m_frames->currentFrame();
     if (frame.isNull()) {
         if (m_blackFrame.isNull()) {
