@@ -1,4 +1,7 @@
 #include "WgcCaptureSession.h"
+#include "platform/FrameProfile.h"
+
+#include <chrono>
 
 #include <QMetaObject>
 
@@ -35,9 +38,20 @@ void WgcCaptureSession::startCapture() {
             // handing the frame across: the whole frame is moved into the
             // posted call so that its slot in the bounded handoff lives
             // exactly as long as the delivery does.
+            //
+            // The stamp measures how long the frame then waits for the GUI
+            // thread to come and get it, which is congestion on that thread
+            // rather than any property of capture.
+            const auto postedAt = std::chrono::steady_clock::now();
             QMetaObject::invokeMethod(
                 this,
-                [this, delivered = std::move(frame)]() mutable {
+                [this, postedAt, delivered = std::move(frame)]() mutable {
+                    if (FrameProfile::enabled()) {
+                        FrameProfile::record(
+                            FrameProfile::Stage::HandoffToGui,
+                            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::steady_clock::now() - postedAt).count());
+                    }
                     emit frameReady(delivered.image);
                 },
                 Qt::QueuedConnection);

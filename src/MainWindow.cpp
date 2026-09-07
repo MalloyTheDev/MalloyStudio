@@ -29,6 +29,7 @@
 #include "model/SceneCollection.h"
 #include "model/Scene.h"
 #include "capture/CaptureBackend.h"
+#include "platform/FrameProfile.h"
 #include "capture/CaptureController.h"
 #include "project/ProjectDocument.h"
 #include "project/ClipsRegistry.h"
@@ -94,6 +95,21 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // Apply persisted replay buffer duration to both live sources at startup.
     m_preview->setReplayBufferSeconds(m_outputSettings.replayBufferSeconds);
     m_audio->setReplayBufferSeconds(m_outputSettings.replayBufferSeconds);
+
+    // One line a second describing the stages of the frame path, for as
+    // long as profiling is on. It lives here rather than in the recording
+    // pipeline because capture, composition and the preview blit all happen
+    // whether or not a recording is running, and a run with no recording at
+    // all is one of the measurements worth taking.
+    if (FrameProfile::enabled()) {
+        auto* series = new QTimer(this);
+        series->setInterval(1000);
+        connect(series, &QTimer::timeout, this, [] {
+            const QString line = FrameProfile::seriesLine();
+            if (!line.isEmpty()) qInfo("frame stages: %s", qPrintable(line));
+        });
+        series->start();
+    }
 
     QSettings settings;
     restoreGeometry(settings.value("geometry").toByteArray());

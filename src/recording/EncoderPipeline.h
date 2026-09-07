@@ -2,6 +2,7 @@
 #include "capture/ICaptureSource.h"
 #include "recording/OutputSettings.h"
 
+#include <QElapsedTimer>
 #include <QImage>
 
 #include <QByteArray>
@@ -260,6 +261,10 @@ private:
     // look like it was shedding nine frames in ten.
     int m_idleTicks = 0;
 
+    // Wall clock at the previous video tick, so the gap between what the
+    // timer asked for and what it got can be recorded. That gap is how
+    // starved the event loop this shares with composition and painting is.
+    QElapsedTimer m_tickClock;
     std::function<CaptureStats()> m_sourceStats;
     // The capture totals as they stood when this run began, so the summary can
     // report what this run captured rather than what the application has

@@ -2,6 +2,7 @@
 #include <QProcessEnvironment>
 #include "media/TimedSource.h"
 #include "model/Canvas.h"
+#include "platform/FrameProfile.h"
 #include "recording/EncoderRegistry.h"
 
 #include <QDateTime>
@@ -346,6 +347,13 @@ bool EncoderPipeline::start(const Target& target,
     // run.
     m_sourceStatsAtStart = m_sourceStats ? m_sourceStats() : CaptureStats{};
 
+    // Stage timings belong to the run being measured, the same way the
+    // source counters do.
+    if (FrameProfile::enabled()) {
+        FrameProfile::reset();
+        m_tickClock.invalidate();
+    }
+
     QStringList args = buildInputArgs(m_target.output, m_audioPipeName);
     args << buildOutputArgs(m_target);
 
@@ -506,6 +514,9 @@ void EncoderPipeline::stop() {
           m_composedFramesAccepted, m_composedFramesRejected,
           m_cfrDuplicates, m_idleTicks);
 
+    if (FrameProfile::enabled())
+        qInfo("%s", qPrintable(FrameProfile::report()));
+
     const qint64 bytes = (m_target.kind == Target::Kind::File)
                               ? QFileInfo(m_target.destination).size()
                               : 0;
@@ -559,6 +570,21 @@ bool EncoderPipeline::shouldWriteFrame(Cadence cadence, quint64 compositionSeque
 void EncoderPipeline::onTickVideo() {
     if (!m_running || !m_frames || !m_ffmpeg) return;
     if (m_ffmpeg->state() != QProcess::Running) return;
+
+    if (FrameProfile::enabled()) {
+        // Recorded before the early returns below, because a tick that
+        // finds nothing new still says how regularly this thread is being
+        // reached.
+        if (m_tickClock.isValid())
+            FrameProfile::record(FrameProfile::Stage::TickGap,
+                                 m_tickClock.nsecsElapsed());
+        m_tickClock.start();
+        // What is already waiting for ffmpeg. The one number that says
+        // whether the far end is keeping up, sampled every tick rather
+        // than only when a frame is rejected.
+        FrameProfile::record(FrameProfile::Stage::EncoderBacklogBytes,
+                             m_ffmpeg->bytesToWrite());
+    }
 
     // A null frame must still produce bytes. ffmpeg opens its inputs in order
     // and blocks in avformat_open_input until the first bytes arrive on each
@@ -626,11 +652,16 @@ void EncoderPipeline::onTickVideo() {
     // so we must force a conversion to Format_ARGB32 (Qt's un-premultiplies
     // correctly) — otherwise colors with alpha < 255 darken in the recording.
     QImage out = frame;
-    if (out.format() != QImage::Format_ARGB32)
-        out = out.convertToFormat(QImage::Format_ARGB32);
-    if (out.width() != MalloyCanvas::Width || out.height() != MalloyCanvas::Height)
-        out = out.scaled(MalloyCanvas::Width, MalloyCanvas::Height,
-                         Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    {
+        // Un-premultiplying, and scaling when the canvas and the output
+        // disagree. Both allocate a full frame and walk every pixel.
+        FrameProfile::Scoped timing(FrameProfile::Stage::EncoderConvert);
+        if (out.format() != QImage::Format_ARGB32)
+            out = out.convertToFormat(QImage::Format_ARGB32);
+        if (out.width() != MalloyCanvas::Width || out.height() != MalloyCanvas::Height)
+            out = out.scaled(MalloyCanvas::Width, MalloyCanvas::Height,
+                             Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    }
 
     const qint64 frameBytes = qint64(MalloyCanvas::Width) * MalloyCanvas::Height * 4;
 
@@ -639,13 +670,20 @@ void EncoderPipeline::onTickVideo() {
     // can ship the whole image in one QProcess::write() call. This avoids
     // partial-write error spam if ffmpeg dies mid-frame.
     ++m_composedFramesAccepted;
-    if (out.sizeInBytes() == frameBytes) {
-        m_ffmpeg->write(reinterpret_cast<const char*>(out.constBits()), frameBytes);
-    } else {
-        // Defensive fall-back if Qt unexpectedly inserted scanline padding.
-        const int rowBytes = MalloyCanvas::Width * 4;
-        for (int y = 0; y < MalloyCanvas::Height; ++y) {
-            m_ffmpeg->write(reinterpret_cast<const char*>(out.constScanLine(y)), rowBytes);
+    {
+        // QProcess copies the frame into a buffer of its own and returns;
+        // the pipe write happens elsewhere. So this is a memcpy of eight
+        // megabytes, not a wait on ffmpeg, and separating the two is the
+        // point of measuring it next to the backlog above.
+        FrameProfile::Scoped timing(FrameProfile::Stage::EncoderWrite);
+        if (out.sizeInBytes() == frameBytes) {
+            m_ffmpeg->write(reinterpret_cast<const char*>(out.constBits()), frameBytes);
+        } else {
+            // Defensive fall-back if Qt unexpectedly inserted scanline padding.
+            const int rowBytes = MalloyCanvas::Width * 4;
+            for (int y = 0; y < MalloyCanvas::Height; ++y) {
+                m_ffmpeg->write(reinterpret_cast<const char*>(out.constScanLine(y)), rowBytes);
+            }
         }
     }
 }

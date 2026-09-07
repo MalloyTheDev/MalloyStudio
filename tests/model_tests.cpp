@@ -4,6 +4,7 @@
 #include "capture/CaptureBackend.h"
 #include "capture/CaptureController.h"
 #include "capture/WgcCapture.h"
+#include "platform/FrameProfile.h"
 #include "input/HotkeyManager.h"
 #include "model/Canvas.h"
 #include "model/FilterEffect.h"
@@ -269,6 +270,9 @@ private slots:
     // The rawvideo input declares the rate the sink is clocked at, which is
     // what stops ffmpeg quantising arrivals to its 25 fps default.
     void inputDeclaresTheConfiguredFrameRate();
+    // The frame profiler: buckets keep their order, percentiles land where
+    // the samples actually are, and nothing is recorded while it is off.
+    void frameProfileSummarisesADistribution();
 };
 
 // Creates a placeholder media file so a clip can pass the graph builder's
@@ -3752,6 +3756,70 @@ void MalloyModelTests::inputDeclaresTheConfiguredFrameRate() {
     // rate control divides its budget by.
     s.fps = 100000;
     QCOMPARE(EncoderPipeline::declaredInputFrameRate(s), 1000);
+}
+
+void MalloyModelTests::frameProfileSummarisesADistribution() {
+    using namespace FrameProfile;
+
+    // Off by default, and recording while off must store nothing. That is what
+    // lets the instrumentation stay in the frame path without taxing it.
+    setEnabled(false);
+    reset();
+    for (int i = 0; i < 100; ++i) record(Stage::Composition, 5000);
+    QVERIFY(!report().contains(QStringLiteral("COMPOSITION")));
+
+    setEnabled(true);
+    reset();
+
+    // Bucket edges never go backwards, which is what makes walking them for a
+    // percentile meaningful.
+    qint64 previous = -1;
+    for (int i = 0; i < detail::kBuckets; ++i) {
+        const qint64 edge = detail::bucketFloor(i);
+        QVERIFY(edge >= previous);
+        previous = edge;
+    }
+
+    // A sample always lands in a bucket whose floor it has reached.
+    for (qint64 v : {qint64(1), qint64(7), qint64(999), qint64(1000),
+                     qint64(1500000), qint64(40000000)}) {
+        QVERIFY(detail::bucketFloor(detail::bucketFor(v)) <= v);
+    }
+
+    // Ninety samples at about 1 ms and ten at about 40 ms: the shape a stage
+    // has when it is usually free and occasionally stalls. The mean alone
+    // would report about 4.9 ms and describe neither population.
+    for (int i = 0; i < 90; ++i) record(Stage::EncoderWrite, 1000000);
+    for (int i = 0; i < 10; ++i) record(Stage::EncoderWrite, 40000000);
+
+    const detail::Stat& write = detail::cumulative()[size_t(Stage::EncoderWrite)];
+    QCOMPARE(write.count.load(), quint64(100));
+    QCOMPARE(write.max.load(), qint64(40000000));
+
+    // The median sits with the cheap population and the tail with the
+    // expensive one, each within a bucket width of the truth.
+    const double p50 = double(write.percentile(0.50));
+    const double p95 = double(write.percentile(0.95));
+    QVERIFY2(p50 > 800000 && p50 <= 1000000, qPrintable(QString::number(p50)));
+    QVERIFY2(p95 > 32000000 && p95 <= 40000000, qPrintable(QString::number(p95)));
+
+    // The mean lies between them and equals neither, which is the point of
+    // keeping a distribution rather than an average.
+    QVERIFY(write.mean() > p50 && write.mean() < p95);
+
+    // The report names only the stages it has samples for.
+    const QString text = report();
+    QVERIFY(text.contains(QStringLiteral("ENCODER WRITE")));
+    QVERIFY(!text.contains(QStringLiteral("WIDGET BLIT")));
+
+    // Reading the window empties it, so a series line describes one second
+    // rather than the run so far.
+    record(Stage::WidgetBlit, 2000000);
+    QVERIFY(seriesLine().contains(QStringLiteral("WIDGET BLIT")));
+    QVERIFY(!seriesLine().contains(QStringLiteral("WIDGET BLIT")));
+
+    setEnabled(false);
+    reset();
 }
 
 QTEST_MAIN(MalloyModelTests)

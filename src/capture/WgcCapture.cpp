@@ -1,4 +1,5 @@
 #include "WgcCapture.h"
+#include "platform/FrameProfile.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -601,6 +602,9 @@ bool WgcCapture::Impl::ensureStaging(int width, int height) {
 }
 
 QImage WgcCapture::Impl::readBack(ID3D11Texture2D* texture, int width, int height) {
+    // The GPU copy, the map and the memcpy, timed together: they are one
+    // decision, since a backend that reads back at all pays for all three.
+    FrameProfile::Scoped timing(FrameProfile::Stage::CaptureReadback);
     if (!ensureStaging(width, height)) return {};
 
     context->CopyResource(staging, texture);

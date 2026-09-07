@@ -1,4 +1,7 @@
 #include "PreviewWidget.h"
+#include "platform/FrameProfile.h"
+
+#include <optional>
 #include "model/Canvas.h"
 #include "model/FilterEffect.h"
 // ScrollFilter::advance() is called from drawItem; the full definition is in FilterEffect.h
@@ -237,6 +240,13 @@ void PreviewWidget::paintEvent(QPaintEvent*) {
     //        This is what the Recorder consumes (always 1920×1080 regardless
     //        of how the user sized the preview dock), and it also avoids the
     //        recursion that calling grab() from paintEvent would cause.
+    // Allocating the canvas, clearing it and drawing the sources into it.
+    // Timed apart from the blit below because one is work the recording
+    // needs and the other is work the preview needs, and they are charged
+    // to the same thread.
+    std::optional<FrameProfile::Scoped> composeTiming;
+    if (FrameProfile::enabled())
+        composeTiming.emplace(FrameProfile::Stage::Composition);
     QImage composed(MalloyCanvas::Width, MalloyCanvas::Height, QImage::Format_ARGB32_Premultiplied);
     composed.fill(QColor(0, 0, 0));
     if (scene) {
@@ -272,6 +282,10 @@ void PreviewWidget::paintEvent(QPaintEvent*) {
 
     // --- 3. Blit composed image to widget; selection handles drawn last
     //        (in widget pixel coords, not captured).
+    composeTiming.reset();
+    std::optional<FrameProfile::Scoped> blitTiming;
+    if (FrameProfile::enabled())
+        blitTiming.emplace(FrameProfile::Stage::WidgetBlit);
     QPainter painter(this);
     painter.setRenderHint(QPainter::SmoothPixmapTransform);
     painter.setRenderHint(QPainter::Antialiasing);

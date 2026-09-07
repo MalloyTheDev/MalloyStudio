@@ -32,6 +32,10 @@ void DxgiCaptureSession::startCapture() {
                 emit frameReady(frame);
             },
             Qt::QueuedConnection);
+    // Queued deliveries carry no stamp of their own, so the wait for the GUI
+    // thread is measured on the backend's side of the same queue: see
+    // DxgiCapture, which records the moment it hands a frame over.
+
     connect(m_capture, &DxgiCapture::captureError, this, &CaptureSession::captureError, Qt::QueuedConnection);
     m_capture->start();
 }

@@ -1,5 +1,6 @@
 #include "DxgiCapture.h"
 #include "MonitorInfo.h"
+#include "platform/FrameProfile.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -182,21 +183,33 @@ void DxgiCapture::run() {
                 continue;
             }
 
-            context->CopyResource(staging, tex);
-            tex->Release();
+            // The readback, and only the readback. The timed span has to be the
+            // same work the other backend times, which is the GPU copy, the map
+            // and the memcpy: starting the clock later or leaving it running
+            // over the handoff below would make the two backends' figures look
+            // comparable while measuring different things.
+            QImage frame;
+            {
+                FrameProfile::Scoped timing(FrameProfile::Stage::CaptureReadback);
+                context->CopyResource(staging, tex);
+                tex->Release();
 
-            D3D11_MAPPED_SUBRESOURCE mapped = {};
-            if (SUCCEEDED(context->Map(staging, 0, D3D11_MAP_READ, 0, &mapped))) {
-                // BGRA → QImage::Format_ARGB32 is a straight byte-for-byte match
-                // on little-endian (x86): BGRA memory == 0xAARRGGBB integer.
-                QImage frame(W, H, QImage::Format_ARGB32);
-                const auto* src = reinterpret_cast<const quint8*>(mapped.pData);
-                for (int row = 0; row < H; ++row) {
-                    memcpy(frame.scanLine(row),
-                           src + row * mapped.RowPitch,
-                           static_cast<size_t>(W) * 4);
+                D3D11_MAPPED_SUBRESOURCE mapped = {};
+                if (SUCCEEDED(context->Map(staging, 0, D3D11_MAP_READ, 0, &mapped))) {
+                    // BGRA → QImage::Format_ARGB32 is a straight byte-for-byte match
+                    // on little-endian (x86): BGRA memory == 0xAARRGGBB integer.
+                    frame = QImage(W, H, QImage::Format_ARGB32);
+                    const auto* src = reinterpret_cast<const quint8*>(mapped.pData);
+                    for (int row = 0; row < H; ++row) {
+                        memcpy(frame.scanLine(row),
+                               src + row * mapped.RowPitch,
+                               static_cast<size_t>(W) * 4);
+                    }
+                    context->Unmap(staging, 0);
                 }
-                context->Unmap(staging, 0);
+            }
+
+            if (!frame.isNull()) {
                 m_sourceFramesProduced.fetch_add(1, std::memory_order_relaxed);
 
                 // Skip rather than queue when the consumer is already behind.
