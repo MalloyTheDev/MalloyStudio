@@ -1,4 +1,6 @@
 #include "MainWindow.h"
+#include "platform/TwitchAuth.h"
+#include "platform/TwitchApi.h"
 #include "ui/ControlsBar.h"
 #include "ui/PreviewWidget.h"
 #include "ui/ScenesPanel.h"
@@ -205,7 +207,17 @@ void MainWindow::setupUi() {
     m_shell->addWorkspace(QStringLiteral("render"), new RenderWorkspace(m_renderQueue, this));
     connect(m_renderQueue, &RenderQueue::changed, this, [this] { updateShellMode(); });
     m_shell->addWorkspace(QStringLiteral("ai"), new AILabWorkspace(this));
+    m_twitchAuth = new TwitchAuth(this);
+    m_twitchAuth->setClientId(
+        QSettings().value(QStringLiteral("stream/twitchClientId")).toString());
+    m_twitchApi = new TwitchApi(m_twitchAuth, this);
+
     m_settings = new SettingsWorkspace(this);
+    m_settings->setTwitch(m_twitchAuth, m_twitchApi);
+    connect(m_settings, &SettingsWorkspace::streamCredentialsChanged, this, [this] {
+        // A key fetched from Twitch replaces whatever was configured by hand.
+        m_streamSettings = StreamSettings::load();
+    });
     connect(m_settings, &SettingsWorkspace::recordingSettingsApplied, this, [this] {
         m_outputSettings = OutputSettings::load();
         const int secs = m_outputSettings.replayBufferSeconds;
@@ -585,6 +597,19 @@ void MainWindow::connectModelSignals() {
             QMessageBox::warning(this, tr("Streaming Failed"), err);
             m_controlsBar->forceStopStreaming();
             return;
+        }
+
+        // Push the metadata the Streaming workspace collects to the channel.
+        // Deliberately after the stream is up and not blocking it: a title that
+        // fails to set is worth a message, not a refused broadcast.
+        if (m_twitchAuth && m_twitchAuth->isConnected()
+            && m_streamSettings.service == StreamSettings::Service::Twitch
+            && !(m_streamSettings.title.isEmpty() && m_streamSettings.category.isEmpty())) {
+            m_twitchApi->updateChannel(m_streamSettings.title, m_streamSettings.category,
+                                       [this](bool ok, const QString& error) {
+                flash(ok ? tr("Twitch channel updated")
+                         : tr("Could not update the Twitch channel: %1").arg(error), 5000);
+            });
         }
         flash(tr("Streaming to %1").arg(
             StreamSettings::displayName(m_streamSettings.service)));

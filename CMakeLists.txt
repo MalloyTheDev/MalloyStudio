@@ -60,6 +60,12 @@ set(MALLOY_CORE_SOURCES
     src/recording/EncoderRegistry.h
     src/input/HotkeyManager.cpp
     src/input/HotkeyManager.h
+    src/platform/CredentialStore.cpp
+    src/platform/CredentialStore.h
+    src/platform/TwitchAuth.cpp
+    src/platform/TwitchAuth.h
+    src/platform/TwitchApi.cpp
+    src/platform/TwitchApi.h
     src/project/ProjectDocument.cpp
     src/project/ProjectDocument.h
     src/project/ClipsRegistry.cpp

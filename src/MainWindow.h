@@ -23,6 +23,8 @@ class MediaRegistry;
 class RenderQueue;
 class AppShell;
 class Dashboard;
+class TwitchAuth;
+class TwitchApi;
 class StreamingWorkspace;
 class SettingsWorkspace;
 class EditorWorkspace;
@@ -77,6 +79,10 @@ private:
     Dashboard*         m_dashboard         = nullptr;
     StreamingWorkspace* m_streamStudio     = nullptr;
     SettingsWorkspace* m_settings          = nullptr;
+    // One instance each, application wide: Twitch refresh tokens are one time
+    // use, so a second pair refreshing separately would invalidate the first.
+    TwitchAuth*        m_twitchAuth        = nullptr;
+    TwitchApi*         m_twitchApi         = nullptr;
     EditorWorkspace*   m_editor            = nullptr;
     CommandPalette*    m_palette           = nullptr;
     OnboardingOverlay* m_onboarding        = nullptr;

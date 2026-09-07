@@ -8,6 +8,10 @@ class QComboBox;
 class QLineEdit;
 class QListWidget;
 class QStackedWidget;
+class QLabel;
+class QPushButton;
+class TwitchAuth;
+class TwitchApi;
 
 // Settings workspace (secondary.jsx SettingsScreen): a two-pane screen with a
 // group list on the left and a content area on the right. The Recording group
@@ -18,7 +22,15 @@ class SettingsWorkspace : public QWidget {
 public:
     explicit SettingsWorkspace(QWidget* parent = nullptr);
 
+    // The application's single TwitchAuth/TwitchApi pair. There must be exactly
+    // one of each: Twitch refresh tokens are one time use, so two instances
+    // refreshing independently would invalidate each other's stored token.
+    void setTwitch(TwitchAuth* auth, TwitchApi* api);
+
 signals:
+    // The Twitch account connection changed, or a stream key was fetched.
+    // MainWindow reloads StreamSettings so the new key is used.
+    void streamCredentialsChanged();
     // Emitted when the user applies Recording settings (persisted to
     // OutputSettings); MainWindow reloads and re-applies live state.
     void recordingSettingsApplied();
@@ -33,9 +45,16 @@ protected:
     void showEvent(QShowEvent* event) override;   // focus the section list on entry
 
 private:
+    TwitchAuth*  m_twitchAuth = nullptr;
+    TwitchApi*   m_twitchApi = nullptr;
+    QLabel*      m_twitchStatus = nullptr;
+    QPushButton* m_twitchButton = nullptr;
+
     QWidget* buildRecordingPage();
     QWidget* buildGeneralPage();
     QWidget* buildStreamingPage();
+    void beginTwitchConnect();
+    void refreshTwitchStatus();
     QWidget* buildVideoPage();
     QWidget* buildAudioPage();
     QWidget* buildStoragePage();

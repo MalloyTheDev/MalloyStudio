@@ -1,4 +1,13 @@
 #include "ui/workspaces/SettingsWorkspace.h"
+#include <QStyle>
+#include <QMessageBox>
+#include <QGuiApplication>
+#include <QClipboard>
+#include <QDialogButtonBox>
+#include <QDialog>
+#include <QDesktopServices>
+#include "platform/TwitchAuth.h"
+#include "platform/TwitchApi.h"
 #include "ui/IconFactory.h"
 #include "ui/Theme.h"
 #include "recording/OutputSettings.h"
@@ -437,6 +446,32 @@ QWidget* SettingsWorkspace::buildStreamingPage() {
         {tr("Keyframe interval"), tr("Twitch and YouTube require 4 seconds or less."), keyframe},
     }));
 
+    m_twitchStatus = lbl(QString(), QStringLiteral("mute"), 13);
+    m_twitchButton = new QPushButton(tr("Connect Twitch"));
+    m_twitchButton->setCursor(Qt::PointingHandCursor);
+    connect(m_twitchButton, &QPushButton::clicked, this, [this] {
+        if (m_twitchAuth && m_twitchAuth->isConnected()) {
+            m_twitchAuth->signOut();
+            refreshTwitchStatus();
+        } else {
+            beginTwitchConnect();
+        }
+    });
+    refreshTwitchStatus();
+
+    col->addWidget(settingsBlock(tr("Twitch account"), {
+        {tr("Application client ID"),
+         tr("From a Twitch application you register at dev.twitch.tv/console/apps. "
+            "It is not a secret, but it identifies your install rather than being "
+            "built in."),
+         prefLine(QStringLiteral("stream/twitchClientId"), QString())},
+        {tr("Account"),
+         tr("Signing in fetches your stream key so you never paste it, and lets the "
+            "title and category above reach your channel when you go live."),
+         m_twitchStatus},
+        {QString(), QString(), m_twitchButton},
+    }));
+
     col->addWidget(settingsBlock(tr("Privacy"), {
         {tr("Hide the key from the command line"),
          tr("Publishes through a local relay so the stream key never appears in the "
@@ -448,6 +483,123 @@ QWidget* SettingsWorkspace::buildStreamingPage() {
 
     col->addStretch();
     return scroll;
+}
+
+void SettingsWorkspace::setTwitch(TwitchAuth* auth, TwitchApi* api) {
+    m_twitchAuth = auth;
+    m_twitchApi = api;
+    if (m_twitchAuth) {
+        connect(m_twitchAuth, &TwitchAuth::signedOut, this,
+                &SettingsWorkspace::refreshTwitchStatus);
+        connect(m_twitchAuth, &TwitchAuth::connected, this,
+                &SettingsWorkspace::refreshTwitchStatus);
+    }
+    refreshTwitchStatus();
+}
+
+void SettingsWorkspace::refreshTwitchStatus() {
+    if (!m_twitchStatus || !m_twitchButton) return;
+    const bool connected = m_twitchAuth && m_twitchAuth->isConnected();
+    m_twitchStatus->setText(connected ? tr("Connected") : tr("Not connected"));
+    m_twitchStatus->setProperty("tone", connected ? QStringLiteral("success")
+                                                  : QStringLiteral("mute"));
+    m_twitchStatus->style()->unpolish(m_twitchStatus);
+    m_twitchStatus->style()->polish(m_twitchStatus);
+    m_twitchButton->setText(connected ? tr("Sign out") : tr("Connect Twitch"));
+}
+
+void SettingsWorkspace::beginTwitchConnect() {
+    if (!m_twitchAuth || !m_twitchApi) return;
+
+    const QString clientId = QSettings().value(QStringLiteral("stream/twitchClientId")).toString();
+    if (clientId.trimmed().isEmpty()) {
+        QMessageBox::information(this, tr("Client ID needed"),
+            tr("Register an application at dev.twitch.tv/console/apps and paste its "
+               "client ID above first.\n\nUse \"Device\" as the OAuth redirect type; "
+               "no secret is needed."));
+        return;
+    }
+    m_twitchAuth->setClientId(clientId);
+
+    // Modeless: the user has to go to a browser, and the dialog closes itself
+    // when Twitch reports the approval.
+    auto* dialog = new QDialog(this);
+    dialog->setWindowTitle(tr("Connect Twitch"));
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    auto* layout = new QVBoxLayout(dialog);
+    auto* instructions = new QLabel(tr("Starting sign-in..."), dialog);
+    instructions->setWordWrap(true);
+    layout->addWidget(instructions);
+
+    auto* code = new QLabel(dialog);
+    QFont codeFont = code->font();
+    codeFont.setPointSize(codeFont.pointSize() + 8);
+    codeFont.setBold(true);
+    code->setFont(codeFont);
+    code->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    layout->addWidget(code);
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, dialog);
+    auto* openButton = buttons->addButton(tr("Open Twitch"), QDialogButtonBox::ActionRole);
+    auto* copyButton = buttons->addButton(tr("Copy code"), QDialogButtonBox::ActionRole);
+    openButton->setEnabled(false);
+    copyButton->setEnabled(false);
+    layout->addWidget(buttons);
+
+    QString* uri = new QString;
+    connect(dialog, &QDialog::destroyed, [uri] { delete uri; });
+
+    connect(buttons, &QDialogButtonBox::rejected, dialog, [this, dialog] {
+        m_twitchAuth->cancelDeviceFlow();
+        dialog->close();
+    });
+    connect(openButton, &QPushButton::clicked, dialog, [uri] {
+        if (!uri->isEmpty()) QDesktopServices::openUrl(QUrl(*uri));
+    });
+    connect(copyButton, &QPushButton::clicked, dialog, [code] {
+        QGuiApplication::clipboard()->setText(code->text());
+    });
+
+    connect(m_twitchAuth, &TwitchAuth::deviceCodeReady, dialog,
+            [instructions, code, openButton, copyButton, uri](
+                const QString& userCode, const QString& verificationUri, int) {
+        *uri = verificationUri;
+        instructions->setText(
+            tr("Open %1 and enter this code:").arg(verificationUri));
+        code->setText(userCode);
+        openButton->setEnabled(true);
+        copyButton->setEnabled(true);
+    });
+
+    connect(m_twitchAuth, &TwitchAuth::failed, dialog, [dialog, this](const QString& why) {
+        dialog->close();
+        QMessageBox::warning(this, tr("Twitch sign-in failed"), why);
+    });
+
+    connect(m_twitchAuth, &TwitchAuth::connected, dialog, [this, dialog] {
+        dialog->close();
+        // Signing in is only useful if it produces the key, so fetch it now
+        // rather than at the moment the user hits Go Live.
+        m_twitchApi->fetchStreamKey([this](bool ok, const QString& keyOrError) {
+            if (!ok) {
+                QMessageBox::warning(this, tr("Could not fetch the stream key"), keyOrError);
+                refreshTwitchStatus();
+                return;
+            }
+            StreamSettings settings = StreamSettings::load();
+            settings.service = StreamSettings::Service::Twitch;
+            settings.streamKey = keyOrError;
+            settings.save();
+            refreshTwitchStatus();
+            emit streamCredentialsChanged();
+            QMessageBox::information(this, tr("Twitch connected"),
+                tr("Your stream key was fetched and stored securely. Title and "
+                   "category will be sent to your channel when you go live."));
+        });
+    });
+
+    dialog->show();
+    m_twitchAuth->beginDeviceFlow(TwitchApi::requiredScopes());
 }
 
 QWidget* SettingsWorkspace::buildVideoPage() {

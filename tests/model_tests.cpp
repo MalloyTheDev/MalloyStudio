@@ -21,6 +21,8 @@
 #include "recording/RingTimedPcmSource.h"
 #include "recording/StreamSettings.h"
 #include "recording/RtmpKeyRelay.h"
+#include "platform/TwitchAuth.h"
+#include "platform/TwitchApi.h"
 #include "recording/StreamingPipeline.h"
 #include "recording/EncoderRegistry.h"
 #include "ui/workspaces/EditorWorkspace.h"
@@ -197,6 +199,14 @@ private slots:
     // placeholder and substituting on the way upstream. The substitution has to
     // be length-preserving, has to survive an occurrence split across two reads,
     // and must not withhold bytes that will never be completed.
+    // Twitch device code flow: the request bodies and the response parsing are
+    // the whole protocol surface, and they have to be right before anything
+    // touches the network. The waiting states in particular must not be read as
+    // failures, or sign-in gives up while the user is still approving.
+    void twitchAuthBuildsProtocolRequests();
+    void twitchAuthReadsDeviceAndTokenResponses();
+    void twitchTokensExpireAndRoundTrip();
+    void twitchApiParsesHelixPayloads();
     void rtmpRelaySubstitutesAcrossReadBoundaries();
     void encoderRedactsTheStreamKeyFromFfmpegOutput();
     void addingAConfiguredLayerIsOneUndoStep();
@@ -2960,6 +2970,186 @@ void MalloyModelTests::rtmpRelaySubstitutesAcrossReadBoundaries() {
         QByteArray data = "AAA" + placeholder;
         QCOMPARE(RtmpKeyRelay::substituteAll(data, placeholder, QByteArray("short")), 0);
     }
+}
+
+void MalloyModelTests::twitchAuthBuildsProtocolRequests() {
+    const QStringList scopes = {QStringLiteral("channel:read:stream_key"),
+                                QStringLiteral("channel:manage:broadcast")};
+
+    const QString device = QString::fromUtf8(
+        TwitchAuth::buildDeviceCodeBody(QStringLiteral("abc123"), scopes));
+    QVERIFY(device.contains(QStringLiteral("client_id=abc123")));
+    // Scopes are space delimited, which survives form encoding as %20 or +.
+    QVERIFY(device.contains(QStringLiteral("scopes=")));
+    QVERIFY(device.contains(QStringLiteral("channel:read:stream_key"))
+            || device.contains(QStringLiteral("channel%3Aread%3Astream_key")));
+
+    const QString token = QString::fromUtf8(
+        TwitchAuth::buildDeviceTokenBody(QStringLiteral("abc123"), scopes,
+                                         QStringLiteral("dev-code-xyz")));
+    QVERIFY(token.contains(QStringLiteral("device_code=dev-code-xyz")));
+    // The grant type is the exact URN, encoded or not.
+    QVERIFY(token.contains(QStringLiteral("urn:ietf:params:oauth:grant-type:device_code"))
+            || token.contains(QStringLiteral("urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code")));
+
+    const QString refresh = QString::fromUtf8(
+        TwitchAuth::buildRefreshBody(QStringLiteral("abc123"), QStringLiteral("r3fr3sh")));
+    QVERIFY(refresh.contains(QStringLiteral("grant_type=refresh_token")));
+    QVERIFY(refresh.contains(QStringLiteral("refresh_token=r3fr3sh")));
+    QVERIFY(refresh.contains(QStringLiteral("client_id=abc123")));
+}
+
+void MalloyModelTests::twitchAuthReadsDeviceAndTokenResponses() {
+    // Device authorization response.
+    {
+        const QByteArray json = R"({
+            "device_code": "abcdef",
+            "expires_in": 1800,
+            "interval": 5,
+            "user_code": "WXYZ1234",
+            "verification_uri": "https://www.twitch.tv/activate?public=true"
+        })";
+        TwitchDeviceCode code;
+        QString error;
+        QVERIFY2(TwitchAuth::parseDeviceCode(json, &code, &error), qPrintable(error));
+        QCOMPARE(code.deviceCode, QStringLiteral("abcdef"));
+        QCOMPARE(code.userCode, QStringLiteral("WXYZ1234"));
+        QCOMPARE(code.expiresInSecs, 1800);
+        QCOMPARE(code.intervalSecs, 5);
+        QVERIFY(code.verificationUri.startsWith(QStringLiteral("https://www.twitch.tv/activate")));
+    }
+
+    // A response with no device code is a failure, not an empty success.
+    {
+        TwitchDeviceCode code;
+        QString error;
+        QVERIFY(!TwitchAuth::parseDeviceCode(R"({"status":400,"message":"invalid client"})",
+                                             &code, &error));
+        QCOMPARE(error, QStringLiteral("invalid client"));
+        QVERIFY(!TwitchAuth::parseDeviceCode("not json at all", &code, &error));
+    }
+
+    // Successful token exchange.
+    {
+        const QByteArray json = R"({
+            "access_token": "at-1",
+            "expires_in": 14124,
+            "refresh_token": "rt-1",
+            "scope": ["channel:read:stream_key","channel:manage:broadcast"],
+            "token_type": "bearer"
+        })";
+        TwitchTokens tokens;
+        QString pending, error;
+        QVERIFY2(TwitchAuth::parseTokens(json, &tokens, &pending, &error), qPrintable(error));
+        QCOMPARE(tokens.accessToken, QStringLiteral("at-1"));
+        QCOMPARE(tokens.refreshToken, QStringLiteral("rt-1"));
+        QCOMPARE(tokens.scopes.size(), 2);
+        QVERIFY(tokens.expiresAt.isValid());
+        QVERIFY(!tokens.needsRefresh());
+        QVERIFY(pending.isEmpty());
+    }
+
+    // The waiting state: not an error, and the caller must keep polling.
+    {
+        TwitchTokens tokens;
+        QString pending, error;
+        QVERIFY(!TwitchAuth::parseTokens(R"({"status":400,"message":"authorization_pending"})",
+                                         &tokens, &pending, &error));
+        QCOMPARE(pending, QStringLiteral("authorization_pending"));
+        QVERIFY(error.isEmpty());
+    }
+
+    // slow_down is also a waiting state, and tells the caller to back off.
+    {
+        TwitchTokens tokens;
+        QString pending, error;
+        QVERIFY(!TwitchAuth::parseTokens(R"({"status":400,"message":"slow_down"})",
+                                         &tokens, &pending, &error));
+        QCOMPARE(pending, QStringLiteral("slow_down"));
+        QVERIFY(error.isEmpty());
+    }
+
+    // A refusal is a real failure and must stop the flow.
+    {
+        TwitchTokens tokens;
+        QString pending, error;
+        QVERIFY(!TwitchAuth::parseTokens(R"({"status":400,"message":"access_denied"})",
+                                         &tokens, &pending, &error));
+        QVERIFY(pending.isEmpty());
+        QCOMPARE(error, QStringLiteral("access_denied"));
+    }
+}
+
+void MalloyModelTests::twitchTokensExpireAndRoundTrip() {
+    TwitchTokens t;
+    t.accessToken = QStringLiteral("at");
+    t.refreshToken = QStringLiteral("rt");
+    t.scopes = {QStringLiteral("channel:read:stream_key")};
+
+    // No expiry recorded is treated as needing a refresh rather than assumed good.
+    QVERIFY(t.needsRefresh());
+
+    t.expiresAt = QDateTime::currentDateTimeUtc().addSecs(3600);
+    QVERIFY(!t.needsRefresh());
+    // Refresh before expiry, not after: a token that dies mid-request is a
+    // failed stream start.
+    QVERIFY(t.needsRefresh(4000));
+
+    t.expiresAt = QDateTime::currentDateTimeUtc().addSecs(-60);
+    QVERIFY(t.needsRefresh());
+
+    // Round trip through the form stored in the credential vault.
+    t.expiresAt = QDateTime::currentDateTimeUtc().addSecs(1200);
+    const TwitchTokens back = TwitchTokens::fromJson(t.toJson());
+    QCOMPARE(back.accessToken, t.accessToken);
+    QCOMPARE(back.refreshToken, t.refreshToken);
+    QCOMPARE(back.scopes, t.scopes);
+    QCOMPARE(back.expiresAt.toSecsSinceEpoch(), t.expiresAt.toSecsSinceEpoch());
+
+    // Nothing stored yet reads as a disconnected account, not a crash.
+    const TwitchTokens empty = TwitchTokens::fromJson(QString());
+    QVERIFY(!empty.isValid());
+    QVERIFY(empty.needsRefresh());
+}
+
+void MalloyModelTests::twitchApiParsesHelixPayloads() {
+    QString error;
+
+    // Get Users returns the signed-in user when called with no parameters.
+    QCOMPARE(TwitchApi::parseUserId(R"({"data":[{"id":"141981764","login":"twitchdev"}]})", &error),
+             QStringLiteral("141981764"));
+    QVERIFY(error.isEmpty());
+
+    QCOMPARE(TwitchApi::parseStreamKey(R"({"data":[{"stream_key":"live_44322889_a34ub"}]})", &error),
+             QStringLiteral("live_44322889_a34ub"));
+
+    QCOMPARE(TwitchApi::parseGameId(R"({"data":[{"id":"33214","name":"Fortnite"}]})", &error),
+             QStringLiteral("33214"));
+
+    // An empty data array for a game is not an error: the category is simply
+    // left alone so an unknown name cannot cost the user their title.
+    error = QStringLiteral("stale");
+    QVERIFY(TwitchApi::parseGameId(R"({"data":[]})", &error).isEmpty());
+    QVERIFY(error.isEmpty());
+
+    // Missing data for the key or the user IS an error, and carries Twitch's
+    // own wording so the user can act on it.
+    QVERIFY(TwitchApi::parseStreamKey(R"({"error":"Unauthorized","status":401,"message":"Missing scope"})",
+                                      &error).isEmpty());
+    QVERIFY(error.contains(QStringLiteral("Missing scope")));
+    QVERIFY(error.contains(QStringLiteral("Unauthorized")));
+
+    QVERIFY(TwitchApi::parseUserId(R"({"data":[]})", &error).isEmpty());
+    QVERIFY(!error.isEmpty());
+
+    // Garbage must not be read as success.
+    QVERIFY(TwitchApi::parseStreamKey("<html>502</html>", &error).isEmpty());
+    QVERIFY(!error.isEmpty());
+
+    // The scopes asked for at sign-in must cover both calls, because Twitch
+    // grants them per authorization.
+    QVERIFY(TwitchApi::requiredScopes().contains(QStringLiteral("channel:read:stream_key")));
+    QVERIFY(TwitchApi::requiredScopes().contains(QStringLiteral("channel:manage:broadcast")));
 }
 
 QTEST_MAIN(MalloyModelTests)
