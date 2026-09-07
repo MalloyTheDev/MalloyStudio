@@ -123,6 +123,9 @@ void AudioMixerPanel::onAddMicrophoneClicked() {
     // entry points feel consistent — same device list, same selection UX.
     const auto pick = MicrophonePickerDialog::pick(m_controller, this);
     if (pick.first.isEmpty()) return;   // cancelled / no devices
+    // An audio input is a scene-owned source, so without a scene the call
+    // below silently did nothing after the user had picked a device.
+    if (!m_scenes->ensureCurrentScene()) return;
     // Use the friendly device name as the source name by default. Users can
     // rename later via the Inspector or inline rename in the Sources panel.
     m_scenes->addAudioInputToCurrent(pick.second, pick.first);

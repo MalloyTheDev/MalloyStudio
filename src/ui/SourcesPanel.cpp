@@ -232,7 +232,9 @@ QWidget* SourcesPanel::createLayerRow(int index) {
 }
 
 void SourcesPanel::onAddClicked() {
-    Scene* current = m_scenes->currentScene();
+    // A fresh project has no scene, and a source needs one to live in. This
+    // used to return here, so the button opened nothing and reported nothing.
+    Scene* current = m_scenes->ensureCurrentScene();
     if (!current) return;
 
     QDialog dlg(this);

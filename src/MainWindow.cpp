@@ -96,6 +96,14 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         m_controlsBar->setStreamEnabled(false, tip);
     }
 
+    // Start on a usable project rather than an inert one. Without a scene the
+    // preview says "No scene selected", Add Source opens nothing, and the
+    // application's main job is unavailable until the user works out that a
+    // scene has to come first.
+    m_scenes->ensureCurrentScene();
+    m_undoStack->clear();
+    m_undoStack->setClean();
+
     updateStatusBar();
     updatePreviewLabel();
     updateWindowTitle();
@@ -733,6 +741,12 @@ void MainWindow::newProject() {
     if (!maybeSave()) return;
     m_captureController->stopAll();
     m_scenes->clear();
+    // A project with no scene has nothing to compose, nothing to preview and
+    // nowhere to put a source, so it opens with one rather than leaving the
+    // user to discover that everything is inert until they add it. The undo
+    // stack is cleared below, so this does not arrive as an undoable edit or
+    // mark the fresh project dirty.
+    m_scenes->ensureCurrentScene();
     if (m_editor) m_editor->setTimelineJson({});
     m_projectPath.clear();
     m_undoStack->clear();

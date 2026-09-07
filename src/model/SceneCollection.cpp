@@ -495,6 +495,11 @@ void SceneCollection::addScene(const QString& name) {
     recordCommand(QStringLiteral("Add Scene"), before);
 }
 
+Scene* SceneCollection::ensureCurrentScene() {
+    if (m_scenes.isEmpty()) addScene();
+    return currentScene();
+}
+
 void SceneCollection::removeSceneAt(int index) {
     if (index < 0 || index >= m_scenes.size()) return;
     const QJsonObject before = snapshot();

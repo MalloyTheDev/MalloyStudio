@@ -61,6 +61,15 @@ public:
     void clear();
 
     void addScene(const QString& name = {});
+
+    // The current scene, creating a first one when the collection is empty.
+    //
+    // A source, an audio input and a camera all belong to a scene, so every
+    // path that adds one needs somewhere to put it. Returning null and letting
+    // the caller give up silently is what made the Add Source button do
+    // nothing at all on a fresh project, which is the state the application
+    // starts in.
+    Scene* ensureCurrentScene();
     void removeSceneAt(int index);
     void renameSceneAt(int index, const QString& name);
     void setCurrentIndex(int index);
