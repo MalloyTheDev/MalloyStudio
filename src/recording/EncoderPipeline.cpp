@@ -64,10 +64,16 @@ private:
 class AudioPipeWriter : public QThread {
     Q_OBJECT
 public:
-    // ~4 s of 48 kHz stereo at the 20 ms chunk size the mixer emits. Reaching
-    // this means ffmpeg has not read audio for four seconds, which is a real
-    // stall rather than ordinary jitter.
-    static constexpr int kMaxQueuedChunks = 200;
+    // ~30 s of 48 kHz stereo at the 20 ms chunk size the mixer emits, which is
+    // under 6 MB.
+    //
+    // Deliberately generous. ffmpeg derives audio time from the byte count, so
+    // a dropped chunk deletes time from the recording exactly as a dropped
+    // video frame used to, and unlike video there is no timestamp trick that
+    // recovers it. Holding the audio is cheap and keeps the timeline honest;
+    // dropping is the last resort for a stall long enough that the recording
+    // is already ruined.
+    static constexpr int kMaxQueuedChunks = 1500;
 
     explicit AudioPipeWriter(void* pipe, QObject* parent = nullptr)
         : QThread(parent), m_pipe(pipe) {}
@@ -83,10 +89,10 @@ public:
         m_wake.wakeOne();
     }
 
-    // Asks the thread to finish. Does not block: the thread may be inside a
-    // WriteFile that only returns once the pipe is broken or drained, so the
-    // caller must disconnect the pipe before joining. Joining first is what
-    // moved the original deadlock from the recording into the stop path.
+    // Asks the thread to finish. Does not block, and on its own is not enough:
+    // the thread may be inside a WriteFile that returns only once the write
+    // completes or is cancelled, so callers pair this with
+    // unblockPendingWrite() before joining.
     void requestStop() {
         QMutexLocker lock(&m_mutex);
         m_stopping = true;
@@ -198,7 +204,26 @@ QStringList buildInputArgs(const OutputSettings& s, const QString& audioPipeName
         QStringLiteral("-f"),       QStringLiteral("rawvideo"),
         QStringLiteral("-pix_fmt"), QStringLiteral("bgra"),
         QStringLiteral("-s"),       srcRes,
-        QStringLiteral("-r"),       QString::number(s.fps),
+        // Stamp each frame with the time it arrived rather than with its index,
+        // and deliberately do NOT declare -r on this input.
+        //
+        // rawvideo carries no timestamps of its own. Given -r, ffmpeg generates
+        // them by frame index and assumes every frame sits exactly 1/fps after
+        // the last, so a frame this application drops deletes time from the
+        // recording instead of leaving a gap. The file then plays fast and ends
+        // short: 144 seconds of wall clock produced a 109 second file, a
+        // quarter missing, which is a broken recording even though the
+        // container is valid.
+        //
+        // -r also wins over this option, which is why it is gone rather than
+        // merely accompanied. Measured against ffmpeg 8.1.1 with a producer
+        // that stalls for four seconds in the middle of an eight second run:
+        // with -r the output was 3.81 s, without it exactly 8.00 s.
+        //
+        // The nominal rate the demuxer falls back to is cosmetic; the encoder
+        // takes its rate control from the output arguments, and -g is computed
+        // from OutputSettings rather than from this.
+        QStringLiteral("-use_wallclock_as_timestamps"), QStringLiteral("1"),
         QStringLiteral("-i"),       QStringLiteral("pipe:0"),
         QStringLiteral("-f"),       QStringLiteral("s16le"),
         QStringLiteral("-ar"),      QStringLiteral("48000"),
@@ -211,6 +236,13 @@ QStringList buildInputArgs(const OutputSettings& s, const QString& audioPipeName
 QStringList EncoderPipeline::buildOutputArgs(const Target& target) const {
     const OutputSettings& s = target.output;
     QStringList args;
+
+    // Honour the timestamps the input carries instead of resampling to a
+    // constant rate. Without this ffmpeg duplicates or discards frames to hit
+    // -r exactly, which undoes the wall-clock stamping on the input side and
+    // puts the shortened duration back. A dropped frame should leave a gap in
+    // the timeline, matching what the dropped-frame counter reports.
+    args << QStringLiteral("-fps_mode") << QStringLiteral("vfr");
 
     // Scale filter when output differs from canvas native.
     if (s.width != MalloyCanvas::Width || s.height != MalloyCanvas::Height) {
@@ -432,7 +464,7 @@ void EncoderPipeline::stop() {
 void EncoderPipeline::cleanup() {
     // Defensive: stop() normally does this, but cleanup() is also reachable
     // from failed starts where the writer may exist without a stop. Same
-    // ordering rule as stop(): break the pipe before joining.
+    // ordering rule as stop(): cancel the pending write, then join.
     if (m_audioWriter) {
         m_audioWriter->requestStop();
         m_audioWriter->unblockPendingWrite();

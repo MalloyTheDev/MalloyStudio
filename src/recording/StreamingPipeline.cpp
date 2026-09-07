@@ -11,6 +11,17 @@ QStringList StreamingPipeline::buildOutputArgs(const Target& target) const {
     const OutputSettings& s = target.output;
     QStringList args;
 
+    // Resample the wall-clock-timed input back to a constant rate.
+    //
+    // The input carries real timestamps so a dropped frame leaves a gap rather
+    // than shortening the timeline, which is what a recording wants. A live
+    // ingest wants the opposite: a steady frame rate, with gaps filled by
+    // repeating the previous frame. Doing that here keeps audio and video in
+    // sync, because both sides still carry real time, while presenting the
+    // constant rate the service expects.
+    args << QStringLiteral("-fps_mode") << QStringLiteral("cfr")
+         << QStringLiteral("-r") << QString::number(s.fps);
+
     // Scale filter when output differs from canvas native.
     if (s.width != MalloyCanvas::Width || s.height != MalloyCanvas::Height) {
         args << QStringLiteral("-vf")
