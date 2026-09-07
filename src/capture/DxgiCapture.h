@@ -28,6 +28,11 @@ public:
     // object is destroyed while its events are still queued.
     std::shared_ptr<std::atomic<int>> inFlightCounter() const { return m_inFlight; }
 
+    // Frames this backend produced, whether or not anything consumed them.
+    // The SOURCE RX row: it says what the hardware and the desktop actually
+    // offered, which is the only number that makes the rest interpretable.
+    int sourceFramesProduced() const { return m_sourceFramesProduced.load(); }
+
     // Frames this backend produced and then lost because the consumer was
     // already at its limit. Capture-side loss, before composition: the
     // encoder's own rejections are counted separately and mean something
@@ -52,5 +57,6 @@ private:
     std::atomic<bool> m_running{false};
     std::shared_ptr<std::atomic<int>> m_inFlight =
         std::make_shared<std::atomic<int>>(0);
+    std::atomic<int> m_sourceFramesProduced{0};
     std::atomic<int> m_droppedBeforeComposition{0};
 };

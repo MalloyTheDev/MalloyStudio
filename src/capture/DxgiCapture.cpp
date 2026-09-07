@@ -197,6 +197,7 @@ void DxgiCapture::run() {
                            static_cast<size_t>(W) * 4);
                 }
                 context->Unmap(staging, 0);
+                m_sourceFramesProduced.fetch_add(1, std::memory_order_relaxed);
 
                 // Skip rather than queue when the consumer is already behind.
                 // See inFlightCounter() for why this bound exists.

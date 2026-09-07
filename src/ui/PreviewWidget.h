@@ -126,6 +126,16 @@ private:
 
     void markContentChanged() { m_contentSequence.fetch_add(1, std::memory_order_release); }
 
+public:
+    // Compositions actually published for the encoder to see. The COMPOSED
+    // row: distinct from frames the backend produced, because a composition
+    // can fold several arrivals together or be driven by a scene edit that no
+    // capture backend was involved in.
+    quint64 composedFrameCount() const { return m_composedCount.load(); }
+
+private:
+    std::atomic<quint64> m_composedCount{0};
+
     // Replay buffer (Program role only). JPEG ring capped by time span.
     QTimer*             m_replayTimer   = nullptr;
     int                 m_replaySeconds = 0;

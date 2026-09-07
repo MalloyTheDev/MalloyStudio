@@ -113,7 +113,8 @@ public:
     static bool tryParseProgressLine(QStringView line,
                                      int* bitrateKbps,
                                      int* droppedFrames,
-                                     int* encodeFps = nullptr);
+                                     int* encodeFps = nullptr,
+                                     int* cfrDuplicates = nullptr);
 
 private slots:
     void onTickVideo();
@@ -183,6 +184,16 @@ private:
     // Keeping the two apart is what lets a future report say whether a
     // recording lost content at the source or at the encoder.
     int m_composedFramesRejected = 0;
+
+    // Pictures actually written to the encoder's input. The ENC ACCEPT row,
+    // and the one that makes ENC DROP mean anything: a rejection count is only
+    // interpretable next to what was accepted.
+    int m_composedFramesAccepted = 0;
+
+    // Frames ffmpeg synthesised to satisfy a constant-rate output, from its
+    // own `dup=` token. The CFR DUP row: a stream holding its cadence over a
+    // still screen is doing this, and it is not media this application made.
+    int m_cfrDuplicates = 0;
 
     // Timer opportunities where the source had produced nothing new. Counted
     // separately and deliberately not reported as drops: no media existed, so

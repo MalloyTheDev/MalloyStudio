@@ -1534,6 +1534,32 @@ void MalloyModelTests::streamProgressLineParsesBitrateAndDrops() {
         QCOMPARE(fps, 60);
     }
 
+    // Duplicates ffmpeg synthesised to hold a constant rate. A stream over a
+    // still screen produces these, and they are not media this application
+    // made: counting them as captured frames would overstate what was
+    // recorded, and ignoring them would hide why a CFR output has more frames
+    // than the compositor produced.
+    {
+        int dups = -1;
+        const QString line = QStringLiteral(
+            "frame= 900 fps= 60 q=21.0 size= 2048kB time=00:00:15.00 "
+            "bitrate=1100.0kbits/s dup=42 drop=0 speed=1.0x");
+        QVERIFY(EncoderPipeline::tryParseProgressLine(line, &kbps, &drops, &fps, &dups));
+        QCOMPARE(dups, 42);
+        QCOMPARE(drops, 0);
+    }
+
+    // A line with no `dup=` at all, which is every line of a VFR file
+    // recording: zero duplicates, not an unparsed line.
+    {
+        int dups = -1;
+        const QString line = QStringLiteral(
+            "frame= 100 fps= 25 q=20.0 size= 512kB time=00:00:04.00 "
+            "bitrate=1000.0kbits/s speed=1.0x");
+        QVERIFY(EncoderPipeline::tryParseProgressLine(line, &kbps, &drops, &fps, &dups));
+        QCOMPARE(dups, 0);
+    }
+
     // Fractional rate rounds rather than truncating.
     {
         kbps = drops = fps = -1;

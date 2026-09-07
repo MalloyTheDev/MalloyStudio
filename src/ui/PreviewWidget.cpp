@@ -267,6 +267,7 @@ void PreviewWidget::paintEvent(QPaintEvent*) {
         // recorder that treated it as new would be inventing media.
         m_composedSequence.store(m_contentSequence.load(std::memory_order_acquire),
                                  std::memory_order_release);
+        m_composedCount.fetch_add(1, std::memory_order_relaxed);
     }
 
     // --- 3. Blit composed image to widget; selection handles drawn last

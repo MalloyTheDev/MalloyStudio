@@ -322,6 +322,8 @@ bool EncoderPipeline::start(const Target& target,
                                                       : Cadence::ConstantRate;
     m_lastSentSequence = 0;
     m_composedFramesRejected = 0;
+    m_composedFramesAccepted = 0;
+    m_cfrDuplicates = 0;
     m_idleTicks = 0;
 
     QStringList args = buildInputArgs(m_target.output, m_audioPipeName);
@@ -460,6 +462,17 @@ void EncoderPipeline::stop() {
         }
     }
 
+    // The stages, once per run, so a workload is mechanically interpretable
+    // rather than a matter of reading a status bar at the right moment. The
+    // gaps between these numbers are the diagnosis: composed against accepted
+    // is what this application refused to hand over, and CFR DUP is what
+    // ffmpeg invented to hold a cadence. Idle ticks are timer opportunities
+    // where nothing new existed, and are not loss of any kind.
+    qInfo("capture stages: COMPOSED %d  ENC ACCEPT %d  ENC DROP %d  CFR DUP %d  IDLE %d",
+          m_composedFramesAccepted + m_composedFramesRejected,
+          m_composedFramesAccepted, m_composedFramesRejected,
+          m_cfrDuplicates, m_idleTicks);
+
     const qint64 bytes = (m_target.kind == Target::Kind::File)
                               ? QFileInfo(m_target.destination).size()
                               : 0;
@@ -592,6 +605,7 @@ void EncoderPipeline::onTickVideo() {
     // has no row padding (7680-byte rows on a 32-byte aligned buffer), so we
     // can ship the whole image in one QProcess::write() call. This avoids
     // partial-write error spam if ffmpeg dies mid-frame.
+    ++m_composedFramesAccepted;
     if (out.sizeInBytes() == frameBytes) {
         m_ffmpeg->write(reinterpret_cast<const char*>(out.constBits()), frameBytes);
     } else {
@@ -747,7 +761,8 @@ QString EncoderPipeline::redactDestination(QString text, const QString& destinat
 bool EncoderPipeline::tryParseProgressLine(QStringView line,
                                             int* bitrateKbps,
                                             int* droppedFrames,
-                                            int* encodeFps) {
+                                            int* encodeFps,
+                                            int* cfrDuplicates) {
     // ffmpeg progress line format (one example):
     //   frame= 1234 fps= 60 q=23.0 size=  4096kB time=00:00:20.00 bitrate=1700.6kbits/s drop=0 speed=1.0x
     //
@@ -761,6 +776,9 @@ bool EncoderPipeline::tryParseProgressLine(QStringView line,
     // Absent on the first line or two, while ffmpeg has no rate to report yet.
     static const QRegularExpression kFpsRe(
         QStringLiteral(R"(fps=\s*([\d.]+))"));
+    // Frames ffmpeg synthesised to hold a constant output rate.
+    static const QRegularExpression kDupRe(
+        QStringLiteral(R"(dup=\s*(\d+))"));
 
     const QString text = line.toString();
     const auto bitMatch = kBitrateRe.match(text);
@@ -778,13 +796,20 @@ bool EncoderPipeline::tryParseProgressLine(QStringView line,
     if (fpsMatch.hasMatch())
         fps = static_cast<int>(fpsMatch.captured(1).toDouble() + 0.5);
     if (encodeFps) *encodeFps = fps;
+
+    int dups = 0;
+    const auto dupMatch = kDupRe.match(text);
+    if (dupMatch.hasMatch()) dups = dupMatch.captured(1).toInt();
+    if (cfrDuplicates) *cfrDuplicates = dups;
     return true;
 }
 
 void EncoderPipeline::parseProgressLine(QStringView line) {
-    int kbps = 0, drops = 0, fps = 0;
-    if (tryParseProgressLine(line, &kbps, &drops, &fps))
+    int kbps = 0, drops = 0, fps = 0, dups = 0;
+    if (tryParseProgressLine(line, &kbps, &drops, &fps, &dups)) {
+        m_cfrDuplicates = dups;
         emit progress(kbps, drops, fps, m_composedFramesRejected);
+    }
 }
 
 // PipeAcceptThread is a QObject defined in this .cpp file; AUTOMOC generates
