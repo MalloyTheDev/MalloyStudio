@@ -465,9 +465,9 @@ void EncoderPipeline::stop() {
     // The stages, once per run, so a workload is mechanically interpretable
     // rather than a matter of reading a status bar at the right moment. The
     // gaps between these numbers are the diagnosis: composed against accepted
-    // is what this application refused to hand over, and CFR DUP is what
-    // ffmpeg invented to hold a cadence. Idle ticks are timer opportunities
-    // where nothing new existed, and are not loss of any kind.
+    // is what this application refused to hand over, and CFR DUP is what the
+    // output side invented to hold a cadence. Idle ticks are timer
+    // opportunities where nothing new existed, and are not loss of any kind.
     qInfo("capture stages: COMPOSED %d  ENC ACCEPT %d  ENC DROP %d  CFR DUP %d  IDLE %d",
           m_composedFramesAccepted + m_composedFramesRejected,
           m_composedFramesAccepted, m_composedFramesRejected,
@@ -776,7 +776,7 @@ bool EncoderPipeline::tryParseProgressLine(QStringView line,
     // Absent on the first line or two, while ffmpeg has no rate to report yet.
     static const QRegularExpression kFpsRe(
         QStringLiteral(R"(fps=\s*([\d.]+))"));
-    // Frames ffmpeg synthesised to hold a constant output rate.
+    // Frames synthesised to hold a constant output rate. Cumulative.
     static const QRegularExpression kDupRe(
         QStringLiteral(R"(dup=\s*(\d+))"));
 
@@ -807,7 +807,10 @@ bool EncoderPipeline::tryParseProgressLine(QStringView line,
 void EncoderPipeline::parseProgressLine(QStringView line) {
     int kbps = 0, drops = 0, fps = 0, dups = 0;
     if (tryParseProgressLine(line, &kbps, &drops, &fps, &dups)) {
-        m_cfrDuplicates = dups;
+        // Cumulative upstream, so keep the latest rather than adding. The max
+        // guards the one case assignment would not: a line reporting lower
+        // than the last, which would mean the counter had restarted.
+        m_cfrDuplicates = std::max(m_cfrDuplicates, dups);
         emit progress(kbps, drops, fps, m_composedFramesRejected);
     }
 }

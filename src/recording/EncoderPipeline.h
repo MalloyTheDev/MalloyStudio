@@ -185,14 +185,31 @@ private:
     // recording lost content at the source or at the encoder.
     int m_composedFramesRejected = 0;
 
-    // Pictures actually written to the encoder's input. The ENC ACCEPT row,
-    // and the one that makes ENC DROP mean anything: a rejection count is only
-    // interpretable next to what was accepted.
+    // The ENC ACCEPT row.
+    //
+    // Precisely: pictures this pipeline took responsibility for and issued a
+    // write for. It is NOT a count of successfully encoded frames, and must
+    // not drift into meaning that. Nothing here observes what ffmpeg did with
+    // the bytes afterwards, so a frame counted as accepted can still be lost
+    // downstream, and a later output-side counter can be added without
+    // changing what this number has historically meant.
+    //
+    // It exists because a rejection count is uninterpretable on its own: ENC
+    // DROP only says something next to what got through.
     int m_composedFramesAccepted = 0;
 
-    // Frames ffmpeg synthesised to satisfy a constant-rate output, from its
-    // own `dup=` token. The CFR DUP row: a stream holding its cadence over a
-    // still screen is doing this, and it is not media this application made.
+    // The CFR DUP row: frames synthesised to satisfy a constant-rate output,
+    // read from ffmpeg's own `dup=` token.
+    //
+    // Output duplication, not encoder duplication. Depending on the filter
+    // graph, frame-rate synchronisation can insert these ahead of the codec,
+    // so attributing them to the encoder would name the wrong stage. What is
+    // certain is that they are not media this application produced.
+    //
+    // ffmpeg's counter is cumulative and non-decreasing across progress lines,
+    // verified against 8.1.1 (33, 62, 90, 103 ... 691 within one run), so this
+    // takes the latest value and never accumulates. Summing observations would
+    // over-report duplication by roughly the number of progress lines.
     int m_cfrDuplicates = 0;
 
     // Timer opportunities where the source had produced nothing new. Counted
