@@ -23,6 +23,20 @@
 // investigated. A mean hides a stage that is usually free and occasionally
 // costs forty milliseconds, and that is exactly the shape a stall has.
 //
+// Two things this cannot tell you, and one of them is a trap.
+//
+// It measures the application, not the file. The largest gap between encoded
+// packets is the only figure that says what a viewer would actually see, and
+// it has to be read from the recording rather than from here.
+//
+// The trap: on the file path a gap between packets is not automatically a
+// fault. A recording follows its source, so a picture that did not change
+// produces no new media and the wall clock timestamps carry the gap. That is
+// the design, and a still desktop legitimately produces long gaps. Judge a gap
+// only against a workload known to be changing continuously, such as a moving
+// test pattern; against a static desktop a large gap is correct behaviour, and
+// "fixing" it would mean inventing media.
+//
 // Off unless switched on. Reading a clock twice per stage is cheap next to
 // moving eight megabytes, but this is scaffolding for one investigation and
 // should not be a tax on every recording afterwards.

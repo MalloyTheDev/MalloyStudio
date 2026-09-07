@@ -424,6 +424,25 @@ bool EncoderPipeline::isTightlyPacked(const QImage& frame) {
     return frame.bytesPerLine() == rowBytes;
 }
 
+void EncoderPipeline::noteFrameRejected() {
+    // Only reached when a composition advanced and was then refused, since an
+    // unchanged picture returns as an idle tick before this point.
+    if (!m_inDropBurst) {
+        m_inDropBurst = true;
+        m_dropBurstClock.start();
+    }
+}
+
+void EncoderPipeline::noteFrameAccepted() {
+    closeDropBurst();
+}
+
+void EncoderPipeline::closeDropBurst() {
+    if (!m_inDropBurst) return;
+    m_longestDropBurstMs = std::max(m_longestDropBurstMs, m_dropBurstClock.elapsed());
+    m_inDropBurst = false;
+}
+
 int EncoderPipeline::declaredInputFrameRate(const OutputSettings& settings) {
     // 1000 is an upper bound rather than a target: past it the time base gets
     // fine enough that the rate control on the stream path has nothing left to
@@ -544,6 +563,8 @@ bool EncoderPipeline::start(const Target& target,
     m_composedFramesAccepted = 0;
     m_cfrDuplicates = 0;
     m_idleTicks = 0;
+    m_longestDropBurstMs = 0;
+    m_inDropBurst = false;
     // The capture side's counters run for as long as the application has been
     // capturing, which is not the same span as this recording. Taking the
     // reading here is what makes the summary's source figures belong to this
@@ -737,13 +758,18 @@ void EncoderPipeline::stop() {
     // The two source figures are this run's, not the application's: they are
     // the difference from the totals taken when the run started.
     const CaptureStats sourceNow = m_sourceStats ? m_sourceStats() : CaptureStats{};
+    // A run that ends mid burst still had that burst.
+    closeDropBurst();
+
     const int piped = m_videoWriter ? m_videoWriter->framesWritten() : m_framesPiped;
     qInfo("capture stages: SOURCE RX %d  CAP DROP %d  COMPOSED %d  ENC ACCEPT %d  "
-          "PIPE WRITE %d  ENC DROP %d  CFR DUP %d  IDLE %d",
+          "PIPE WRITE %d  ENC DROP %d  ENC DROP BURST MAX %.2f s  "
+          "CFR DUP %d  IDLE %d",
           sourceNow.framesProduced - m_sourceStatsAtStart.framesProduced,
           sourceNow.framesDropped  - m_sourceStatsAtStart.framesDropped,
           m_composedFramesAccepted + m_composedFramesRejected,
           m_composedFramesAccepted, piped, m_composedFramesRejected,
+          double(m_longestDropBurstMs) / 1000.0,
           m_cfrDuplicates, m_idleTicks);
 
     if (FrameProfile::enabled())
@@ -892,6 +918,7 @@ void EncoderPipeline::onTickVideo() {
     // would freeze the preview and the interface.
     if (m_videoWriter->queuedFrames() >= VideoPipeWriter::kMaxQueuedFrames) {
         ++m_composedFramesRejected;
+        noteFrameRejected();
         return;
     }
 
@@ -925,10 +952,12 @@ void EncoderPipeline::onTickVideo() {
         FrameProfile::Scoped timing(FrameProfile::Stage::EncoderWrite);
         if (!m_videoWriter->trySubmit(std::move(out))) {
             ++m_composedFramesRejected;
+            noteFrameRejected();
             return;
         }
     }
     ++m_composedFramesAccepted;
+    noteFrameAccepted();
 }
 
 void EncoderPipeline::onMixedSamples(QByteArray pcm) {

@@ -282,6 +282,27 @@ private:
     // look like it was shedding nine frames in ten.
     int m_idleTicks = 0;
 
+    // The longest unbroken stretch in which every composed picture was
+    // refused.
+    //
+    // A count of rejections cannot distinguish a hundred spread evenly across
+    // a minute from a hundred in a row, and only the second is a hole. This is
+    // pressure inside the application, not damage to the file: a burst can be
+    // long while the recording stays continuous, because the frames that were
+    // accepted around it may still be well spread. What reached the file is a
+    // separate measurement taken from the file itself.
+    //
+    // Deliberately not called starvation. A refused frame means the transport
+    // was full, which is the bound doing its job, and says nothing on its own
+    // about what a viewer would see.
+    qint64 m_longestDropBurstMs = 0;
+    QElapsedTimer m_dropBurstClock;
+    bool m_inDropBurst = false;
+
+    void noteFrameRejected();
+    void noteFrameAccepted();
+    void closeDropBurst();
+
     // Frames the transport finished writing, kept because the run summary
     // is printed after the writer has already been retired.
     int m_framesPiped = 0;
