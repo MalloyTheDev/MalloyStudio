@@ -172,6 +172,150 @@ private:
     int                 m_dropped = 0;
 };
 
+
+// Writes composed frames to ffmpeg's video pipe on its own thread.
+//
+// Video used to go to ffmpeg's stdin through QProcess. QProcess accepts a
+// write into a buffer of its own and moves it into the pipe from the Qt event
+// loop, and the thread running that loop is the one that composes frames,
+// paints the preview and receives every captured frame. When it got busy it
+// stopped draining its own buffer, the backlog pinned at the cap, and the
+// pipeline refused nearly everything while ffmpeg sat idle waiting for bytes
+// nobody was sending it. Measured against a consumer that could take 945 MB/s:
+// removing event loop service turned that into 2 MB/s, pinned the queue for
+// 14.9 of 15 seconds and refused 896 of 900 frames.
+//
+// So the transport gets a thread of its own, exactly as the audio path already
+// does, and for the same reason: the write may block, and the thread that
+// produces the media must never be the thread that waits.
+//
+// The bound stays. This is not an unlimited escape hatch: a full queue refuses
+// the frame immediately and the producer counts it, which is the behaviour the
+// backpressure policy has always had.
+class VideoPipeWriter : public QThread {
+    Q_OBJECT
+public:
+    // The same three frames the QProcess backlog cap allowed, about 25 MB at
+    // 1080p. Enough to ride out scheduling jitter, small enough that a stalled
+    // encoder costs frames rather than memory.
+    static constexpr int kMaxQueuedFrames = 3;
+
+    explicit VideoPipeWriter(void* pipe, QObject* parent = nullptr)
+        : QThread(parent), m_pipe(pipe) {}
+
+    // Hands a frame to the transport, or refuses it. Never blocks: the caller
+    // is the thread that composes, and it must not wait on a pipe.
+    //
+    // The image is passed by value and stored as one. QImage is implicitly
+    // shared, so this transfers ownership without copying eight megabytes,
+    // which is one full frame copy less than the old path paid on the GUI
+    // thread.
+    bool trySubmit(QImage frame) {
+        QMutexLocker lock(&m_mutex);
+        if (m_stopping) return false;
+        if (m_queue.size() >= kMaxQueuedFrames) return false;
+        m_queue.enqueue(std::move(frame));
+        m_wake.wakeOne();
+        return true;
+    }
+
+    // Frames waiting to be written, and the bytes they represent. The queue
+    // depth is what the backlog figure now reports.
+    int queuedFrames() const {
+        QMutexLocker lock(&m_mutex);
+        return m_queue.size();
+    }
+    qint64 queuedBytes() const {
+        QMutexLocker lock(&m_mutex);
+        qint64 total = 0;
+        for (const QImage& f : m_queue) total += f.sizeInBytes();
+        return total;
+    }
+
+    // Frames this thread actually finished writing into the pipe. Distinct
+    // from what the pipeline accepted: acceptance is a promise to carry the
+    // frame, and this is the carrying. The gap between them is the transport's
+    // own backlog, which is the thing that used to be invisible.
+    int framesWritten() const { return m_written.load(std::memory_order_relaxed); }
+
+    void requestStop() {
+        QMutexLocker lock(&m_mutex);
+        m_stopping = true;
+        m_wake.wakeAll();
+    }
+
+    // Same reasoning as the audio writer: a synchronous WriteFile can only be
+    // broken by cancelling it on the thread that issued it.
+    void unblockPendingWrite() {
+        HANDLE self = static_cast<HANDLE>(m_selfHandle.load());
+        if (self) CancelSynchronousIo(self);
+    }
+
+    ~VideoPipeWriter() override {
+        HANDLE self = static_cast<HANDLE>(m_selfHandle.exchange(nullptr));
+        if (self) CloseHandle(self);
+    }
+
+protected:
+    void run() override {
+        HANDLE self = nullptr;
+        if (DuplicateHandle(GetCurrentProcess(), GetCurrentThread(),
+                            GetCurrentProcess(), &self, 0, FALSE,
+                            DUPLICATE_SAME_ACCESS)) {
+            m_selfHandle.store(self);
+        }
+
+        for (;;) {
+            QImage frame;
+            {
+                QMutexLocker lock(&m_mutex);
+                while (m_queue.isEmpty() && !m_stopping)
+                    m_wake.wait(&m_mutex);
+                if (m_queue.isEmpty() && m_stopping) return;
+                frame = m_queue.dequeue();
+            }
+            if (frame.isNull()) continue;
+
+            FrameProfile::Scoped timing(FrameProfile::Stage::PipeWrite);
+
+            // Rows are written one by one only when Qt has padded them;
+            // normally the image is contiguous and goes in a single call.
+            const qint64 expected = qint64(frame.width()) * frame.height() * 4;
+            bool ok = true;
+            if (frame.sizeInBytes() == expected) {
+                ok = writeAll(reinterpret_cast<const char*>(frame.constBits()), expected);
+            } else {
+                const qint64 rowBytes = qint64(frame.width()) * 4;
+                for (int y = 0; y < frame.height() && ok; ++y)
+                    ok = writeAll(reinterpret_cast<const char*>(frame.constScanLine(y)), rowBytes);
+            }
+            if (!ok) return;   // pipe closed, broken, or the write was cancelled
+            m_written.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+
+private:
+    bool writeAll(const char* data, qint64 bytes) {
+        qint64 offset = 0;
+        while (offset < bytes) {
+            DWORD written = 0;
+            const BOOL ok = WriteFile(static_cast<HANDLE>(m_pipe), data + offset,
+                                      static_cast<DWORD>(bytes - offset), &written, nullptr);
+            if (!ok || written == 0) return false;
+            offset += written;
+        }
+        return true;
+    }
+
+    void*              m_pipe;
+    std::atomic<void*> m_selfHandle{nullptr};
+    mutable QMutex     m_mutex;
+    QWaitCondition     m_wake;
+    QQueue<QImage>     m_queue;
+    bool               m_stopping = false;
+    std::atomic<int>   m_written{0};
+};
+
 // ---------------------------------------------------------------------------
 
 EncoderPipeline::EncoderPipeline(QObject* parent) : QObject(parent) {
@@ -189,7 +333,8 @@ namespace {
 // Common input args: rawvideo from stdin + s16le PCM from named pipe.
 // Always at canvas-native resolution (1920x1080); the scale filter in the
 // output args resizes when OutputSettings differs.
-QStringList buildInputArgs(const OutputSettings& s, const QString& audioPipeName) {
+QStringList buildInputArgs(const OutputSettings& s, const QString& videoPipeName,
+                           const QString& audioPipeName) {
     const QString srcRes = QStringLiteral("%1x%2")
                                .arg(MalloyCanvas::Width).arg(MalloyCanvas::Height);
     return {
@@ -230,7 +375,9 @@ QStringList buildInputArgs(const OutputSettings& s, const QString& audioPipeName
         QStringLiteral("-framerate"),
         QString::number(EncoderPipeline::declaredInputFrameRate(s)),
         QStringLiteral("-use_wallclock_as_timestamps"), QStringLiteral("1"),
-        QStringLiteral("-i"),       QStringLiteral("pipe:0"),
+        // A named pipe rather than stdin, so this side of it can be owned by a
+        // thread of our own. See VideoPipeWriter for what stdin cost.
+        QStringLiteral("-i"),       videoPipeName,
         QStringLiteral("-f"),       QStringLiteral("s16le"),
         QStringLiteral("-ar"),      QStringLiteral("48000"),
         QStringLiteral("-ac"),      QStringLiteral("2"),
@@ -310,27 +457,45 @@ bool EncoderPipeline::start(const Target& target,
     m_audio     = audio;
     m_pipeReady = false;
 
-    // --- 1. Create the audio named pipe (server side, synchronous) ---
+    // --- 1. Create the two named pipes (server side, synchronous) ---
+    //
+    // Video has one now as well as audio. It used to go to ffmpeg's stdin
+    // through QProcess, whose buffer only drains when the Qt event loop runs,
+    // and that loop belongs to the thread composing the frames. See
+    // VideoPipeWriter.
     const quint32 salt = QRandomGenerator::global()->generate();
-    m_audioPipeName = QStringLiteral("\\\\.\\pipe\\malloy_audio_%1_%2")
-                          .arg(static_cast<int>(GetCurrentProcessId()))
-                          .arg(salt, 8, 16, QLatin1Char('0'));
+    auto makePipe = [&](const QString& kind, int outBufferBytes,
+                        QString* nameOut, void** handleOut) -> bool {
+        const QString name = QStringLiteral("\\\\.\\pipe\\malloy_%1_%2_%3")
+                                 .arg(kind)
+                                 .arg(static_cast<int>(GetCurrentProcessId()))
+                                 .arg(salt, 8, 16, QLatin1Char('0'));
+        const std::wstring wname = name.toStdWString();
+        HANDLE pipe = CreateNamedPipeW(
+            wname.c_str(),
+            PIPE_ACCESS_OUTBOUND,                                // server writes
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            1,                                                   // max instances
+            static_cast<DWORD>(outBufferBytes),
+            0,                                                   // in buffer
+            0,                                                   // default timeout
+            nullptr);
+        if (pipe == INVALID_HANDLE_VALUE) return false;
+        *nameOut = name;
+        *handleOut = pipe;
+        return true;
+    };
 
-    const std::wstring wname = m_audioPipeName.toStdWString();
-    HANDLE pipe = CreateNamedPipeW(
-        wname.c_str(),
-        PIPE_ACCESS_OUTBOUND,                                // server writes
-        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-        1,                                                   // max instances
-        1024 * 1024,                                         // out buffer (1 MB)
-        0,                                                   // in buffer
-        0,                                                   // default timeout
-        nullptr);
-    if (pipe == INVALID_HANDLE_VALUE) {
+    // One frame of outbound buffer for video, so the operating system can hold
+    // a whole picture while ffmpeg gets to it. Anything past that waits in the
+    // writer's own bounded queue, where it can be counted.
+    const int videoBuffer = static_cast<int>(qint64(MalloyCanvas::Width) * MalloyCanvas::Height * 4);
+    if (!makePipe(QStringLiteral("video"), videoBuffer, &m_videoPipeName, &m_videoPipe) ||
+        !makePipe(QStringLiteral("audio"), 1024 * 1024, &m_audioPipeName, &m_audioPipe)) {
         setErr(QStringLiteral("CreateNamedPipe failed (err=%1)").arg(GetLastError()));
+        cleanup();
         return false;
     }
-    m_audioPipe = pipe;
 
     // --- 2. Spawn ffmpeg with common input args + subclass-supplied output args ---
     // A file follows the source; a stream holds its own cadence. See Cadence.
@@ -354,7 +519,7 @@ bool EncoderPipeline::start(const Target& target,
         m_tickClock.invalidate();
     }
 
-    QStringList args = buildInputArgs(m_target.output, m_audioPipeName);
+    QStringList args = buildInputArgs(m_target.output, m_videoPipeName, m_audioPipeName);
     args << buildOutputArgs(m_target);
 
     // Reset stderr-tail buffers each start (we reuse the same pipeline across
@@ -387,7 +552,19 @@ bool EncoderPipeline::start(const Target& target,
         return false;
     }
 
-    // --- 3. Wait for ffmpeg to attach to the audio pipe (off main thread) ---
+    // --- 3. Wait for ffmpeg to attach to both pipes (off main thread) ---
+    //
+    // ffmpeg opens its inputs in order and blocks on each until the server
+    // side accepts, so both acceptors have to be waiting at once.
+    auto* videoAccept = new PipeAcceptThread(m_videoPipe);
+    m_videoAcceptor = videoAccept;
+    connect(videoAccept, &PipeAcceptThread::connectedOk,
+            this, &EncoderPipeline::onVideoPipeConnected);
+    connect(videoAccept, &PipeAcceptThread::connectFailed,
+            this, &EncoderPipeline::onPipeConnectFailed);
+    connect(videoAccept, &QThread::finished, videoAccept, &QObject::deleteLater);
+    videoAccept->start();
+
     auto* accept = new PipeAcceptThread(m_audioPipe);
     m_pipeAcceptor = accept;
     connect(accept, &PipeAcceptThread::connectedOk, this, &EncoderPipeline::onPipeConnected);
@@ -471,8 +648,24 @@ void EncoderPipeline::stop() {
         m_audioWriter = nullptr;   // leaked rather than freed if it never exits
     }
 
+    // The video transport retires the same way and for the same reason: ask it
+    // to finish, cancel the write it may be blocked inside, then join with a
+    // bound. Frames still queued are abandoned deliberately rather than
+    // drained, because stopping should not wait on an encoder that has already
+    // stopped reading.
+    if (m_videoWriter) {
+        m_framesPiped = m_videoWriter->framesWritten();
+        m_videoWriter->requestStop();
+        m_videoWriter->unblockPendingWrite();
+        if (m_videoWriter->wait(3000)) delete m_videoWriter;
+        m_videoWriter = nullptr;
+    }
+
     if (m_audioPipe) {
         DisconnectNamedPipe(static_cast<HANDLE>(m_audioPipe));
+    }
+    if (m_videoPipe) {
+        DisconnectNamedPipe(static_cast<HANDLE>(m_videoPipe));
     }
 
     // Wait up to 5 s for ffmpeg to finalise the file, but keep the Qt event
@@ -506,12 +699,13 @@ void EncoderPipeline::stop() {
     // The two source figures are this run's, not the application's: they are
     // the difference from the totals taken when the run started.
     const CaptureStats sourceNow = m_sourceStats ? m_sourceStats() : CaptureStats{};
+    const int piped = m_videoWriter ? m_videoWriter->framesWritten() : m_framesPiped;
     qInfo("capture stages: SOURCE RX %d  CAP DROP %d  COMPOSED %d  ENC ACCEPT %d  "
-          "ENC DROP %d  CFR DUP %d  IDLE %d",
+          "PIPE WRITE %d  ENC DROP %d  CFR DUP %d  IDLE %d",
           sourceNow.framesProduced - m_sourceStatsAtStart.framesProduced,
           sourceNow.framesDropped  - m_sourceStatsAtStart.framesDropped,
           m_composedFramesAccepted + m_composedFramesRejected,
-          m_composedFramesAccepted, m_composedFramesRejected,
+          m_composedFramesAccepted, piped, m_composedFramesRejected,
           m_cfrDuplicates, m_idleTicks);
 
     if (FrameProfile::enabled())
@@ -535,9 +729,20 @@ void EncoderPipeline::cleanup() {
         if (m_audioWriter->wait(3000)) delete m_audioWriter;
         m_audioWriter = nullptr;
     }
+    if (m_videoWriter) {
+        m_framesPiped = m_videoWriter->framesWritten();
+        m_videoWriter->requestStop();
+        m_videoWriter->unblockPendingWrite();
+        if (m_videoWriter->wait(3000)) delete m_videoWriter;
+        m_videoWriter = nullptr;
+    }
     if (m_audioPipe) {
         CloseHandle(static_cast<HANDLE>(m_audioPipe));
         m_audioPipe = nullptr;
+    }
+    if (m_videoPipe) {
+        CloseHandle(static_cast<HANDLE>(m_videoPipe));
+        m_videoPipe = nullptr;
     }
     if (m_ffmpeg) {
         m_ffmpeg->deleteLater();
@@ -579,11 +784,11 @@ void EncoderPipeline::onTickVideo() {
             FrameProfile::record(FrameProfile::Stage::TickGap,
                                  m_tickClock.nsecsElapsed());
         m_tickClock.start();
-        // What is already waiting for ffmpeg. The one number that says
-        // whether the far end is keeping up, sampled every tick rather
+        // What is already waiting for the transport. The one number that
+        // says whether the far end is keeping up, sampled every tick rather
         // than only when a frame is rejected.
         FrameProfile::record(FrameProfile::Stage::EncoderBacklogBytes,
-                             m_ffmpeg->bytesToWrite());
+                             m_videoWriter ? m_videoWriter->queuedBytes() : 0);
     }
 
     // A null frame must still produce bytes. ffmpeg opens its inputs in order
@@ -622,8 +827,15 @@ void EncoderPipeline::onTickVideo() {
         frame = m_blackFrame;
     }
 
-    // Do not queue a frame ffmpeg has not asked for yet, and decide that before
-    // paying for the conversion below.
+    // Nothing to write into yet: ffmpeg has not opened the video pipe. Not a
+    // dropped frame, because the recording has not started carrying media.
+    if (!m_videoWriter) {
+        ++m_idleTicks;
+        return;
+    }
+
+    // Do not queue a frame the transport has no room for, and decide that
+    // before paying for the conversion below.
     //
     // Each frame is about 8 MB uncompressed, so at 60 fps this pushes roughly
     // half a gigabyte a second into stdin, and at 120 a gigabyte. QProcess
@@ -640,8 +852,7 @@ void EncoderPipeline::onTickVideo() {
     // Dropping beats blocking because this runs on the thread that also
     // composes and paints. A dropped frame costs one frame; blocking here
     // would freeze the preview and the interface.
-    const qint64 canvasBytes = qint64(MalloyCanvas::Width) * MalloyCanvas::Height * 4;
-    if (m_ffmpeg->bytesToWrite() > kMaxWriteBacklogFrames * canvasBytes) {
+    if (m_videoWriter->queuedFrames() >= VideoPipeWriter::kMaxQueuedFrames) {
         ++m_composedFramesRejected;
         return;
     }
@@ -663,29 +874,23 @@ void EncoderPipeline::onTickVideo() {
                              Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
     }
 
-    const qint64 frameBytes = qint64(MalloyCanvas::Width) * MalloyCanvas::Height * 4;
-
-    // Single buffered write for the whole frame — Format_ARGB32 at 1920×1080
-    // has no row padding (7680-byte rows on a 32-byte aligned buffer), so we
-    // can ship the whole image in one QProcess::write() call. This avoids
-    // partial-write error spam if ffmpeg dies mid-frame.
-    ++m_composedFramesAccepted;
+    // Handing the frame over, not writing it. The image is implicitly shared,
+    // so ownership moves to the writer without copying eight megabytes, and
+    // this thread returns whatever the pipe is doing.
+    //
+    // ENC ACCEPT keeps its meaning: pictures this pipeline took responsibility
+    // for. What that responsibility now means is acceptance into the video
+    // transport rather than a QProcess write, and PIPE WRITE counts the writes
+    // the transport actually completed. The gap between the two is the
+    // transport's own backlog, which used to be invisible.
     {
-        // QProcess copies the frame into a buffer of its own and returns;
-        // the pipe write happens elsewhere. So this is a memcpy of eight
-        // megabytes, not a wait on ffmpeg, and separating the two is the
-        // point of measuring it next to the backlog above.
         FrameProfile::Scoped timing(FrameProfile::Stage::EncoderWrite);
-        if (out.sizeInBytes() == frameBytes) {
-            m_ffmpeg->write(reinterpret_cast<const char*>(out.constBits()), frameBytes);
-        } else {
-            // Defensive fall-back if Qt unexpectedly inserted scanline padding.
-            const int rowBytes = MalloyCanvas::Width * 4;
-            for (int y = 0; y < MalloyCanvas::Height; ++y) {
-                m_ffmpeg->write(reinterpret_cast<const char*>(out.constScanLine(y)), rowBytes);
-            }
+        if (!m_videoWriter->trySubmit(std::move(out))) {
+            ++m_composedFramesRejected;
+            return;
         }
     }
+    ++m_composedFramesAccepted;
 }
 
 void EncoderPipeline::onMixedSamples(QByteArray pcm) {
@@ -700,6 +905,13 @@ bool EncoderPipeline::writeAudioBytes(const QByteArray& pcm) {
     // optional.
     m_audioWriter->enqueue(pcm);
     return true;
+}
+
+void EncoderPipeline::onVideoPipeConnected() {
+    // ffmpeg has opened the video pipe, so there is a reader and writing can
+    // begin. The writer owns the handle from here.
+    m_videoWriter = new VideoPipeWriter(m_videoPipe);
+    m_videoWriter->start();
 }
 
 void EncoderPipeline::onPipeConnected() {

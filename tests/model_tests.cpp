@@ -3813,7 +3813,7 @@ void MalloyModelTests::frameProfileSummarisesADistribution() {
 
     // The report names only the stages it has samples for.
     const QString text = report();
-    QVERIFY(text.contains(QStringLiteral("ENCODER WRITE")));
+    QVERIFY(text.contains(QStringLiteral("ENCODER HANDOFF")));
     QVERIFY(!text.contains(QStringLiteral("WIDGET BLIT")));
 
     // Reading the window empties it, so a series line describes one second

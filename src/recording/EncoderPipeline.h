@@ -165,6 +165,7 @@ private slots:
     void onFfmpegError();
     void onFfmpegFinished(int exitCode);
     void onPipeConnected();
+    void onVideoPipeConnected();
     void onPipeConnectFailed();
     void onFfmpegStderrReady();
 
@@ -212,12 +213,6 @@ private:
     // FollowSource can tell a new picture from the same one polled again.
     quint64 m_lastSentSequence = 0;
 
-    // How much unwritten video may sit in QProcess's buffer before frames are
-    // dropped instead of queued, counted in whole frames. Three is enough to
-    // ride out scheduling jitter and a slow encoder tick without letting the
-    // buffer become unbounded; at 1080p it caps the backlog near 25 MB.
-    static constexpr qint64 kMaxWriteBacklogFrames = 3;
-
     // Composed pictures that existed and were never handed to the encoder
     // because its input buffer was already full. This is media loss, and it is
     // what progress() reports and the status bar shows as ENC DROP.
@@ -261,6 +256,10 @@ private:
     // look like it was shedding nine frames in ten.
     int m_idleTicks = 0;
 
+    // Frames the transport finished writing, kept because the run summary
+    // is printed after the writer has already been retired.
+    int m_framesPiped = 0;
+
     // Wall clock at the previous video tick, so the gap between what the
     // timer asked for and what it got can be recorded. That gap is how
     // starved the event loop this shares with composition and painting is.
@@ -274,6 +273,7 @@ private:
     QString  m_ffmpegPath;
     Target   m_target;
     QString  m_audioPipeName;     // "\\\\.\\pipe\\malloy_audio_<rnd>"
+    QString  m_videoPipeName;     // the same, for video
 
     QProcess* m_ffmpeg = nullptr;
     QTimer*   m_videoTimer = nullptr;
@@ -281,10 +281,17 @@ private:
     QThread*  m_pipeAcceptor = nullptr;
 
     void*             m_audioPipe = nullptr;  // HANDLE; void* to avoid windows.h in header
+    void*             m_videoPipe = nullptr;
     // Owns the blocking WriteFile on the audio pipe. Defined in the .cpp
     // because it needs windows.h. Never write to the pipe from this class's
     // own thread: see AudioPipeWriter for the deadlock that caused.
     class AudioPipeWriter* m_audioWriter = nullptr;
+    // Owns the write into ffmpeg's video pipe. Video used to go through
+    // QProcess to stdin, whose buffer only moves when the Qt event loop
+    // runs, on the same thread that composes the frames. A congested loop
+    // therefore starved ffmpeg while the application looked busy and well.
+    class VideoPipeWriter* m_videoWriter = nullptr;
+    QThread*  m_videoAcceptor = nullptr;
     TimedFrameSource* m_frames = nullptr;
     TimedPcmSource*   m_audio  = nullptr;
 

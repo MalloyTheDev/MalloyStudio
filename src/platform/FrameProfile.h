@@ -45,8 +45,13 @@ enum class Stage {
     WidgetBlit,
     // Un-premultiplying the canvas into the format declared on ffmpeg's stdin.
     EncoderConvert,
-    // Handing the frame to QProcess, which copies it into its own buffer.
+    // Handing the frame to the video transport. Since the transport owns a
+    // thread of its own this is a queue insertion, not a write.
     EncoderWrite,
+    // The write the transport thread actually performed into the pipe. This is
+    // where blocking on ffmpeg shows up, and it is deliberately not on the
+    // thread that composes.
+    PipeWrite,
     // Bytes waiting to be written to ffmpeg, sampled once per tick. Not a
     // duration: this is the queue depth that says whether the far end is
     // keeping up.
@@ -161,7 +166,8 @@ inline const char* name(Stage stage) {
         case Stage::Composition:         return "COMPOSITION";
         case Stage::WidgetBlit:          return "WIDGET BLIT";
         case Stage::EncoderConvert:      return "ENCODER CONVERT";
-        case Stage::EncoderWrite:        return "ENCODER WRITE";
+        case Stage::EncoderWrite:        return "ENCODER HANDOFF";
+        case Stage::PipeWrite:           return "PIPE WRITE";
         case Stage::EncoderBacklogBytes: return "ENCODER BACKLOG";
         case Stage::TickGap:             return "TICK GAP";
         case Stage::Count:               break;
