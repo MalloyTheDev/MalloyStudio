@@ -5,6 +5,7 @@
 #include "capture/CaptureController.h"
 #include "capture/WgcCapture.h"
 #include "platform/FrameProfile.h"
+#include "ui/PreviewWidget.h"
 #include "input/HotkeyManager.h"
 #include "model/Canvas.h"
 #include "model/FilterEffect.h"
@@ -273,6 +274,9 @@ private slots:
     // The frame profiler: buckets keep their order, percentiles land where
     // the samples actually are, and nothing is recorded while it is off.
     void frameProfileSummarisesADistribution();
+    // Composition happens because somebody consumes it, never because a
+    // widget was painted. The rule that decides is this one.
+    void compositionFollowsConsumersNotPaintEvents();
 };
 
 // Creates a placeholder media file so a clip can pass the graph builder's
@@ -3820,6 +3824,30 @@ void MalloyModelTests::frameProfileSummarisesADistribution() {
 
     setEnabled(false);
     reset();
+}
+
+void MalloyModelTests::compositionFollowsConsumersNotPaintEvents() {
+    // A recording must produce media whether or not anyone can see the window.
+    // This is the rule whose absence produced a valid 184 second file holding
+    // a still picture for 143 of them, with the duration correct and no error
+    // reported anywhere.
+    QVERIFY(PreviewWidget::compositionRequired(/*recording=*/true, /*streaming=*/false,
+                                               /*previewVisible=*/false,
+                                               /*contentAdvanced=*/true));
+    QVERIFY(PreviewWidget::compositionRequired(false, /*streaming=*/true, false, true));
+
+    // Nobody recording, nobody streaming, nobody looking: composing would be
+    // work for no consumer. One measured run threw away 36000 readbacks for
+    // want of this half of the rule.
+    QVERIFY(!PreviewWidget::compositionRequired(false, false, false, true));
+
+    // Visible with nothing recording is still a consumer: the preview itself.
+    QVERIFY(PreviewWidget::compositionRequired(false, false, /*previewVisible=*/true, true));
+
+    // A picture that has not moved is never composed again, whoever is
+    // watching. This is what keeps a repaint from being mistaken for new media.
+    QVERIFY(!PreviewWidget::compositionRequired(true, true, true, /*contentAdvanced=*/false));
+    QVERIFY(!PreviewWidget::compositionRequired(false, false, true, false));
 }
 
 QTEST_MAIN(MalloyModelTests)

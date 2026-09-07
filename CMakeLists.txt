@@ -233,6 +233,10 @@ qt_add_executable(MalloyStudioTests
     src/ui/IconFactory.h
     src/ui/Theme.cpp
     src/ui/Theme.h
+    # PreviewWidget carries the rule deciding when a frame is composed, which
+    # is what keeps a recording alive while the window is minimized.
+    src/ui/PreviewWidget.cpp
+    src/ui/PreviewWidget.h
 )
 
 # Force console subsystem so CTest captures stdout test output

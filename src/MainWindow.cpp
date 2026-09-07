@@ -679,6 +679,35 @@ void MainWindow::connectModelSignals() {
     connect(m_media, &MediaController::streamingProgress,
             m_streamStudio, &StreamingWorkspace::onStreamProgress);
 
+    // Tell the compositor when something is consuming frames.
+    //
+    // Composition is no longer a side effect of painting, so it has to be told
+    // that a recording exists; otherwise a minimized window would compose
+    // nothing and the recording would hold its last picture while still
+    // reporting the right duration. That is #38, and this is the wiring that
+    // makes the invariant true: media production does not depend on whether
+    // the window is visible, painted, focused or minimized.
+    if (m_preview) {
+        connect(m_media, &MediaController::recordingStarted, this,
+                [this] { m_preview->setRecordingActive(true); });
+        connect(m_media, &MediaController::recordingFinished, this,
+                [this](const QString&, qint64) { m_preview->setRecordingActive(false); });
+        connect(m_media, &MediaController::streamingStarted, this,
+                [this] { m_preview->setStreamingActive(true); });
+        connect(m_media, &MediaController::streamingFinished, this,
+                [this] { m_preview->setStreamingActive(false); });
+        // A failed start leaves neither a started nor a finished signal on the
+        // path that matters, so clear both on an error rather than leaving the
+        // compositor running for a consumer that is not there.
+        connect(m_media, &MediaController::errorOccurred, this,
+                [this](const QString& origin, const QString&) {
+                    if (origin == QStringLiteral("recording"))
+                        m_preview->setRecordingActive(false);
+                    else if (origin == QStringLiteral("streaming"))
+                        m_preview->setStreamingActive(false);
+                });
+    }
+
     // The status bar shows measured throughput for whichever pipeline is
     // running, rather than the numbers it used to invent.
     if (auto* bar = m_shell->status()) {

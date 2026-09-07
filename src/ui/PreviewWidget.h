@@ -40,9 +40,32 @@ public:
     void setReplayBufferSeconds(int seconds);   // 0 = disable
     QQueue<ReplayFrame> snapshotReplayFrames() const;  // thread-safe copy
 
-    // Snapshot of the most recent composed canvas (post-transition overlay),
-    // updated at the end of every paintEvent. Thread-safe — Recorder pulls
-    // this from a 33 ms timer without triggering extra paint cycles.
+    // Whether anything is consuming composed frames.
+    //
+    // Composition used to be a side effect of painting a widget, which made
+    // the media a recording produced depend on whether Windows felt like
+    // sending paint events. Minimizing the window stopped composition, and a
+    // recording running at the time held its last picture for as long as the
+    // window stayed down while still reporting the correct duration: a valid
+    // file with a 143 second frozen span and no error anywhere. See #38.
+    //
+    // So the rule is now explicit and the recorder says whether it needs
+    // frames, rather than the answer being inferred from the paint lifecycle.
+    void setRecordingActive(bool active);
+    void setStreamingActive(bool active);
+
+    // Whether a composition should happen, given who is watching.
+    //
+    // Pure so the rule can be tested without a window, because the rule is the
+    // fix: media production must not depend on widget visibility, paint
+    // events, focus, minimization or occlusion, and the preview must not cause
+    // work when nobody can see it either. 36000 readbacks were thrown away in
+    // one measured run for want of the second half of that.
+    static bool compositionRequired(bool recordingActive, bool streamingActive,
+                                    bool previewVisible, bool contentAdvanced);
+
+    // Snapshot of the most recent composed canvas (post-transition overlay).
+    // Thread safe: the recorder pulls this without triggering paint cycles.
     QImage cachedComposedFrame() const;
 
     // TimedFrameSource interface — currentFrame() returns the cached composed
@@ -81,6 +104,16 @@ private:
         ResizeBottomLeft,
         ResizeBottomRight
     };
+
+    // Composes the canvas and publishes it. Called by the scheduler below, not
+    // by paintEvent: painting is now a consumer of the composed frame rather
+    // than its producer.
+    void composeNow();
+    // Coalesces content changes into one composition per pass of the event
+    // loop, which is what update() used to do for painting.
+    void scheduleComposition();
+    void composeIfNeeded();
+    bool previewVisible() const;
 
     QRect canvasRect() const;
     QPointF widgetToCanvas(const QPoint& point) const;
@@ -124,7 +157,17 @@ private:
     // that leave the picture identical.
     std::atomic<quint64> m_contentSequence{1};
 
-    void markContentChanged() { m_contentSequence.fetch_add(1, std::memory_order_release); }
+    void markContentChanged() {
+        m_contentSequence.fetch_add(1, std::memory_order_release);
+        scheduleComposition();
+    }
+
+    bool m_recordingActive = false;
+    bool m_streamingActive = false;
+    // Set while a composition is already queued for this pass of the event
+    // loop, so a burst of arriving frames produces one composition rather than
+    // one each.
+    bool m_compositionScheduled = false;
 
 public:
     // Compositions actually published for the encoder to see. The COMPOSED

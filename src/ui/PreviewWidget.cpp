@@ -226,9 +226,66 @@ PreviewWidget::DragMode PreviewWidget::handleAtCanvasPoint(SceneItem* item, cons
     return DragMode::Move;
 }
 
-void PreviewWidget::paintEvent(QPaintEvent*) {
-    const QRect canvas = canvasRect();
-    // Program role always renders the on-air scene; Staged renders the editable/staged scene.
+bool PreviewWidget::compositionRequired(bool recordingActive, bool streamingActive,
+                                       bool previewVisible, bool contentAdvanced) {
+    // Nothing to compose if the picture has not moved.
+    if (!contentAdvanced) return false;
+    // Somebody is recording it, streaming it, or looking at it. Otherwise the
+    // frame would be composed for nobody.
+    return recordingActive || streamingActive || previewVisible;
+}
+
+void PreviewWidget::setRecordingActive(bool active) {
+    m_recordingActive = active;
+    // Starting a recording is itself a reason to compose: the encoder must not
+    // have to wait for the next content change to get its first picture.
+    if (active) scheduleComposition();
+}
+
+void PreviewWidget::setStreamingActive(bool active) {
+    m_streamingActive = active;
+    if (active) scheduleComposition();
+}
+
+bool PreviewWidget::previewVisible() const {
+    // A minimized window still reports its widgets as visible, and it is the
+    // window being down that stops paint events arriving, so both have to be
+    // asked.
+    const QWidget* top = window();
+    return isVisible() && !(top && top->isMinimized());
+}
+
+void PreviewWidget::scheduleComposition() {
+    if (m_compositionScheduled) return;
+    m_compositionScheduled = true;
+    // Queued rather than immediate, so a burst of frames arriving in one pass
+    // of the event loop composes once. This is the coalescing that update()
+    // used to provide, kept now that painting is no longer the trigger.
+    QMetaObject::invokeMethod(this, [this] { composeIfNeeded(); }, Qt::QueuedConnection);
+}
+
+void PreviewWidget::composeIfNeeded() {
+    m_compositionScheduled = false;
+
+    const bool contentAdvanced =
+        m_contentSequence.load(std::memory_order_acquire) !=
+        m_composedSequence.load(std::memory_order_acquire);
+
+    if (compositionRequired(m_recordingActive, m_streamingActive,
+                            previewVisible(), contentAdvanced)) {
+        composeNow();
+        // The picture changed, so anyone looking at it needs a repaint. If the
+        // window is down this does nothing, which is the point: the preview
+        // stops costing anything while the recording carries on.
+        update();
+    }
+}
+
+void PreviewWidget::composeNow() {
+    std::optional<FrameProfile::Scoped> composeTiming;
+    if (FrameProfile::enabled())
+        composeTiming.emplace(FrameProfile::Stage::Composition);
+
     Scene* scene = nullptr;
     if (m_scenes) {
         scene = (m_role == Role::Program)
@@ -236,17 +293,8 @@ void PreviewWidget::paintEvent(QPaintEvent*) {
             : m_scenes->sceneAt(m_scenes->currentIndex());
     }
 
-    // --- 1. Render the scene off-screen at canvas-native resolution.
-    //        This is what the Recorder consumes (always 1920×1080 regardless
-    //        of how the user sized the preview dock), and it also avoids the
-    //        recursion that calling grab() from paintEvent would cause.
-    // Allocating the canvas, clearing it and drawing the sources into it.
-    // Timed apart from the blit below because one is work the recording
-    // needs and the other is work the preview needs, and they are charged
-    // to the same thread.
-    std::optional<FrameProfile::Scoped> composeTiming;
-    if (FrameProfile::enabled())
-        composeTiming.emplace(FrameProfile::Stage::Composition);
+    // Rendered at canvas-native resolution whatever size the dock happens to
+    // be, because this is what the recorder consumes.
     QImage composed(MalloyCanvas::Width, MalloyCanvas::Height, QImage::Format_ARGB32_Premultiplied);
     composed.fill(QColor(0, 0, 0));
     if (scene) {
@@ -259,7 +307,7 @@ void PreviewWidget::paintEvent(QPaintEvent*) {
             Source* source = m_scenes->sourceForItem(item);
             drawItem(p, item, source, item->transform(), /*selected=*/false);
         }
-        // Transition overlay in canvas coords so it's also captured by the recorder
+        // Transition overlay in canvas coords so the recorder sees it too.
         if (!m_transFrom.isNull() && m_transFactor < 1.0f) {
             p.setOpacity(1.0 - static_cast<double>(m_transFactor));
             p.drawImage(composed.rect(), m_transFrom);
@@ -267,22 +315,38 @@ void PreviewWidget::paintEvent(QPaintEvent*) {
         }
     }
 
-    // --- 2. Publish to the cache for Recorder (Program role only).
-    if (m_role == Role::Program) {
-        QMutexLocker lock(&m_composedMutex);
-        m_composedFrame = composed;
-        // The composed frame is labelled with the content it represents, not
-        // with how many times the widget happened to repaint. A repaint caused
-        // by a selection handle moving produces the same picture, and a
-        // recorder that treated it as new would be inventing media.
-        m_composedSequence.store(m_contentSequence.load(std::memory_order_acquire),
-                                 std::memory_order_release);
-        m_composedCount.fetch_add(1, std::memory_order_relaxed);
+    QMutexLocker lock(&m_composedMutex);
+    m_composedFrame = composed;
+    // Labelled with the content it represents, not with how many times the
+    // widget happened to repaint. A repaint caused by a selection handle
+    // moving produces the same picture, and a recorder that treated it as new
+    // would be inventing media.
+    m_composedSequence.store(m_contentSequence.load(std::memory_order_acquire),
+                             std::memory_order_release);
+    m_composedCount.fetch_add(1, std::memory_order_relaxed);
+}
+
+void PreviewWidget::paintEvent(QPaintEvent*) {
+    const QRect canvas = canvasRect();
+    Scene* scene = nullptr;
+    if (m_scenes) {
+        scene = (m_role == Role::Program)
+            ? m_scenes->sceneAt(m_scenes->programIndex())
+            : m_scenes->sceneAt(m_scenes->currentIndex());
     }
+
+    // Painting consumes the composed frame; it does not produce it. When the
+    // window has been down, or this widget hidden, the cached frame can be
+    // older than the content, and being asked to paint is itself proof that
+    // somebody is looking, so compose first in that case.
+    if (m_contentSequence.load(std::memory_order_acquire) !=
+        m_composedSequence.load(std::memory_order_acquire)) {
+        composeNow();
+    }
+    const QImage composed = cachedComposedFrame();
 
     // --- 3. Blit composed image to widget; selection handles drawn last
     //        (in widget pixel coords, not captured).
-    composeTiming.reset();
     std::optional<FrameProfile::Scoped> blitTiming;
     if (FrameProfile::enabled())
         blitTiming.emplace(FrameProfile::Stage::WidgetBlit);
@@ -296,7 +360,7 @@ void PreviewWidget::paintEvent(QPaintEvent*) {
     const bool isProgramMonitor = (m_role == Role::Program) && inStudio;
     painter.setPen(QPen(isProgramMonitor ? QColor(220, 50, 50) : QColor(78, 78, 78), isProgramMonitor ? 2 : 1));
     painter.drawRect(canvas);
-    if (scene) {
+    if (scene && !composed.isNull()) {
         painter.drawImage(canvas, composed);
         // Show selection handles only when editing is meaningful:
         // - Staged role: always (user edits staged scene)
