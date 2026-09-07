@@ -70,9 +70,6 @@ QStringList buildInputArgs(const OutputSettings& s, const QString& audioPipeName
         // `-stats` asks for it anyway, without bringing back the rest of the
         // info-level noise; verified against ffmpeg 8.1.1, where `-loglevel
         // error` alone emits nothing at all.
-        //
-        // Necessary but, on at least one machine, not sufficient: the status
-        // line still does not reach readyReadStandardError. Tracked separately.
         QStringLiteral("-stats"),
         QStringLiteral("-f"),       QStringLiteral("rawvideo"),
         QStringLiteral("-pix_fmt"), QStringLiteral("bgra"),
@@ -313,8 +310,22 @@ void EncoderPipeline::onTickVideo() {
     if (!m_running || !m_frames || !m_ffmpeg) return;
     if (m_ffmpeg->state() != QProcess::Running) return;
 
-    const QImage frame = m_frames->currentFrame();
-    if (frame.isNull()) return;
+    // A null frame must still produce bytes. ffmpeg opens its inputs in order
+    // and blocks in avformat_open_input until the first bytes arrive on each
+    // one, and it prints nothing at all, on any channel, until every input is
+    // open. Skipping a tick here therefore does not merely drop a frame: it can
+    // stall the whole process before its transcode loop, silently, for the
+    // length of the run. RingTimedFrameSource pre-fills a black frame for the
+    // same reason.
+    QImage frame = m_frames->currentFrame();
+    if (frame.isNull()) {
+        if (m_blackFrame.isNull()) {
+            m_blackFrame = QImage(m_frames->nativeWidth(), m_frames->nativeHeight(),
+                                  QImage::Format_ARGB32);
+            m_blackFrame.fill(Qt::black);
+        }
+        frame = m_blackFrame;
+    }
 
     // Convert to *straight-alpha* BGRA at canvas-native resolution. We declared
     // `-pix_fmt bgra` on stdin, which ffmpeg interprets as non-premultiplied.
@@ -426,7 +437,11 @@ void EncoderPipeline::onFfmpegStderrReady() {
         const QChar ch = m_stderrPending.at(i);
         if (ch == QLatin1Char('\n') || ch == QLatin1Char('\r')) {
             if (i > searchFrom) {
-                parseProgressLine(QStringView(m_stderrPending).mid(searchFrom, i - searchFrom));
+                // By value, not a view into m_stderrPending. parseProgressLine
+                // emits progress() synchronously, and any slot that spins the
+                // event loop would re-enter this function and remove() from
+                // under the view.
+                parseProgressLine(m_stderrPending.mid(searchFrom, i - searchFrom));
             }
             searchFrom = i + 1;
         }

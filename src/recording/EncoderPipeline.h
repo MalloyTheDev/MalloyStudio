@@ -1,6 +1,8 @@
 #pragma once
 #include "recording/OutputSettings.h"
 
+#include <QImage>
+
 #include <QByteArray>
 #include <QObject>
 #include <QString>
@@ -116,6 +118,10 @@ private:
     bool writeAudioBytes(const QByteArray& pcm);
     void appendStderrTail(const QString& chunk);
     void parseProgressLine(QStringView line);
+
+    // Written to stdin whenever the frame source has nothing yet, so ffmpeg's
+    // video input never starves. See onTickVideo for why that matters.
+    QImage m_blackFrame;
 
     QString  m_ffmpegPath;
     Target   m_target;

@@ -15,8 +15,8 @@ class QTimer;
 // Every figure here is measured or blank. CPU and memory come from the OS and
 // free space from the recording volume, all three verified against what Windows
 // reports. Bitrate and encode rate come from ffmpeg's own progress lines by way
-// of setEncodeStats(); those lines do not currently reach the application, so
-// both read as unknown, which is the truthful thing to show until they do.
+// of setEncodeStats(), and read as unknown until ffmpeg reports them, which it
+// does not do until every one of its inputs has opened.
 //
 // Nothing here is ever filled in with something plausible. A bar whose job is
 // to say whether the machine is coping is worse than useless when it invents
