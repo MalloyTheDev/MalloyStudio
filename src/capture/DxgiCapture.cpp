@@ -168,8 +168,23 @@ void DxgiCapture::run() {
         }
         if (FAILED(hr)) break;
 
-        // Only copy when a new desktop frame was actually presented.
-        if (info.LastPresentTime.QuadPart != 0) {
+        // Only copy when a new desktop frame was actually presented, and only
+        // when the result has somewhere to go.
+        //
+        // Both questions are asked before the readback rather than after it.
+        // This loop used to copy, map and memcpy eight megabytes and only then
+        // ask whether the consumer had room, so a frame it was about to
+        // discard had already cost the full price. The other backend refuses
+        // first; now both do.
+        const bool wanted = m_delivering.load(std::memory_order_relaxed);
+        const bool haveRoom = m_inFlight->load(std::memory_order_acquire) < kMaxInFlightFrames;
+        if (info.LastPresentTime.QuadPart != 0 && wanted && !haveRoom) {
+            // Produced and lost: somebody wanted this frame and there was no
+            // room for it. That is CAP DROP, and it costs nothing to say so.
+            m_sourceFramesProduced.fetch_add(1, std::memory_order_relaxed);
+            m_droppedBeforeComposition.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (info.LastPresentTime.QuadPart != 0 && wanted && haveRoom) {
             ID3D11Texture2D* tex = nullptr;
             const HRESULT qiHr = resource->QueryInterface(__uuidof(ID3D11Texture2D),
                                                           reinterpret_cast<void**>(&tex));
@@ -211,15 +226,8 @@ void DxgiCapture::run() {
 
             if (!frame.isNull()) {
                 m_sourceFramesProduced.fetch_add(1, std::memory_order_relaxed);
-
-                // Skip rather than queue when the consumer is already behind.
-                // See inFlightCounter() for why this bound exists.
-                if (m_inFlight->load(std::memory_order_acquire) >= kMaxInFlightFrames) {
-                    m_droppedBeforeComposition.fetch_add(1, std::memory_order_relaxed);
-                } else {
-                    m_inFlight->fetch_add(1, std::memory_order_release);
-                    emit frameReady(frame);
-                }
+                m_inFlight->fetch_add(1, std::memory_order_release);
+                emit frameReady(frame);
             }
         }
 

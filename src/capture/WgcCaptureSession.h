@@ -26,6 +26,7 @@ public:
     void startCapture() override;
     void stopCapture() override;
     CaptureStats stats() const override;
+    void setDelivering(bool delivering) override;
 
 private:
     void attach();
@@ -34,6 +35,7 @@ private:
     int      m_outputIndex  = -1;
     quintptr m_hwnd         = 0;
 
+    bool m_delivering = true;
     std::unique_ptr<WgcCapture> m_capture;
 
     // The backend's counters, kept after it is torn down. A run summary is

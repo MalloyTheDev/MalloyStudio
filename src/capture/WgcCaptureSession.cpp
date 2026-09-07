@@ -32,6 +32,7 @@ void WgcCaptureSession::startCapture() {
     }
 
     attach();
+    m_capture->setDelivering(m_delivering);
 
     if (!m_capture->start([this](CapturedFrame&& frame) {
             // On the backend's delivery thread. Nothing is done here beyond
@@ -86,6 +87,11 @@ void WgcCaptureSession::stopCapture() {
     // outlives it.
     m_retired = m_capture->stats();
     m_capture.reset();
+}
+
+void WgcCaptureSession::setDelivering(bool delivering) {
+    m_delivering = delivering;
+    if (m_capture) m_capture->setDelivering(delivering);
 }
 
 CaptureStats WgcCaptureSession::stats() const {

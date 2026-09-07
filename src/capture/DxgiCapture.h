@@ -17,6 +17,20 @@ public:
 
     void requestStop();
 
+    // Whether anything downstream wants frames.
+    //
+    // A backend with no consumer was still doing every readback and throwing
+    // the result away: with the window minimized and nothing recording, about
+    // 56 a second at 3 to 4.7 ms each, a fifth of a processor core spent
+    // producing frames for nobody. The desktop is still acquired and released
+    // so the duplication stays healthy, but nothing is copied or counted.
+    //
+    // Suspension is not a stop. The session, its statistics and everything
+    // downstream of it are untouched, so resuming is not a new epoch.
+    void setDelivering(bool delivering) {
+        m_delivering.store(delivering, std::memory_order_relaxed);
+    }
+
     // Frames handed to the consumer but not yet taken off its event queue.
     //
     // Each frame is a full uncompressed image, about 8 MB at 1080p, delivered
@@ -56,6 +70,7 @@ private:
     int m_adapterIndex;
     int m_outputIndex;
     std::atomic<bool> m_running{false};
+    std::atomic<bool> m_delivering{true};
     std::shared_ptr<std::atomic<int>> m_inFlight =
         std::make_shared<std::atomic<int>>(0);
     std::atomic<int> m_sourceFramesProduced{0};

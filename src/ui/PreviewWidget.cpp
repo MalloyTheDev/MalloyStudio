@@ -237,6 +237,7 @@ bool PreviewWidget::compositionRequired(bool recordingActive, bool streamingActi
 
 void PreviewWidget::setRecordingActive(bool active) {
     m_recordingActive = active;
+    reportDemand();
     // Starting a recording is itself a reason to compose: the encoder must not
     // have to wait for the next content change to get its first picture.
     if (active) scheduleComposition();
@@ -244,7 +245,19 @@ void PreviewWidget::setRecordingActive(bool active) {
 
 void PreviewWidget::setStreamingActive(bool active) {
     m_streamingActive = active;
+    reportDemand();
     if (active) scheduleComposition();
+}
+
+bool PreviewWidget::consumersPresent() const {
+    return m_recordingActive || m_streamingActive || previewVisible();
+}
+
+void PreviewWidget::reportDemand() {
+    const bool wanted = consumersPresent();
+    if (wanted == m_lastReportedDemand) return;
+    m_lastReportedDemand = wanted;
+    emit consumerDemandChanged(wanted);
 }
 
 bool PreviewWidget::previewVisible() const {
@@ -324,6 +337,36 @@ void PreviewWidget::composeNow() {
     m_composedSequence.store(m_contentSequence.load(std::memory_order_acquire),
                              std::memory_order_release);
     m_composedCount.fetch_add(1, std::memory_order_relaxed);
+}
+
+void PreviewWidget::showEvent(QShowEvent* event) {
+    QWidget::showEvent(event);
+    // The window has to be watched as well as this widget: minimizing stops
+    // paint events without ever hiding the widget itself, and something has to
+    // notice in order to wake capture again on restore. Without an event to
+    // wake on, suspended capture would produce no content, and no content
+    // means nothing to re-evaluate: it would stay suspended.
+    if (!m_watchingWindow) {
+        if (QWidget* top = window()) {
+            top->installEventFilter(this);
+            m_watchingWindow = true;
+        }
+    }
+    reportDemand();
+    scheduleComposition();
+}
+
+void PreviewWidget::hideEvent(QHideEvent* event) {
+    QWidget::hideEvent(event);
+    reportDemand();
+}
+
+bool PreviewWidget::eventFilter(QObject* watched, QEvent* event) {
+    if (event->type() == QEvent::WindowStateChange) {
+        reportDemand();
+        scheduleComposition();
+    }
+    return QWidget::eventFilter(watched, event);
 }
 
 void PreviewWidget::paintEvent(QPaintEvent*) {

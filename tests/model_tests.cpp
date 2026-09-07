@@ -283,6 +283,8 @@ private slots:
     // A settings control must be able to show the rate that is stored,
     // because the page writes back what it shows.
     void frameRateChoicesAlwaysIncludeTheConfiguredRate();
+    // Capture should run when something wants frames and not otherwise.
+    void captureDemandFollowsConsumers();
 };
 
 // Creates a placeholder media file so a clip can pass the graph builder's
@@ -3940,6 +3942,37 @@ void MalloyModelTests::frameRateChoicesAlwaysIncludeTheConfiguredRate() {
     QVERIFY(!none.contains(QStringLiteral("0")));
     QVERIFY(none.contains(QStringLiteral("60")));
     QVERIFY(!OutputSettings::frameRateChoices(-5).contains(QStringLiteral("-5")));
+}
+
+void MalloyModelTests::captureDemandFollowsConsumers() {
+    SceneCollection scenes;
+    PreviewWidget preview(&scenes, PreviewWidget::Role::Program);
+
+    // Never shown, nothing recording: nobody wants frames, so the capture
+    // backends should not be reading any back. This is the state that cost a
+    // fifth of a core producing pictures for no one.
+    QVERIFY(!preview.consumersPresent());
+
+    QSignalSpy demand(&preview, &PreviewWidget::consumerDemandChanged);
+
+    // A recording is a consumer whether or not anything is on screen. This is
+    // the same guarantee #38 turned on, reaching one stage further upstream.
+    preview.setRecordingActive(true);
+    QVERIFY(preview.consumersPresent());
+    QCOMPARE(demand.count(), 1);
+    QCOMPARE(demand.takeFirst().at(0).toBool(), true);
+
+    // Streaming counts too, and demand does not drop while it holds.
+    preview.setStreamingActive(true);
+    preview.setRecordingActive(false);
+    QVERIFY(preview.consumersPresent());
+
+    // Only when the last consumer goes does demand fall, and it is reported
+    // once rather than on every change that leaves the answer the same.
+    preview.setStreamingActive(false);
+    QVERIFY(!preview.consumersPresent());
+    QCOMPARE(demand.count(), 1);
+    QCOMPARE(demand.takeFirst().at(0).toBool(), false);
 }
 
 QTEST_MAIN(MalloyModelTests)

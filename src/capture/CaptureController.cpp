@@ -37,6 +37,7 @@ void DxgiCaptureSession::startCapture() {
     // DxgiCapture, which records the moment it hands a frame over.
 
     connect(m_capture, &DxgiCapture::captureError, this, &CaptureSession::captureError, Qt::QueuedConnection);
+    m_capture->setDelivering(m_delivering);
     m_capture->start();
 }
 
@@ -52,6 +53,13 @@ void DxgiCaptureSession::stopCapture() {
 
 CaptureStats DxgiCaptureSession::stats() const {
     return m_capture ? m_capture->stats() : m_retired;
+}
+
+void DxgiCaptureSession::setDelivering(bool delivering) {
+    // Remembered as well as forwarded, so a session started while suspended
+    // does not wake up producing.
+    m_delivering = delivering;
+    if (m_capture) m_capture->setDelivering(delivering);
 }
 
 CaptureController::CaptureController(SceneCollection* scenes, QObject* parent)
@@ -202,6 +210,7 @@ void CaptureController::stopAll() {
 void CaptureController::startSession(int adapterIndex, int outputIndex) {
     const QString key = keyFor(adapterIndex, outputIndex);
     CaptureSession* session = m_factory(adapterIndex, outputIndex, this);
+    session->setDelivering(m_delivering);
     ActiveSession active{adapterIndex, outputIndex, session, QStringLiteral("Starting")};
     m_sessions.insert(key, active);
     setMonitorStatus(key, QStringLiteral("Starting"));
@@ -242,6 +251,7 @@ void CaptureController::stopSession(const QString& key, bool setIdleStatus) {
 void CaptureController::startWindowSession(quintptr hwnd) {
     const QString key = keyForWindow(hwnd);
     CaptureSession* session = m_windowFactory(hwnd, this);
+    session->setDelivering(m_delivering);
     ActiveWindowSession active{hwnd, session};
     m_windowSessions.insert(key, active);
 
@@ -316,6 +326,17 @@ CaptureStats CaptureController::captureStats() const {
         total.framesDropped  += stats.framesDropped;
     }
     return total;
+}
+
+void CaptureController::setDelivering(bool delivering) {
+    if (m_delivering == delivering) return;
+    m_delivering = delivering;
+    for (const ActiveSession& active : m_sessions)
+        if (active.session) active.session->setDelivering(delivering);
+    for (const ActiveWindowSession& active : m_windowSessions)
+        if (active.session) active.session->setDelivering(delivering);
+    for (const ActiveCameraSession& active : m_cameraSessions)
+        if (active.session) active.session->setDelivering(delivering);
 }
 
 void CaptureController::setSummary(const QString& summary) {

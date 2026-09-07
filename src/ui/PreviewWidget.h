@@ -64,6 +64,19 @@ public:
     static bool compositionRequired(bool recordingActive, bool streamingActive,
                                     bool previewVisible, bool contentAdvanced);
 
+    // Whether anything wants frames at all, which is the same question minus
+    // the part about whether the picture moved. Capture is driven by this and
+    // composition by the fuller rule, so a still desktop still gets captured
+    // while a watched one gets composed.
+    bool consumersPresent() const;
+
+signals:
+    // Emitted when that answer changes, so the capture backends can stop
+    // producing for nobody. Deliberately not a stop: see
+    // CaptureController::setDelivering.
+    void consumerDemandChanged(bool wanted);
+
+public:
     // Snapshot of the most recent composed canvas (post-transition overlay).
     // Thread safe: the recorder pulls this without triggering paint cycles.
     QImage cachedComposedFrame() const;
@@ -88,6 +101,11 @@ public slots:
 
 protected:
     void paintEvent(QPaintEvent* event) override;
+    void showEvent(QShowEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
+    // Watches the top level window for being minimized or restored, which is
+    // the case that stops paint events without hiding this widget.
+    bool eventFilter(QObject* watched, QEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
@@ -114,6 +132,7 @@ private:
     void scheduleComposition();
     void composeIfNeeded();
     bool previewVisible() const;
+    void reportDemand();
 
     QRect canvasRect() const;
     QPointF widgetToCanvas(const QPoint& point) const;
@@ -168,6 +187,12 @@ private:
     // loop, so a burst of arriving frames produces one composition rather than
     // one each.
     bool m_compositionScheduled = false;
+    // What was last announced, so only changes are reported. Starts false to
+    // match a widget that has not been shown and has nothing recording, since
+    // a starting value that disagrees with reality swallows the first real
+    // change.
+    bool m_lastReportedDemand = false;
+    bool m_watchingWindow = false;
 
 public:
     // Compositions actually published for the encoder to see. The COMPOSED

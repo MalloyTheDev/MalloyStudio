@@ -28,6 +28,14 @@ public:
     // and inventing one would put a confident 0 next to a real drop count.
     virtual CaptureStats stats() const { return {}; }
 
+    // Whether anything downstream wants frames from this session.
+    //
+    // Suspending delivery is not stopping the session: the backend keeps its
+    // handle on the desktop and its statistics, and resuming costs nothing.
+    // Backends that cannot suspend simply keep producing, which is what they
+    // did before.
+    virtual void setDelivering(bool) {}
+
 signals:
     void frameReady(QImage frame);
     void captureError(QString message);
@@ -42,8 +50,10 @@ public:
     void startCapture() override;
     void stopCapture() override;
     CaptureStats stats() const override;
+    void setDelivering(bool delivering) override;
 
 private:
+    bool m_delivering = true;
     int m_adapterIndex = -1;
     int m_outputIndex = -1;
     DxgiCapture* m_capture = nullptr;
@@ -83,6 +93,16 @@ public:
     // that can be zeroed by one consumer is a counter no other consumer can
     // trust.
     CaptureStats captureStats() const;
+
+    // Whether any consumer wants captured frames at all.
+    //
+    // With no recording, no stream and no visible preview, capture was still
+    // performing every readback and discarding the result: about 56 a second
+    // at 3 to 4.7 ms each, a fifth of a processor core for nobody. Sessions
+    // stay alive and keep their statistics; they simply stop producing, so
+    // this is not a recording epoch boundary and nothing downstream is reset.
+    void setDelivering(bool delivering);
+    bool isDelivering() const { return m_delivering; }
 
     static QString keyFor(int adapterIndex, int outputIndex);
     static QString keyForWindow(quintptr hwnd);
@@ -141,6 +161,7 @@ private:
     // Backend counters from sessions that have already been stopped, so a run
     // summary can still account for the frames they produced.
     CaptureStats m_retiredStats;
+    bool m_delivering = true;
 
     QHash<QString, QString> m_lastStatus;
     QSet<QString> m_blockedErrorKeys;

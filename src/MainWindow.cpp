@@ -679,6 +679,15 @@ void MainWindow::connectModelSignals() {
     connect(m_media, &MediaController::streamingProgress,
             m_streamStudio, &StreamingWorkspace::onStreamProgress);
 
+    // And let the capture backends know, so they stop reading frames back for
+    // nobody when there is no recording, no stream and nothing to look at.
+    // Suspending delivery leaves the sessions and their statistics alone; it
+    // is not a stop and resuming is not a new recording epoch.
+    if (m_preview && m_captureController) {
+        connect(m_preview, &PreviewWidget::consumerDemandChanged,
+                m_captureController, &CaptureController::setDelivering);
+    }
+
     // Tell the compositor when something is consuming frames.
     //
     // Composition is no longer a side effect of painting, so it has to be told

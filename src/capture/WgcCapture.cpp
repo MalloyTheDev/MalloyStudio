@@ -147,6 +147,7 @@ struct WgcCapture::Impl {
     // application's. Checked once per session rather than per frame: the two
     // either share a base or they do not, and asking every frame would be
     // measuring the same fact sixty times a second.
+    std::atomic<bool> delivering{true};
     std::atomic<bool> clockChecked{false};
     std::atomic<bool> clockUsable{true};
 
@@ -349,6 +350,10 @@ WgcCapture::WgcCapture(quintptr hwnd) : m_impl(std::make_unique<Impl>()) {
 
 WgcCapture::~WgcCapture() {
     stop();
+}
+
+void WgcCapture::setDelivering(bool delivering) {
+    m_impl->delivering.store(delivering, std::memory_order_relaxed);
 }
 
 void WgcCapture::setErrorHandler(ErrorHandler handler) {
@@ -637,6 +642,16 @@ void WgcCapture::Impl::onFrameArrived(wgc::IDirect3D11CaptureFramePool* sender) 
 
     wgc::IDirect3D11CaptureFrame* frame = nullptr;
     if (FAILED(sender->TryGetNextFrame(&frame)) || !frame) return;
+
+    // Nothing downstream wants frames. The frame is still taken and returned,
+    // because the pool starves if its surfaces are not given back, but no
+    // readback happens and nothing is counted: a frame nobody asked for was
+    // not produced and not lost.
+    if (!delivering.load(std::memory_order_relaxed)) {
+        closeAndRelease(frame);
+        frame->Release();
+        return;
+    }
 
     const int sequence = framesProduced.fetch_add(1, std::memory_order_relaxed) + 1;
 

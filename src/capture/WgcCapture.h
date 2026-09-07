@@ -76,6 +76,12 @@ public:
     using ClosedHandler = std::function<void()>;
     void setClosedHandler(ClosedHandler handler);
 
+    // Whether anything downstream wants frames. See DxgiCapture::setDelivering:
+    // the frame is still taken from the pool and returned to it, so the session
+    // stays healthy, but nothing is read back or counted. Suspension is not a
+    // stop and resuming is not a new epoch.
+    void setDelivering(bool delivering);
+
     // ICaptureSource
     bool start(FrameCallback onFrame) override;
     void stop() override;
