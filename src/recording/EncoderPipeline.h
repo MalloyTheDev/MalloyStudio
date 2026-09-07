@@ -67,7 +67,13 @@ signals:
     // Live progress emitted from ffmpeg's stderr progress lines (~1 Hz while
     // running). droppedFrames is 0 if ffmpeg's line omits a `drop=` token, and
     // encodeFps is 0 if it omits `fps=`. Slots may take fewer arguments.
-    void progress(int bitrateKbps, int droppedFrames, int encodeFps);
+    //
+    // backlogDrops is a different fact from droppedFrames and the two are kept
+    // apart deliberately: droppedFrames is what ffmpeg discarded, backlogDrops
+    // is what this application never handed it because ffmpeg was not keeping
+    // up. They have different causes and different fixes, so summing them
+    // would hide which one is happening.
+    void progress(int bitrateKbps, int droppedFrames, int encodeFps, int backlogDrops);
 
 protected:
     // The audio pipe name (filled in by start()). Subclasses pass this to
@@ -122,6 +128,16 @@ private:
     // Written to stdin whenever the frame source has nothing yet, so ffmpeg's
     // video input never starves. See onTickVideo for why that matters.
     QImage m_blackFrame;
+
+    // How much unwritten video may sit in QProcess's buffer before frames are
+    // dropped instead of queued, counted in whole frames. Three is enough to
+    // ride out scheduling jitter and a slow encoder tick without letting the
+    // buffer become unbounded; at 1080p it caps the backlog near 25 MB.
+    static constexpr qint64 kMaxWriteBacklogFrames = 3;
+
+    // Frames this application never sent because the buffer was already full.
+    // Reported through progress() so a run that cannot keep up says so.
+    int m_backlogDrops = 0;
 
     QString  m_ffmpegPath;
     Target   m_target;

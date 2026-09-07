@@ -37,7 +37,7 @@ public slots:
     // Measured encoder throughput, driven from MediaController's progress
     // signals while recording or streaming. Zero means ffmpeg has not reported
     // that figure yet.
-    void setEncodeStats(int bitrateKbps, int droppedFrames, int encodeFps);
+    void setEncodeStats(int bitrateKbps, int droppedFrames, int encodeFps, int backlogDrops);
 
 private:
     QWidget* makeStat(const QString& label, QLabel** valueOut);
@@ -59,6 +59,8 @@ private:
     QLabel* m_disk = nullptr;
     QLabel* m_fps = nullptr;
     QLabel* m_bitrate = nullptr;
+    QWidget* m_dropStat = nullptr;   // hidden until frames are actually lost
+    QLabel*  m_drops = nullptr;
 
     QTimer* m_statsTimer = nullptr;
     QTimer* m_clock = nullptr;

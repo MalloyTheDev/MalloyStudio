@@ -55,6 +55,11 @@ StudioStatusBar::StudioStatusBar(QWidget* parent) : QWidget(parent) {
     // glance than one with a steady shape.
     row->addWidget(makeStat(QStringLiteral("FPS"), &m_fps));
     row->addWidget(makeStat(QStringLiteral("BITRATE"), &m_bitrate));
+    // Losing frames is not the normal case, so this stays out of the way until
+    // it happens rather than sitting at zero and training the eye to skip it.
+    m_dropStat = makeStat(QStringLiteral("DROPPED"), &m_drops);
+    m_dropStat->setVisible(false);
+    row->addWidget(m_dropStat);
 
     row->addStretch();
 
@@ -122,6 +127,7 @@ void StudioStatusBar::setMode(Mode mode) {
     // and a stale number from the previous run is never left on screen.
     if (m_bitrate) m_bitrate->setText(kNoValue);
     if (m_fps)     m_fps->setText(kNoValue);
+    if (m_dropStat) m_dropStat->setVisible(false);
     refreshState();
 }
 
@@ -180,8 +186,9 @@ void StudioStatusBar::tickStats() {
     }
 }
 
-void StudioStatusBar::setEncodeStats(int bitrateKbps, int droppedFrames, int encodeFps) {
-    Q_UNUSED(droppedFrames);   // shown by ControlsBar, next to the elapsed timer
+void StudioStatusBar::setEncodeStats(int bitrateKbps, int droppedFrames, int encodeFps,
+                                     int backlogDrops) {
+    Q_UNUSED(droppedFrames);   // ffmpeg's own count, shown by ControlsBar
 
     // ffmpeg reports several times a second and often omits a field on its
     // first lines. Only write when the text actually changes, so the bar is not
@@ -194,6 +201,16 @@ void StudioStatusBar::setEncodeStats(int bitrateKbps, int droppedFrames, int enc
                                 ? tr("%1 Mb/s").arg(bitrateKbps / 1000.0, 0, 'f', 1)
                                 : kNoValue);
     setIfChanged(m_fps, encodeFps > 0 ? QString::number(encodeFps) : kNoValue);
+
+    // Frames this machine could not hand to the encoder. Silent frame loss is
+    // its own dishonesty, so once it starts the count stays on screen.
+    if (m_dropStat && m_drops) {
+        if (backlogDrops > 0) {
+            m_dropStat->setVisible(true);
+            setIfChanged(m_drops, QString::number(backlogDrops));
+            Theme::setTone(m_drops, QStringLiteral("warn"));
+        }
+    }
 }
 
 void StudioStatusBar::flashMessage(const QString& text, int ms) {

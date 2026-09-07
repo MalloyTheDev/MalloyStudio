@@ -327,6 +327,30 @@ void EncoderPipeline::onTickVideo() {
         frame = m_blackFrame;
     }
 
+    // Do not queue a frame ffmpeg has not asked for yet, and decide that before
+    // paying for the conversion below.
+    //
+    // Each frame is about 8 MB uncompressed, so at 60 fps this pushes roughly
+    // half a gigabyte a second into stdin, and at 120 a gigabyte. QProcess
+    // buffers whatever the child has not read, in memory, without limit, so any
+    // period where ffmpeg encodes slower than real time accumulates there for
+    // the rest of the run. The recording keeps working while memory climbs and
+    // nothing in the application can see it happening.
+    //
+    // Checking here rather than after the conversion matters as much as the
+    // cap itself: convertToFormat and scaled each allocate a fresh full-size
+    // image, so a dropped frame that was converted first still churns the
+    // allocator at the full frame rate.
+    //
+    // Dropping beats blocking because this runs on the thread that also
+    // composes and paints. A dropped frame costs one frame; blocking here
+    // would freeze the preview and the interface.
+    const qint64 canvasBytes = qint64(MalloyCanvas::Width) * MalloyCanvas::Height * 4;
+    if (m_ffmpeg->bytesToWrite() > kMaxWriteBacklogFrames * canvasBytes) {
+        ++m_backlogDrops;
+        return;
+    }
+
     // Convert to *straight-alpha* BGRA at canvas-native resolution. We declared
     // `-pix_fmt bgra` on stdin, which ffmpeg interprets as non-premultiplied.
     // PreviewWidget composes onto Format_ARGB32_Premultiplied for fast painting,
@@ -339,11 +363,12 @@ void EncoderPipeline::onTickVideo() {
         out = out.scaled(MalloyCanvas::Width, MalloyCanvas::Height,
                          Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
 
+    const qint64 frameBytes = qint64(MalloyCanvas::Width) * MalloyCanvas::Height * 4;
+
     // Single buffered write for the whole frame — Format_ARGB32 at 1920×1080
     // has no row padding (7680-byte rows on a 32-byte aligned buffer), so we
     // can ship the whole image in one QProcess::write() call. This avoids
     // partial-write error spam if ffmpeg dies mid-frame.
-    const qint64 frameBytes = qint64(MalloyCanvas::Width) * MalloyCanvas::Height * 4;
     if (out.sizeInBytes() == frameBytes) {
         m_ffmpeg->write(reinterpret_cast<const char*>(out.constBits()), frameBytes);
     } else {
@@ -535,7 +560,7 @@ bool EncoderPipeline::tryParseProgressLine(QStringView line,
 void EncoderPipeline::parseProgressLine(QStringView line) {
     int kbps = 0, drops = 0, fps = 0;
     if (tryParseProgressLine(line, &kbps, &drops, &fps))
-        emit progress(kbps, drops, fps);
+        emit progress(kbps, drops, fps, m_backlogDrops);
 }
 
 // PipeAcceptThread is a QObject defined in this .cpp file; AUTOMOC generates
