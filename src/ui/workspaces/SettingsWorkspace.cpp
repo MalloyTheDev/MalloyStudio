@@ -1,4 +1,6 @@
 #include "ui/workspaces/SettingsWorkspace.h"
+#include "platform/SmartConfig.h"
+#include "ui/SmartConfigDialog.h"
 #include <QStyle>
 #include <QMessageBox>
 #include <QGuiApplication>
@@ -608,6 +610,24 @@ QWidget* SettingsWorkspace::buildVideoPage() {
                          tr("Encoder tuning shared by recording and streaming."));
 
     const OutputSettings o = OutputSettings::load();
+
+    auto* recommend = new QPushButton(tr("Recommend settings for this PC"));
+    recommend->setCursor(Qt::PointingHandCursor);
+    connect(recommend, &QPushButton::clicked, this, [this] {
+        SmartConfigDialog dlg(SystemProbe::detect(m_audio), OutputSettings::load(), this);
+        if (dlg.exec() != QDialog::Accepted) return;
+        dlg.chosenSettings().save();
+        emit recordingSettingsApplied();   // MainWindow reloads and re-applies
+        QMessageBox::information(this, tr("Settings applied"),
+            tr("The recommended settings were saved. Reopen this page to see them."));
+    });
+
+    col->addWidget(settingsBlock(tr("Automatic setup"), {
+        {tr("Recommended settings"),
+         tr("Looks at your encoders, processor, display and free space, and proposes "
+            "settings to match. Nothing changes until you apply them."),
+         recommend},
+    }));
 
     const QStringList presets = {QStringLiteral("ultrafast"), QStringLiteral("superfast"),
                                  QStringLiteral("veryfast"),  QStringLiteral("faster"),

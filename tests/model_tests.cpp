@@ -23,6 +23,7 @@
 #include "recording/RtmpKeyRelay.h"
 #include "platform/TwitchAuth.h"
 #include "platform/TwitchApi.h"
+#include "platform/SmartConfig.h"
 #include "recording/StreamingPipeline.h"
 #include "recording/EncoderRegistry.h"
 #include "ui/workspaces/EditorWorkspace.h"
@@ -203,6 +204,12 @@ private slots:
     // the whole protocol surface, and they have to be right before anything
     // touches the network. The waiting states in particular must not be read as
     // failures, or sign-in gives up while the user is still approving.
+    // Smart config: the recommendation is a pure function of a hardware
+    // profile, so the rules are checked against fixed machines rather than
+    // against whichever one the tests happen to run on.
+    void smartConfigRecommendsForTheHardware();
+    void smartConfigDerivesShapeFromBitrate();
+    void smartConfigWarnsRatherThanGuessing();
     void twitchAuthBuildsProtocolRequests();
     void twitchAuthReadsDeviceAndTokenResponses();
     void twitchTokensExpireAndRoundTrip();
@@ -3150,6 +3157,180 @@ void MalloyModelTests::twitchApiParsesHelixPayloads() {
     // grants them per authorization.
     QVERIFY(TwitchApi::requiredScopes().contains(QStringLiteral("channel:read:stream_key")));
     QVERIFY(TwitchApi::requiredScopes().contains(QStringLiteral("channel:manage:broadcast")));
+}
+
+// A machine with a hardware encoder, plenty of cores and a fast connection.
+static SystemProfile makeStrongProfile() {
+    SystemProfile p;
+    p.encoders = {{QStringLiteral("libx264"), QStringLiteral("x264 (software)"), false},
+                  {QStringLiteral("h264_nvenc"), QStringLiteral("NVIDIA NVENC H.264"), true}};
+    p.cpuThreads = 24;
+    p.monitorWidth = 2560;
+    p.monitorHeight = 1440;
+    p.microphoneName = QStringLiteral("Shure SM7B");
+    p.microphonesChecked = true;
+    p.freeDiskBytes = 500LL * 1024 * 1024 * 1024;
+    p.recordingVolume = QStringLiteral("D:\\");
+    p.uploadKbps = 20000;
+    return p;
+}
+
+// A modest laptop: no hardware encoder, few cores, slow upload, no mic.
+static SystemProfile makeWeakProfile() {
+    SystemProfile p;
+    p.encoders = {{QStringLiteral("libx264"), QStringLiteral("x264 (software)"), false}};
+    p.cpuThreads = 4;
+    p.microphonesChecked = true;   // looked, and found none
+    p.monitorWidth = 1366;
+    p.monitorHeight = 768;
+    p.freeDiskBytes = 5LL * 1024 * 1024 * 1024;
+    p.recordingVolume = QStringLiteral("C:\\");
+    p.uploadKbps = 3000;
+    return p;
+}
+
+void MalloyModelTests::smartConfigRecommendsForTheHardware() {
+    const OutputSettings current;
+
+    // Strong machine: hardware encoder preferred, and the upload has room for
+    // the full stream ceiling.
+    {
+        const Recommendation r = SettingsRecommender::recommend(makeStrongProfile(), current);
+        QCOMPARE(r.output.videoCodec, QStringLiteral("h264_nvenc"));
+        // 75 percent of 20000 is 15000, clamped to what services accept.
+        QCOMPARE(r.output.bitrateKbps, SettingsRecommender::kMaxStreamKbps);
+        QCOMPARE(r.output.width, 1920);
+        QCOMPARE(r.output.height, 1080);
+        QCOMPARE(r.output.fps, 60);
+        QCOMPARE(r.output.keyframeSec, 2);
+        // Nothing to warn about on this machine.
+        QVERIFY2(r.warnings.isEmpty(), qPrintable(r.warnings.join(QStringLiteral(" | "))));
+        // Every proposed value carries its reason.
+        QVERIFY(r.notes.size() >= 5);
+        for (const auto& note : r.notes) {
+            QVERIFY(!note.field.isEmpty());
+            QVERIFY(!note.value.isEmpty());
+            QVERIFY2(!note.why.isEmpty(), qPrintable(note.field));
+        }
+    }
+
+    // Weak machine: software encoder, a fast preset for four threads, and a
+    // resolution the link can actually feed.
+    {
+        const Recommendation r = SettingsRecommender::recommend(makeWeakProfile(), current);
+        QCOMPARE(r.output.videoCodec, QStringLiteral("libx264"));
+        QCOMPARE(r.output.preset, QStringLiteral("veryfast"));
+        QCOMPARE(r.output.bitrateKbps, 2250);      // 75 percent of 3000
+        QCOMPARE(r.output.width, 1280);
+        QCOMPARE(r.output.height, 720);
+        QCOMPARE(r.output.fps, 30);
+    }
+
+    // A many-core machine without hardware encoding can afford a slower preset.
+    {
+        SystemProfile p = makeWeakProfile();
+        p.cpuThreads = 24;
+        p.uploadKbps = 20000;
+        const Recommendation r = SettingsRecommender::recommend(p, current);
+        QCOMPARE(r.output.preset, QStringLiteral("fast"));
+    }
+
+    // Applying a recommendation must not disturb settings it does not decide.
+    {
+        OutputSettings mine;
+        mine.container = QStringLiteral("mkv");
+        mine.audioCodec = QStringLiteral("opus");
+        mine.replayBufferSeconds = 45;
+        const Recommendation r = SettingsRecommender::recommend(makeStrongProfile(), mine);
+        QCOMPARE(r.output.container, QStringLiteral("mkv"));
+        QCOMPARE(r.output.audioCodec, QStringLiteral("opus"));
+        QCOMPARE(r.output.replayBufferSeconds, 45);
+    }
+}
+
+void MalloyModelTests::smartConfigDerivesShapeFromBitrate() {
+    const OutputSettings current;
+    SystemProfile p = makeStrongProfile();
+    p.monitorWidth = 3840;
+    p.monitorHeight = 2160;
+
+    struct Case { int uploadKbps; int width; int height; int fps; };
+    // The shape follows the bitrate, because a resolution the bitrate cannot
+    // feed looks worse than a smaller one that it can.
+    const QVector<Case> cases = {
+        {12000, 1920, 1080, 60},   // 9000 clamped to 8000: comfortably 1080p60
+        {8000,  1920, 1080, 60},   // 6000: exactly the 1080p60 threshold
+        {7000,  1920, 1080, 30},   // 5250: 1080p, but not at 60
+        {5000,  1280, 720,  60},   // 3750: 720p60, motion over resolution
+        {2600,  1280, 720,  30},   // 1950 raised to the 1500 floor region
+    };
+    for (const Case& c : cases) {
+        p.uploadKbps = c.uploadKbps;
+        const Recommendation r = SettingsRecommender::recommend(p, current);
+        QCOMPARE(r.output.width, c.width);
+        QCOMPARE(r.output.height, c.height);
+        QCOMPARE(r.output.fps, c.fps);
+    }
+
+    // Never propose encoding larger than the display being captured.
+    p.uploadKbps = 20000;
+    p.monitorWidth = 1366;
+    p.monitorHeight = 768;
+    const Recommendation r = SettingsRecommender::recommend(p, current);
+    QCOMPARE(r.output.width, 1366);
+    QCOMPARE(r.output.height, 768);
+}
+
+void MalloyModelTests::smartConfigWarnsRatherThanGuessing() {
+    const OutputSettings current;
+
+    // Unmeasured upload is unknown, not slow: the current bitrate is kept and
+    // the user is told the figure is a starting point.
+    {
+        SystemProfile p = makeStrongProfile();
+        p.uploadKbps = 0;
+        OutputSettings mine;
+        mine.bitrateKbps = 5200;
+        const Recommendation r = SettingsRecommender::recommend(p, mine);
+        QCOMPARE(r.output.bitrateKbps, 5200);
+        QVERIFY(!r.warnings.filter(QStringLiteral("not measured")).isEmpty());
+    }
+
+    // No microphone, no hardware encoder and a nearly full disk are all things
+    // to say out loud rather than silently encode around.
+    {
+        const Recommendation r = SettingsRecommender::recommend(makeWeakProfile(), current);
+        QVERIFY(!r.warnings.filter(QStringLiteral("microphone")).isEmpty());
+        QVERIFY(!r.warnings.filter(QStringLiteral("hardware encoder")).isEmpty());
+        QVERIFY(!r.warnings.filter(QStringLiteral("free")).isEmpty());
+    }
+
+    // An unchecked machine must not be told it has no microphone.
+    {
+        SystemProfile p = makeWeakProfile();
+        p.microphonesChecked = false;
+        const Recommendation r = SettingsRecommender::recommend(p, current);
+        QVERIFY(r.warnings.filter(QStringLiteral("microphone")).isEmpty());
+    }
+
+    // A machine with no encoders at all must not propose an empty codec.
+    {
+        SystemProfile p;
+        p.cpuThreads = 8;
+        OutputSettings mine;
+        mine.videoCodec = QStringLiteral("libx264");
+        const Recommendation r = SettingsRecommender::recommend(p, mine);
+        QCOMPARE(r.output.videoCodec, QStringLiteral("libx264"));
+    }
+
+    // Profile helpers agree with the encoder list they are given.
+    {
+        QVERIFY(makeStrongProfile().hasHardwareEncoder());
+        QCOMPARE(makeStrongProfile().preferredEncoderId(), QStringLiteral("h264_nvenc"));
+        QVERIFY(!makeWeakProfile().hasHardwareEncoder());
+        QCOMPARE(makeWeakProfile().preferredEncoderId(), QStringLiteral("libx264"));
+        QVERIFY(SystemProfile{}.preferredEncoderId().isEmpty());
+    }
 }
 
 QTEST_MAIN(MalloyModelTests)

@@ -214,6 +214,7 @@ void MainWindow::setupUi() {
 
     m_settings = new SettingsWorkspace(this);
     m_settings->setTwitch(m_twitchAuth, m_twitchApi);
+    m_settings->setAudioController(m_audio);
     connect(m_settings, &SettingsWorkspace::streamCredentialsChanged, this, [this] {
         // A key fetched from Twitch replaces whatever was configured by hand.
         m_streamSettings = StreamSettings::load();

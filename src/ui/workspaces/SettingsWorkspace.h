@@ -12,6 +12,7 @@ class QLabel;
 class QPushButton;
 class TwitchAuth;
 class TwitchApi;
+class AudioController;
 
 // Settings workspace (secondary.jsx SettingsScreen): a two-pane screen with a
 // group list on the left and a content area on the right. The Recording group
@@ -26,6 +27,10 @@ public:
     // one of each: Twitch refresh tokens are one time use, so two instances
     // refreshing independently would invalidate each other's stored token.
     void setTwitch(TwitchAuth* auth, TwitchApi* api);
+
+    // The live audio controller, so hardware detection can enumerate capture
+    // devices instead of guessing.
+    void setAudioController(AudioController* audio) { m_audio = audio; }
 
 signals:
     // The Twitch account connection changed, or a stream key was fetched.
@@ -45,6 +50,7 @@ protected:
     void showEvent(QShowEvent* event) override;   // focus the section list on entry
 
 private:
+    AudioController* m_audio = nullptr;
     TwitchAuth*  m_twitchAuth = nullptr;
     TwitchApi*   m_twitchApi = nullptr;
     QLabel*      m_twitchStatus = nullptr;

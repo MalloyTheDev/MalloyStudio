@@ -66,6 +66,8 @@ set(MALLOY_CORE_SOURCES
     src/platform/TwitchAuth.h
     src/platform/TwitchApi.cpp
     src/platform/TwitchApi.h
+    src/platform/SmartConfig.cpp
+    src/platform/SmartConfig.h
     src/project/ProjectDocument.cpp
     src/project/ProjectDocument.h
     src/project/ClipsRegistry.cpp
@@ -101,6 +103,8 @@ set(MALLOY_UI_SOURCES
     src/MainWindow.h
     src/ui/Theme.cpp
     src/ui/Theme.h
+    src/ui/SmartConfigDialog.cpp
+    src/ui/SmartConfigDialog.h
     src/ui/IconFactory.cpp
     src/ui/IconFactory.h
     src/ui/CommandPalette.cpp
