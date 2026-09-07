@@ -843,7 +843,19 @@ EditorWorkspace::EditorWorkspace(MediaRegistry* media, QWidget* parent)
     rowsLayout->addStretch();   // ONLY a trailing stretch in rowsLayout — the
                                 // wipe loop in rebuildBin preserves this single
                                 // item, and rows are inserted ahead of it.
-    bv->addWidget(rowsHost, 1);
+    // The row list has to scroll. Every row is a fixed 36px, so an unscrolled
+    // list reports a minimum height of 38 times the media count, and
+    // QStackedLayout::minimumSize() takes the maximum over every page including
+    // hidden ones. That minimum propagates to the window, which Qt then grows
+    // to satisfy even when maximized, pushing the controls bar and the status
+    // bar below the bottom of the screen from whichever workspace is on show.
+    // Around twenty files was enough. Every other list in the app already
+    // scrolls for this reason.
+    auto* rowsScroll = new QScrollArea;
+    rowsScroll->setWidgetResizable(true);
+    rowsScroll->setFrameShape(QFrame::NoFrame);
+    rowsScroll->setWidget(rowsHost);
+    bv->addWidget(rowsScroll, 1);
     // emptyHint deliberately lives in bv (the parent), NOT in rowsLayout.
     // Keeping it outside the wipe target means rebuildBin physically cannot
     // schedule it for deleteLater (which would dangle the captured pointer).
