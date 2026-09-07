@@ -66,10 +66,14 @@ signals:
 
     void streamingStarted();
     void streamingFinished();
-    // v7 Tier 3: live bitrate + dropped-frame counter parsed from ffmpeg's
-    // ~1 Hz progress lines on the streaming pipeline. ControlsBar shows this
-    // next to the LIVE timer.
-    void streamingProgress(int bitrateKbps, int droppedFrames);
+    // Live bitrate, dropped-frame counter and encode rate, parsed from
+    // ffmpeg's ~1 Hz progress lines. ControlsBar shows the first two next to
+    // the LIVE timer; the status bar shows the encode rate. Both pipelines
+    // report, because the status bar is just as wrong sitting at a made-up
+    // number while recording as while streaming. Slots may take fewer
+    // arguments than the signal carries.
+    void streamingProgress(int bitrateKbps, int droppedFrames, int encodeFps);
+    void recordingProgress(int bitrateKbps, int droppedFrames, int encodeFps);
 
     void replaySaved(QString path);
 

@@ -17,6 +17,7 @@
 #include "recording/RenderQueue.h"
 #include "recording/TimelineGraphBuilder.h"
 #include "recording/OutputSettings.h"
+#include "platform/MachineLoad.h"
 #include "recording/EncoderPipeline.h"
 #include "recording/RingTimedPcmSource.h"
 #include "recording/StreamSettings.h"
@@ -126,6 +127,9 @@ private slots:
     // parser anchors the streaming stats display.
     void filterEnabledFlagRoundtripsJson();
     void streamProgressLineParsesBitrateAndDrops();
+    // Machine load: the pure percentage math, including every case where two
+    // readings say nothing and the honest answer is to report unknown.
+    void machineLoadReportsUnknownRatherThanGuessing();
     // v7 Tier 4: the audio.mute.<id> action dispatch toggles the matching
     // AudioController input's mute flag. Tests the contract MainWindow's
     // hotkey dispatcher relies on without spinning up the global hotkey
@@ -1507,38 +1511,95 @@ void MalloyModelTests::filterEnabledFlagRoundtripsJson() {
 }
 
 void MalloyModelTests::streamProgressLineParsesBitrateAndDrops() {
-    int kbps = -1, drops = -1;
+    int kbps = -1, drops = -1, fps = -1;
 
-    // Canonical line: bitrate + drop together.
+    // Canonical line: bitrate, drop and fps together. fps is what the status
+    // bar shows, and it is the reason that bar no longer invents a framerate.
     {
         const QString line = QStringLiteral(
             "frame= 1234 fps= 60 q=23.0 size= 4096kB time=00:00:20.00 "
             "bitrate=1700.6kbits/s drop=3 speed=1.0x");
-        QVERIFY(EncoderPipeline::tryParseProgressLine(line, &kbps, &drops));
+        QVERIFY(EncoderPipeline::tryParseProgressLine(line, &kbps, &drops, &fps));
         QCOMPARE(kbps, 1701);
         QCOMPARE(drops, 3);
+        QCOMPARE(fps, 60);
+    }
+
+    // Fractional rate rounds rather than truncating.
+    {
+        kbps = drops = fps = -1;
+        const QString line = QStringLiteral(
+            "frame= 900 fps=59.7 q=21.0 size= 2048kB time=00:00:15.00 "
+            "bitrate=1100.0kbits/s drop=0 speed=1.0x");
+        QVERIFY(EncoderPipeline::tryParseProgressLine(line, &kbps, &drops, &fps));
+        QCOMPARE(fps, 60);
     }
 
     // Line without `drop=` (first second of a stream): drops defaults to 0.
     {
-        kbps = drops = -1;
+        kbps = drops = fps = -1;
         const QString line = QStringLiteral(
             "frame= 30 fps=30.0 q=18.0 size= 128kB time=00:00:01.00 "
             "bitrate=1024.0kbits/s speed=1.0x");
-        QVERIFY(EncoderPipeline::tryParseProgressLine(line, &kbps, &drops));
+        QVERIFY(EncoderPipeline::tryParseProgressLine(line, &kbps, &drops, &fps));
         QCOMPARE(kbps, 1024);
         QCOMPARE(drops, 0);
+        QCOMPARE(fps, 30);
+    }
+
+    // No `fps=` token at all: zero, which the status bar reads as "not
+    // reported yet" and shows nothing for.
+    {
+        kbps = drops = fps = -1;
+        const QString line = QStringLiteral(
+            "size= 64kB time=00:00:00.50 bitrate=900.0kbits/s speed=1.0x");
+        QVERIFY(EncoderPipeline::tryParseProgressLine(line, &kbps, &drops, &fps));
+        QCOMPARE(fps, 0);
     }
 
     // Line with no `bitrate=` token (compile/info noise): parser must reject.
     {
-        kbps = 99; drops = 99;
+        kbps = 99; drops = 99; fps = 99;
         const QString line = QStringLiteral("hevc_nvenc: GPU encoding session opened");
-        QVERIFY(!EncoderPipeline::tryParseProgressLine(line, &kbps, &drops));
+        QVERIFY(!EncoderPipeline::tryParseProgressLine(line, &kbps, &drops, &fps));
         // Out-params unchanged on failure.
         QCOMPARE(kbps, 99);
         QCOMPARE(drops, 99);
+        QCOMPARE(fps, 99);
     }
+}
+
+void MalloyModelTests::machineLoadReportsUnknownRatherThanGuessing() {
+    using MachineLoad::CpuSample;
+    auto sample = [](quint64 idle, quint64 total) {
+        CpuSample s; s.idleTicks = idle; s.totalTicks = total; s.valid = true; return s;
+    };
+
+    // Half the interval idle is half busy.
+    QCOMPARE(MachineLoad::cpuBusyPercent(sample(100, 200), sample(150, 300)), 50.0);
+
+    // Fully idle is zero, not a negative number.
+    QCOMPARE(MachineLoad::cpuBusyPercent(sample(100, 200), sample(200, 300)), 0.0);
+
+    // More idle ticks than total ticks cannot happen, but rounding across
+    // counters has produced it. Clamp rather than report negative load.
+    QCOMPARE(MachineLoad::cpuBusyPercent(sample(100, 200), sample(260, 300)), 0.0);
+
+    // An invalid reading on either side says nothing.
+    QVERIFY(MachineLoad::cpuBusyPercent(CpuSample{}, sample(150, 300)) < 0);
+    QVERIFY(MachineLoad::cpuBusyPercent(sample(100, 200), CpuSample{}) < 0);
+
+    // Two readings inside the same tick: no elapsed time to divide by.
+    QVERIFY(MachineLoad::cpuBusyPercent(sample(100, 200), sample(100, 200)) < 0);
+
+    // Counters moving backwards happens across a suspend. That is not a spike
+    // to 100 percent, it is an absence of information.
+    QVERIFY(MachineLoad::cpuBusyPercent(sample(100, 200), sample(90, 190)) < 0);
+    QVERIFY(MachineLoad::cpuBusyPercent(sample(100, 200), sample(90, 300)) < 0);
+
+    // And the live reading, which must be a real percentage or an admission.
+    const double ram = MachineLoad::memoryUsedPercent();
+    QVERIFY(ram < 0 || (ram >= 0.0 && ram <= 100.0));
 }
 
 // ---------------------------------------------------------------------------

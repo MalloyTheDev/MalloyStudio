@@ -65,6 +65,15 @@ QStringList buildInputArgs(const OutputSettings& s, const QString& audioPipeName
         QStringLiteral("-y"),
         QStringLiteral("-hide_banner"),
         QStringLiteral("-loglevel"), QStringLiteral("error"),
+        // `-loglevel error` suppresses the periodic status line, which is the
+        // only source of live bitrate, dropped frames and encode rate.
+        // `-stats` asks for it anyway, without bringing back the rest of the
+        // info-level noise; verified against ffmpeg 8.1.1, where `-loglevel
+        // error` alone emits nothing at all.
+        //
+        // Necessary but, on at least one machine, not sufficient: the status
+        // line still does not reach readyReadStandardError. Tracked separately.
+        QStringLiteral("-stats"),
         QStringLiteral("-f"),       QStringLiteral("rawvideo"),
         QStringLiteral("-pix_fmt"), QStringLiteral("bgra"),
         QStringLiteral("-s"),       srcRes,
@@ -473,7 +482,8 @@ QString EncoderPipeline::redactDestination(QString text, const QString& destinat
 
 bool EncoderPipeline::tryParseProgressLine(QStringView line,
                                             int* bitrateKbps,
-                                            int* droppedFrames) {
+                                            int* droppedFrames,
+                                            int* encodeFps) {
     // ffmpeg progress line format (one example):
     //   frame= 1234 fps= 60 q=23.0 size=  4096kB time=00:00:20.00 bitrate=1700.6kbits/s drop=0 speed=1.0x
     //
@@ -484,6 +494,9 @@ bool EncoderPipeline::tryParseProgressLine(QStringView line,
         QStringLiteral(R"(bitrate=\s*([\d.]+)kbits/s)"));
     static const QRegularExpression kDropRe(
         QStringLiteral(R"(drop=\s*(\d+))"));
+    // Absent on the first line or two, while ffmpeg has no rate to report yet.
+    static const QRegularExpression kFpsRe(
+        QStringLiteral(R"(fps=\s*([\d.]+))"));
 
     const QString text = line.toString();
     const auto bitMatch = kBitrateRe.match(text);
@@ -495,13 +508,19 @@ bool EncoderPipeline::tryParseProgressLine(QStringView line,
     const auto dropMatch = kDropRe.match(text);
     if (dropMatch.hasMatch()) drops = dropMatch.captured(1).toInt();
     if (droppedFrames) *droppedFrames = drops;
+
+    int fps = 0;
+    const auto fpsMatch = kFpsRe.match(text);
+    if (fpsMatch.hasMatch())
+        fps = static_cast<int>(fpsMatch.captured(1).toDouble() + 0.5);
+    if (encodeFps) *encodeFps = fps;
     return true;
 }
 
 void EncoderPipeline::parseProgressLine(QStringView line) {
-    int kbps = 0, drops = 0;
-    if (tryParseProgressLine(line, &kbps, &drops))
-        emit progress(kbps, drops);
+    int kbps = 0, drops = 0, fps = 0;
+    if (tryParseProgressLine(line, &kbps, &drops, &fps))
+        emit progress(kbps, drops, fps);
 }
 
 // PipeAcceptThread is a QObject defined in this .cpp file; AUTOMOC generates

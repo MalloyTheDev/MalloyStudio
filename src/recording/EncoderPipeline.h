@@ -63,8 +63,9 @@ signals:
     // QMessageBox::setDetailedText so the wall of ffmpeg output is hidden by default.
     void errorOccurred(QString message);
     // Live progress emitted from ffmpeg's stderr progress lines (~1 Hz while
-    // running). droppedFrames is 0 if ffmpeg's line omits a `drop=` token.
-    void progress(int bitrateKbps, int droppedFrames);
+    // running). droppedFrames is 0 if ffmpeg's line omits a `drop=` token, and
+    // encodeFps is 0 if it omits `fps=`. Slots may take fewer arguments.
+    void progress(int bitrateKbps, int droppedFrames, int encodeFps);
 
 protected:
     // The audio pipe name (filled in by start()). Subclasses pass this to
@@ -94,10 +95,12 @@ public:
     // stderr). Returns true on success and populates out-params; on failure
     // returns false and leaves them unchanged. Exposed for unit-testing the
     // regex without spinning up a real pipeline. droppedFrames defaults to 0
-    // when the line doesn't include a `drop=` token.
+    // when the line doesn't include a `drop=` token, and encodeFps to 0 when it
+    // has no `fps=` token yet.
     static bool tryParseProgressLine(QStringView line,
                                      int* bitrateKbps,
-                                     int* droppedFrames);
+                                     int* droppedFrames,
+                                     int* encodeFps = nullptr);
 
 private slots:
     void onTickVideo();

@@ -52,6 +52,8 @@ bool MediaController::startRecording(const QString& path,
     connect(m_recorder, &EncoderPipeline::started, this, &MediaController::recordingStarted);
     connect(m_recorder, &EncoderPipeline::finished, this,
             [this](const QString& p, qint64 b) { emit recordingFinished(p, b); });
+    connect(m_recorder, &EncoderPipeline::progress,
+            this, &MediaController::recordingProgress);
     connect(m_recorder, &EncoderPipeline::errorOccurred, this,
             [this](const QString& msg) { emit errorOccurred(QStringLiteral("recording"), msg); });
 

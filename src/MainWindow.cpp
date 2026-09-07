@@ -635,6 +635,15 @@ void MainWindow::connectModelSignals() {
     connect(m_media, &MediaController::streamingProgress,
             m_streamStudio, &StreamingWorkspace::onStreamProgress);
 
+    // The status bar shows measured throughput for whichever pipeline is
+    // running, rather than the numbers it used to invent.
+    if (auto* bar = m_shell->status()) {
+        connect(m_media, &MediaController::streamingProgress,
+                bar, &StudioStatusBar::setEncodeStats);
+        connect(m_media, &MediaController::recordingProgress,
+                bar, &StudioStatusBar::setEncodeStats);
+    }
+
     connect(m_media, &MediaController::errorOccurred,
             this, [this](const QString& origin, const QString& msg) {
         const QString title = (origin == QStringLiteral("recording"))

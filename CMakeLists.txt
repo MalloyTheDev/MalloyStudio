@@ -68,6 +68,8 @@ set(MALLOY_CORE_SOURCES
     src/platform/TwitchApi.h
     src/platform/SmartConfig.cpp
     src/platform/SmartConfig.h
+    src/platform/MachineLoad.cpp
+    src/platform/MachineLoad.h
     src/project/ProjectDocument.cpp
     src/project/ProjectDocument.h
     src/project/ClipsRegistry.cpp

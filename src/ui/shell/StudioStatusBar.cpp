@@ -1,12 +1,17 @@
 #include "ui/shell/StudioStatusBar.h"
+#include "project/ByteSize.h"
+#include "project/RecentRecordings.h"
 #include "ui/Theme.h"
 
 #include <QHBoxLayout>
 #include <QLabel>
-#include <QRandomGenerator>
+#include <QStorageInfo>
 #include <QTimer>
 
 namespace {
+// Shown for any figure the app cannot currently read.
+const QString kNoValue = QStringLiteral("-");
+
 QLabel* dot(const QColor& c, QWidget* parent) {
     auto* d = new QLabel(parent);
     d->setFixedSize(8, 8);
@@ -44,16 +49,12 @@ StudioStatusBar::StudioStatusBar(QWidget* parent) : QWidget(parent) {
     row->addWidget(makeStat(QStringLiteral("CPU"),  &m_cpu));
     row->addWidget(makeStat(QStringLiteral("RAM"),  &m_ram));
     row->addWidget(makeStat(QStringLiteral("DISK"), &m_disk));
-    {
-        QLabel* gpu = nullptr;
-        auto* w = makeStat(QStringLiteral("GPU"), &gpu);
-        gpu->setText(QStringLiteral("NVENC · 18%"));
-        row->addWidget(w);
-    }
+    // Encode rate and bitrate only exist while ffmpeg is running. They stay in
+    // place and read as unknown the rest of the time, rather than appearing and
+    // disappearing: a bar whose contents move around is harder to read at a
+    // glance than one with a steady shape.
     row->addWidget(makeStat(QStringLiteral("FPS"), &m_fps));
-    m_bitrateStat = makeStat(QStringLiteral("BITRATE"), &m_bitrate);
-    m_bitrateStat->setVisible(false);
-    row->addWidget(m_bitrateStat);
+    row->addWidget(makeStat(QStringLiteral("BITRATE"), &m_bitrate));
 
     row->addStretch();
 
@@ -116,7 +117,11 @@ void StudioStatusBar::setMode(Mode mode) {
     if (active) m_clock->start(); else m_clock->stop();
     if (active) m_pulse->start();
     else { m_pulse->stop(); }
-    m_bitrateStat->setVisible(active);
+    // Encoder figures belong to the run that produced them, so clear them on
+    // every mode change. setEncodeStats() fills them in once ffmpeg reports,
+    // and a stale number from the previous run is never left on screen.
+    if (m_bitrate) m_bitrate->setText(kNoValue);
+    if (m_fps)     m_fps->setText(kNoValue);
     refreshState();
 }
 
@@ -147,19 +152,48 @@ void StudioStatusBar::tickClock() {
 }
 
 void StudioStatusBar::tickStats() {
-    auto* rng = QRandomGenerator::global();
-    const bool busy = (m_mode != Mode::Idle);
-    m_vCpu  = qBound(5.0,  m_vCpu  + (rng->generateDouble() - 0.5) * (busy ? 14 : 4), 95.0);
-    m_vRam  = qBound(20.0, m_vRam  + (rng->generateDouble() - 0.5) * 2, 85.0);
-    m_vDisk = qBound(40.0, m_vDisk + (rng->generateDouble() - 0.5) * 0.4, 95.0);
-    m_vFps  = qBound(55.0, 60.0 - rng->generateDouble() * (m_mode == Mode::Streaming ? 1.5 : 0.3), 60.2);
-    m_vBitrate = 5800 + int(rng->generateDouble() * 1200);
+    // Processor load is the difference between two readings, so the first tick
+    // after startup has nothing to compare against and says so.
+    const MachineLoad::CpuSample now = MachineLoad::readCpu();
+    const double cpu = MachineLoad::cpuBusyPercent(m_lastCpu, now);
+    m_lastCpu = now;
+    if (m_cpu)
+        m_cpu->setText(cpu < 0 ? kNoValue : QStringLiteral("%1%").arg(qRound(cpu)));
 
-    if (m_cpu)  m_cpu->setText(QStringLiteral("%1%").arg(qRound(m_vCpu)));
-    if (m_ram)  m_ram->setText(QStringLiteral("%1%").arg(qRound(m_vRam)));
-    if (m_disk) m_disk->setText(QStringLiteral("%1% · 412 GB free").arg(qRound(m_vDisk)));
-    if (m_fps)  m_fps->setText(QString::number(m_vFps, 'f', 1));
-    if (m_bitrate) m_bitrate->setText(QStringLiteral("%1 Mb/s").arg(m_vBitrate / 1000.0, 0, 'f', 1));
+    const double ram = MachineLoad::memoryUsedPercent();
+    if (m_ram)
+        m_ram->setText(ram < 0 ? kNoValue : QStringLiteral("%1%").arg(qRound(ram)));
+
+    // The volume recordings are written to, which is the one the user runs out
+    // of room on. The same volume SystemProbe reports in the settings page, so
+    // the two figures agree.
+    if (m_disk) {
+        const QStorageInfo storage(RecentRecordings::outputDir());
+        if (storage.isValid() && storage.isReady() && storage.bytesTotal() > 0) {
+            const qint64 free = storage.bytesAvailable();
+            const int usedPct = int(100.0 * double(storage.bytesTotal() - free)
+                                            / double(storage.bytesTotal()) + 0.5);
+            m_disk->setText(tr("%1% · %2 free").arg(usedPct).arg(formatByteSize(free)));
+        } else {
+            m_disk->setText(kNoValue);
+        }
+    }
+}
+
+void StudioStatusBar::setEncodeStats(int bitrateKbps, int droppedFrames, int encodeFps) {
+    Q_UNUSED(droppedFrames);   // shown by ControlsBar, next to the elapsed timer
+
+    // ffmpeg reports several times a second and often omits a field on its
+    // first lines. Only write when the text actually changes, so the bar is not
+    // relaid out on every line for a value that did not move.
+    auto setIfChanged = [](QLabel* label, const QString& text) {
+        if (label && label->text() != text) label->setText(text);
+    };
+
+    setIfChanged(m_bitrate, bitrateKbps > 0
+                                ? tr("%1 Mb/s").arg(bitrateKbps / 1000.0, 0, 'f', 1)
+                                : kNoValue);
+    setIfChanged(m_fps, encodeFps > 0 ? QString::number(encodeFps) : kNoValue);
 }
 
 void StudioStatusBar::flashMessage(const QString& text, int ms) {
