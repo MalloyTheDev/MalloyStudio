@@ -950,9 +950,14 @@ void MalloyModelTests::audioMixerEmitsSilenceWhenAllRingsAreEmpty() {
     // rings just contribute silence to the int32 accumulator, and the clamp
     // loop produces 3840 zero bytes (= 960 stereo frames * 2 channels * 2 B).
     AudioController c;
-    // In the test process WasapiCapture workers typically don't deliver any
-    // chunks (no real default endpoint), so every ring stays empty. That is
-    // exactly the broken case the bug used to fail in.
+    // Mute every input so the silence assertion below tests the mixer rather
+    // than the machine. This used to rely on WasapiCapture delivering nothing
+    // in the test process, which is true only on a host with no working audio
+    // endpoint; on a host that is actually playing something the loopback ring
+    // fills and the assertion failed for a reason that had nothing to do with
+    // the bug being guarded. Muted inputs exercise the same accumulator path
+    // as empty ones, and the premise is now the test's to control.
+    for (const AudioInput& in : c.inputs()) c.setMuted(in.id, true);
 
     int chunkCount = 0;
     qint64 totalNonZeroBytes = 0;
