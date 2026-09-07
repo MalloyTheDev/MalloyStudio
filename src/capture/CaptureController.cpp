@@ -21,7 +21,15 @@ DxgiCaptureSession::~DxgiCaptureSession() {
 void DxgiCaptureSession::startCapture() {
     if (m_capture) return;
     m_capture = new DxgiCapture(m_adapterIndex, m_outputIndex, this);
-    connect(m_capture, &DxgiCapture::frameReady, this, &CaptureSession::frameReady, Qt::QueuedConnection);
+    // Decrement as the frame is taken off the queue, so the capture loop knows
+    // the consumer has caught up. The counter is shared rather than reached
+    // through m_capture, because queued events can outlive the capture object.
+    connect(m_capture, &DxgiCapture::frameReady, this,
+            [this, counter = m_capture->inFlightCounter()](const QImage& frame) {
+                counter->fetch_sub(1, std::memory_order_release);
+                emit frameReady(frame);
+            },
+            Qt::QueuedConnection);
     connect(m_capture, &DxgiCapture::captureError, this, &CaptureSession::captureError, Qt::QueuedConnection);
     m_capture->start();
 }
