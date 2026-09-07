@@ -628,9 +628,12 @@ void MainWindow::connectModelSignals() {
         flash(tr("Stream ended."), 4000);
     });
 
-    // v7 Tier 3: live bitrate + dropped-frames updates from ffmpeg → mixer.
+    // v7 Tier 3: live bitrate + dropped-frames updates from ffmpeg to the mixer,
+    // and to the Streaming workspace health panel, which used to invent both.
     connect(m_media, &MediaController::streamingProgress,
             m_controlsBar, &ControlsBar::setStreamStats);
+    connect(m_media, &MediaController::streamingProgress,
+            m_streamStudio, &StreamingWorkspace::onStreamProgress);
 
     connect(m_media, &MediaController::errorOccurred,
             this, [this](const QString& origin, const QString& msg) {

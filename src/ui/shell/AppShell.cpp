@@ -16,7 +16,7 @@ namespace {
 QString subtitleFor(const QString& id) {
     if (id == QLatin1String("dashboard")) return QStringLiteral("Project hub");
     if (id == QLatin1String("record"))    return QStringLiteral("Live composing");
-    if (id == QLatin1String("stream"))     return QStringLiteral("Twitch · /malloy_live");
+    if (id == QLatin1String("stream"))     return QStringLiteral("Destinations and go live");
     if (id == QLatin1String("editor"))     return QStringLiteral("Timeline");
     if (id == QLatin1String("clips"))      return QStringLiteral("Replay-buffer captures");
     if (id == QLatin1String("media"))      return QStringLiteral("Project media");

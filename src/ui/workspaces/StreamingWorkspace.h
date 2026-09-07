@@ -14,18 +14,21 @@ class QLineEdit;
 class QPushButton;
 class QSlider;
 class QToolButton;
-class QTimer;
 class QVBoxLayout;
 class VuMeter;
 
-// Streaming Studio (secondary.jsx StreamStudio): destination + preview +
-// go-live card in the center, and a right rail with stream health, chat,
-// alerts and a real mix. Mix levels + volume/mute come from the live
-// AudioController (the same instance the Recording workspace uses), so the
-// two views stay in lockstep: changes here are visible in the Recording
-// mixer and vice versa. Live stream telemetry (viewers/bitrate/dropped/ping)
-// is still simulated. Emits goLiveRequested() so MainWindow drives the real
-// pipeline.
+// Streaming Studio: destination + preview + go-live card in the center, and a
+// right rail with stream health, chat, alerts and a real mix. Mix levels +
+// volume/mute come from the live AudioController (the same instance the
+// Recording workspace uses), so the two views stay in lockstep: changes here
+// are visible in the Recording mixer and vice versa. Emits goLiveRequested()
+// so MainWindow drives the real pipeline.
+//
+// Every figure shown here is measured or left blank. Bitrate and dropped
+// frames come from onStreamProgress(), which MainWindow drives from ffmpeg's
+// progress lines. Viewer count has no source until the channel is queried, and
+// says so rather than showing a number. Chat and alerts have no source at all
+// yet, so their panels stay empty.
 class StreamingWorkspace : public QWidget {
     Q_OBJECT
 public:
@@ -35,12 +38,13 @@ public:
 
     void setLive(bool live);
 
+public slots:
+    // Measured bitrate and dropped-frame count from the running stream, driven
+    // by MediaController::streamingProgress at roughly 1 Hz.
+    void onStreamProgress(int bitrateKbps, int droppedFrames);
+
 signals:
     void goLiveRequested();
-
-protected:
-    void showEvent(QShowEvent* event) override;   // run telemetry tick only while visible
-    void hideEvent(QHideEvent* event) override;
 
 private slots:
     void rebuildMixStrips();
@@ -51,7 +55,6 @@ private slots:
 private:
     QWidget* buildCenter();
     QWidget* buildRail();
-    void tick();          // simulates live telemetry only (levels are real)
     void loadMeta();      // populate fields from StreamSettings
     void persistMeta();   // write title/category/tags back to StreamSettings
 
@@ -77,8 +80,6 @@ private:
     QWidget*     m_tagsHost = nullptr;
 
     bool m_live = false;
-    int  m_elapsed = 0;
-    int  m_viewers = 0;
     int  m_dropped = 0;
 
     QLabel*    m_liveTag = nullptr;
@@ -86,13 +87,10 @@ private:
     QLabel*    m_mViewers = nullptr;
     QLabel*    m_mBitrate = nullptr;
     QLabel*    m_mDropped = nullptr;
-    QLabel*    m_mPing = nullptr;
-    QLabel*    m_mFps = nullptr;
+    QLabel*    m_mEncoder = nullptr;
+    QLabel*    m_keyTag = nullptr;
     QPushButton* m_goLive = nullptr;
     QWidget*   m_chatEmpty = nullptr;
-    QWidget*   m_chatList = nullptr;
-    QWidget*   m_alertsEmpty = nullptr;
-    QWidget*   m_alertsList = nullptr;
+    QLabel*    m_alertsEmpty = nullptr;
     QLineEdit* m_chatInput = nullptr;
-    QTimer*    m_timer = nullptr;
 };

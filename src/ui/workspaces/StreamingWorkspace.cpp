@@ -6,6 +6,8 @@
 #include "ui/Theme.h"
 #include "audio/AudioController.h"
 #include "audio/AudioInput.h"
+#include "recording/EncoderRegistry.h"
+#include "recording/OutputSettings.h"
 
 #include <QComboBox>
 #include <QGridLayout>
@@ -13,18 +15,22 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
-#include <QRandomGenerator>
 #include <QSignalBlocker>
 #include <QSlider>
-#include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
+
+#include <algorithm>
 
 namespace {
 
 QLabel* lbl(const QString& s, const QString& tone = QString(), int px = 13, bool bold = false, bool mono = false) {
     return Theme::label(s, tone, px, bold, mono);
 }
+
+// Shown wherever a figure is not known, so an unknown value is never confused
+// with a measured one.
+const QString kNoValue = QStringLiteral("-");
 
 QWidget* metricTile(const QString& label, QLabel** valueOut, const QString& tone = QString()) {
     auto* f = new QFrame;
@@ -35,7 +41,7 @@ QWidget* metricTile(const QString& label, QLabel** valueOut, const QString& tone
     auto* l = lbl(label.toUpper(), QStringLiteral("mute"), 10);
     QFont lf = l->font(); lf.setLetterSpacing(QFont::AbsoluteSpacing, 0.5); l->setFont(lf);
     v->addWidget(l);
-    auto* val = lbl(QStringLiteral("—"), tone, 13, true, true);
+    auto* val = lbl(kNoValue, tone, 13, true, true);
     v->addWidget(val);
     if (valueOut) *valueOut = val;
     return f;
@@ -72,39 +78,27 @@ StreamingWorkspace::StreamingWorkspace(AudioController* audio, QWidget* parent)
     connect(m_catCombo->lineEdit(), &QLineEdit::editingFinished, this, &StreamingWorkspace::persistMeta);
     connect(m_catCombo, &QComboBox::activated, this, [this](int) { persistMeta(); });
 
-    m_timer = new QTimer(this);
-    m_timer->setInterval(100);
-    connect(m_timer, &QTimer::timeout, this, &StreamingWorkspace::tick);
-    // started in showEvent so meters only animate while this workspace is visible
-
     setLive(false);
-}
-
-void StreamingWorkspace::showEvent(QShowEvent* event) {
-    QWidget::showEvent(event);
-    if (m_timer) m_timer->start();
-}
-
-void StreamingWorkspace::hideEvent(QHideEvent* event) {
-    QWidget::hideEvent(event);
-    if (m_timer) m_timer->stop();
-}
-
-namespace {
-QStringList defaultStreamTags() {
-    return {QObject::tr("Souls-like"), QObject::tr("No-hit"),
-            QObject::tr("Phase 3"), QObject::tr("Late-night")};
-}
 }
 
 void StreamingWorkspace::loadMeta() {
     m_settings = StreamSettings::load();
-    m_titleEdit->setText(m_settings.title.isEmpty()
-        ? tr("Spire — No-hit attempt night 4 · Phase 3 grind") : m_settings.title);
+    // No stand-in title. This field is pushed to the channel on going live, so
+    // anything put here that the user did not type would retitle a real
+    // broadcast.
+    m_titleEdit->setText(m_settings.title);
     if (!m_settings.category.isEmpty()) m_catCombo->setCurrentText(m_settings.category);
     m_destBtn->setText(QStringLiteral("%1  ▾").arg(StreamSettings::displayName(m_settings.service)));
 
-    QStringList tags = m_settings.tags.isEmpty() ? defaultStreamTags() : m_settings.tags;
+    if (m_keyTag) {
+        const bool hasKey = !m_settings.streamKey.isEmpty();
+        m_keyTag->setText(hasKey ? tr("key set") : tr("no key"));
+        Theme::setProp(m_keyTag, "tone", hasKey ? QStringLiteral("success")
+                                                : QStringLiteral("warn"));
+        Theme::repolish(m_keyTag);
+    }
+
+    const QStringList tags = m_settings.tags;
     if (auto* h = qobject_cast<QHBoxLayout*>(m_tagsHost->layout())) {
         while (QLayoutItem* it = h->takeAt(0)) {
             if (it->widget()) it->widget()->deleteLater();
@@ -120,7 +114,6 @@ void StreamingWorkspace::persistMeta() {
     StreamSettings s = StreamSettings::load();
     s.title    = m_titleEdit->text();
     s.category = m_catCombo->currentText();
-    if (s.tags.isEmpty()) s.tags = defaultStreamTags();
     s.save();
     m_settings = s;
 }
@@ -135,7 +128,8 @@ QWidget* StreamingWorkspace::buildCenter() {
     auto* dest = new QHBoxLayout;
     dest->setSpacing(8);
     dest->addWidget(Theme::makeTag(tr("Destination"), QStringLiteral("accent")));
-    m_destBtn = new QPushButton(tr("Twitch · /malloy_live  ▾"));
+    // Replaced by loadMeta() with the configured service.
+    m_destBtn = new QPushButton(tr("Destination  ▾"));
     m_destBtn->setCursor(Qt::PointingHandCursor);
     dest->addWidget(m_destBtn);
     auto* add = new QPushButton(Icons::icon(QStringLiteral("plus"), Theme::TextDim, 12), tr(" Add destination"));
@@ -147,7 +141,9 @@ QWidget* StreamingWorkspace::buildCenter() {
     v->addLayout(dest);
 
     // Preview
-    v->addWidget(new Placeholder(tr("Program · Gameplay scene"), 16, 9), 1);
+    // The composited program output is not mirrored here yet; the recording
+    // workspace holds the one live preview.
+    v->addWidget(new Placeholder(tr("Program preview is in the Recording workspace"), 16, 9), 1);
 
     // Go-live card
     auto* go = new QFrame;
@@ -160,16 +156,17 @@ QWidget* StreamingWorkspace::buildCenter() {
     left->setSpacing(6);
     left->addWidget(lbl(tr("STREAM TITLE"), QStringLiteral("mute"), 11));
     m_titleEdit = new QLineEdit;
+    m_titleEdit->setPlaceholderText(tr("Sent to the channel when you go live"));
     left->addWidget(m_titleEdit);
     auto* selers = new QHBoxLayout;
     selers->setSpacing(8);
     m_catCombo = new QComboBox;
     m_catCombo->setEditable(true);
-    m_catCombo->addItems({tr("Spire of the Hollow Sun"), tr("Just Chatting"),
-                          tr("Software & Game Dev"), tr("Retro")});
-    auto* lang = new QComboBox; lang->addItem(tr("Language · English")); lang->setFixedWidth(180);
+    // Left empty on purpose. The category is sent to the channel, and there is
+    // no endpoint wired up yet that can list the real ones, so the app offers
+    // no names of its own.
+    m_catCombo->lineEdit()->setPlaceholderText(tr("Category"));
     selers->addWidget(m_catCombo, 1);
-    selers->addWidget(lang);
     left->addLayout(selers);
     m_tagsHost = new QWidget;
     auto* tags = new QHBoxLayout(m_tagsHost);
@@ -182,8 +179,10 @@ QWidget* StreamingWorkspace::buildCenter() {
     right->setSpacing(6);
     auto* badges = new QHBoxLayout;
     badges->addStretch();
-    badges->addWidget(Theme::makeTag(tr("REC + STREAM")));
-    badges->addWidget(Theme::makeTag(tr("key verified"), QStringLiteral("success")));
+    // Reflects whether a key is stored, which is all that is known before the
+    // ingest accepts a connection. loadMeta() sets the text and tone.
+    m_keyTag = Theme::makeTag(tr("no key"), QStringLiteral("warn"));
+    badges->addWidget(m_keyTag);
     right->addLayout(badges);
     right->addStretch();
     m_goLive = new QPushButton(tr("Go Live · F8"));
@@ -214,12 +213,17 @@ QWidget* StreamingWorkspace::buildRail() {
     auto* hgrid = new QGridLayout(hbody);
     hgrid->setContentsMargins(10, 10, 10, 10);
     hgrid->setSpacing(8);
-    hgrid->addWidget(metricTile(tr("Viewers"), &m_mViewers, QStringLiteral("accent")), 0, 0);
-    hgrid->addWidget(metricTile(tr("Bitrate"), &m_mBitrate), 0, 1);
-    hgrid->addWidget(metricTile(tr("Dropped"), &m_mDropped), 1, 0);
-    hgrid->addWidget(metricTile(tr("Ping"), &m_mPing), 1, 1);
-    hgrid->addWidget(metricTile(tr("FPS"), &m_mFps), 2, 0);
-    { QLabel* enc = nullptr; auto* t = metricTile(tr("Encoder"), &enc); enc->setText(QStringLiteral("NVENC · H.264")); hgrid->addWidget(t, 2, 1); }
+    // Bitrate and dropped frames are measured; onStreamProgress() fills them.
+    hgrid->addWidget(metricTile(tr("Bitrate"), &m_mBitrate), 0, 0);
+    hgrid->addWidget(metricTile(tr("Dropped"), &m_mDropped), 0, 1);
+    // The configured encoder, resolved to the name the settings page shows.
+    hgrid->addWidget(metricTile(tr("Encoder"), &m_mEncoder), 1, 0);
+    // Kept visible because it is the figure people look for, and left blank
+    // because nothing here knows it. Filling it in needs the channel queried.
+    auto* viewersTile = metricTile(tr("Viewers"), &m_mViewers);
+    viewersTile->setToolTip(tr("Viewer count needs a connected Twitch account. "
+                               "It is not available yet."));
+    hgrid->addWidget(viewersTile, 1, 1);
     health->bodyLayout()->addWidget(hbody);
     v->addWidget(health);
 
@@ -237,39 +241,26 @@ QWidget* StreamingWorkspace::buildRail() {
     auto* cicon = new QLabel; cicon->setPixmap(Icons::pixmap(QStringLiteral("browser"), Theme::TextFaint, 32));
     cicon->setAlignment(Qt::AlignCenter);
     ce->addWidget(cicon);
-    ce->addWidget(lbl(tr("Chat appears when you go live."), QStringLiteral("dim"), 12), 0, Qt::AlignHCenter);
-    ce->addWidget(lbl(tr("Twitch · /malloy_live"), QStringLiteral("mute"), 11), 0, Qt::AlignHCenter);
+    auto* chatHead = lbl(tr("Chat is not connected yet."), QStringLiteral("dim"), 12);
+    chatHead->setAlignment(Qt::AlignHCenter);
+    ce->addWidget(chatHead);
+    // Wrapped, because the rail is narrower than this sentence.
+    auto* chatWhy = lbl(tr("Reading chat needs a connection this build does not have."),
+                        QStringLiteral("mute"), 11);
+    chatWhy->setWordWrap(true);
+    chatWhy->setAlignment(Qt::AlignHCenter);
+    ce->addWidget(chatWhy);
     cv->addWidget(m_chatEmpty, 1);
-
-    m_chatList = new QWidget;
-    auto* cl = new QVBoxLayout(m_chatList);
-    cl->setContentsMargins(10, 6, 10, 6);
-    cl->setSpacing(4);
-    struct M { QString u, m, tone; };
-    const QVector<M> msgs = {
-        {QStringLiteral("rekka_dev"), tr("GG that was insane"), QStringLiteral("accent")},
-        {QStringLiteral("gorm"), tr("how did he dodge that????"), QString()},
-        {QStringLiteral("phaseseven"), tr("phase 3 nightmare run"), QString()},
-        {QStringLiteral("lunalux"), tr("first time here, this slaps"), QString()},
-        {QStringLiteral("malloy_bot"), tr("phaseseven just subscribed (3 mo)"), QStringLiteral("warn")},
-        {QStringLiteral("kx"), tr("audio is so clean"), QString()},
-    };
-    for (const M& m : msgs) {
-        auto* line = new QLabel(QStringLiteral("<b style='color:%1'>%2</b> <span style='color:%3'>%4</span>")
-            .arg((m.tone == "accent" ? Theme::AccentHi : m.tone == "warn" ? Theme::Warn : Theme::TextDim).name(),
-                 m.u, (m.tone == "warn" ? Theme::Warn : Theme::Text).name(), m.m));
-        line->setWordWrap(true);
-        QFont lf = line->font(); lf.setPixelSize(12); line->setFont(lf);
-        cl->addWidget(line);
-    }
-    cl->addStretch();
-    cv->addWidget(m_chatList, 1);
 
     auto* inputWrap = new QWidget;
     auto* iw = new QHBoxLayout(inputWrap);
     iw->setContentsMargins(8, 8, 8, 8);
     m_chatInput = new QLineEdit;
-    m_chatInput->setPlaceholderText(tr("Chat (offline)"));
+    // Disabled rather than merely empty: there is nowhere for a message to go,
+    // and a box that accepts text it silently discards is worse than one that
+    // refuses it.
+    m_chatInput->setEnabled(false);
+    m_chatInput->setPlaceholderText(tr("Chat is not connected yet"));
     iw->addWidget(m_chatInput);
     cv->addWidget(inputWrap);
 
@@ -285,17 +276,11 @@ QWidget* StreamingWorkspace::buildRail() {
     auto* av = new QVBoxLayout(abody);
     av->setContentsMargins(10, 10, 10, 10);
     av->setSpacing(4);
-    m_alertsEmpty = lbl(tr("No alerts. Go live to start receiving them."), QStringLiteral("mute"), 12);
+    m_alertsEmpty = lbl(tr("Alerts are not connected yet. Subscriptions, follows and bits "
+                           "need a channel event connection this build does not have."),
+                        QStringLiteral("mute"), 12);
+    m_alertsEmpty->setWordWrap(true);
     av->addWidget(m_alertsEmpty);
-    m_alertsList = new QWidget;
-    auto* al = new QVBoxLayout(m_alertsList);
-    al->setContentsMargins(0, 0, 0, 0);
-    al->setSpacing(4);
-    for (const QString& a : {tr("phaseseven · Tier 1 · 3-month resub"), tr("kx_dev followed"), tr("wrenly cheered 500 bits")}) {
-        auto* r = lbl(a, QStringLiteral("dim"), 12);
-        al->addWidget(r);
-    }
-    av->addWidget(m_alertsList);
     alerts->bodyLayout()->addWidget(abody);
     v->addWidget(alerts);
 
@@ -322,47 +307,73 @@ QWidget* StreamingWorkspace::buildRail() {
     return rail;
 }
 
+namespace {
+// The label the settings page would show for a codec id, so the health panel
+// names the encoder the same way the rest of the app does.
+QString encoderDisplayName(const QString& codecId) {
+    for (const EncoderRegistry::Encoder& e : EncoderRegistry::available())
+        if (e.id == codecId) return e.display;
+    return codecId;
+}
+}  // namespace
+
 void StreamingWorkspace::setLive(bool live) {
     m_live = live;
-    m_elapsed = 0;
-    if (!live) { m_viewers = 0; m_dropped = 0; }
-    else if (m_viewers == 0) m_viewers = 1240;
+    m_dropped = 0;
 
     m_liveTag->setVisible(live);
-    m_chatEmpty->setVisible(!live);
-    m_chatList->setVisible(live);
-    m_alertsEmpty->setVisible(!live);
-    m_alertsList->setVisible(live);
-    m_chatInput->setEnabled(live);
-    m_chatInput->setPlaceholderText(live ? tr("Say something…") : tr("Chat (offline)"));
 
-    Theme::setProp(m_statusTag, "tone", live ? QStringLiteral("success") : QString());
-    m_statusTag->setText(live ? tr("GOOD") : tr("OFFLINE"));
+    // Chat and alerts have no source, live or not, so their empty states stay
+    // put. Going live used to swap in canned messages, which made the app least
+    // truthful at the moment it was most likely to be believed.
+    m_chatEmpty->setVisible(true);
+    m_alertsEmpty->setVisible(true);
+
+    // Nothing is known about the connection until the first progress line
+    // arrives, so this reports the state of the app, not of the stream.
+    Theme::setProp(m_statusTag, "tone", QString());
+    m_statusTag->setText(live ? tr("LIVE") : tr("OFFLINE"));
     Theme::repolish(m_statusTag);
 
     m_goLive->setText(live ? tr("End stream") : tr("Go Live · F8"));
     Theme::setVariant(m_goLive, live ? QStringLiteral("outlineRec") : QStringLiteral("rec"));
 
+    if (m_mEncoder)
+        m_mEncoder->setText(live ? encoderDisplayName(OutputSettings::load().videoCodec)
+                                 : kNoValue);
+
     if (!live) {
-        for (QLabel* m : {m_mViewers, m_mBitrate, m_mDropped, m_mPing, m_mFps})
-            if (m) m->setText(QStringLiteral("—"));
+        for (QLabel* m : {m_mViewers, m_mBitrate, m_mDropped})
+            if (m) m->setText(kNoValue);
+        if (m_mDropped) Theme::setTone(m_mDropped, QString());
     }
 }
 
-void StreamingWorkspace::tick() {
-    // Mix levels are driven by AudioController::levelsUpdated; this tick only
-    // animates the SIMULATED live-stream telemetry (viewers/bitrate/dropped/
-    // ping/fps). The previous m_micL/m_deskL random walk is gone.
-    auto* rng = QRandomGenerator::global();
+void StreamingWorkspace::onStreamProgress(int bitrateKbps, int droppedFrames) {
+    if (!m_live) return;
 
-    if (m_live) {
-        m_viewers = qBound(800, m_viewers + int((rng->generateDouble() - 0.35) * 80), 8000);
-        if (rng->generateDouble() > 0.97) m_dropped += int(rng->generateDouble() * 3);
-        m_mViewers->setText(QString::number(m_viewers));
-        m_mBitrate->setText(QStringLiteral("%1 Mb/s").arg((5800 + rng->generateDouble() * 1200) / 1000.0, 0, 'f', 1));
+    // ffmpeg omits the drop token on some lines, which parses as zero. Taking
+    // the maximum keeps the counter from walking backwards mid-stream.
+    m_dropped = std::max(m_dropped, droppedFrames);
+
+    if (m_mBitrate) {
+        m_mBitrate->setText(bitrateKbps > 0
+            ? tr("%1 Mb/s").arg(bitrateKbps / 1000.0, 0, 'f', 1)
+            : kNoValue);
+    }
+    if (m_mDropped) {
         m_mDropped->setText(QString::number(m_dropped));
-        m_mPing->setText(QStringLiteral("%1 ms").arg(22 + int(rng->generateDouble() * 18)));
-        m_mFps->setText(QStringLiteral("59.8"));
+        Theme::setTone(m_mDropped, m_dropped > 0 ? QStringLiteral("warn") : QString());
+    }
+
+    // The one health verdict there is evidence for. Dropped frames mean the
+    // encoder or the connection is not keeping up; nothing else here is known.
+    if (m_statusTag) {
+        const bool dropping = m_dropped > 0;
+        Theme::setProp(m_statusTag, "tone",
+                       dropping ? QStringLiteral("warn") : QStringLiteral("success"));
+        m_statusTag->setText(dropping ? tr("DROPPING") : tr("SENDING"));
+        Theme::repolish(m_statusTag);
     }
 }
 
