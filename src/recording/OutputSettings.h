@@ -2,6 +2,9 @@
 #include <QJsonObject>
 #include <QSettings>
 #include <QString>
+#include <QStringList>
+
+#include <algorithm>
 
 // App-wide encoder/output settings persisted in QSettings.
 // Not per-project: user configures once and it applies to all recordings.
@@ -27,6 +30,26 @@ struct OutputSettings {
     // starting a stream. File recording currently ignores it (libx264 chooses
     // its own GOP). Twitch/YouTube require ≤ 4s for stable playback.
     int     keyframeSec      = 0;
+
+    // The frame rates a chooser should offer, given the one already stored.
+    //
+    // The stored rate is always among them. A control that cannot represent
+    // the configured value is not a display problem: the settings page writes
+    // back what it shows, so a 120 fps project silently became 60 the moment
+    // anyone opened that page and pressed Apply for an unrelated reason. The
+    // fix is not to add 120 to a fixed list, because the field is an arbitrary
+    // integer everywhere else in the application, including the rate now
+    // declared to ffmpeg.
+    //
+    // Pure so the rule can be tested without building a window.
+    static QStringList frameRateChoices(int configured) {
+        QList<int> rates{24, 30, 48, 50, 60, 120, 144};
+        if (configured > 0 && !rates.contains(configured)) rates.append(configured);
+        std::sort(rates.begin(), rates.end(), std::greater<int>());
+        QStringList out;
+        for (int rate : rates) out << QString::number(rate);
+        return out;
+    }
 
     static OutputSettings load() {
         QSettings s;

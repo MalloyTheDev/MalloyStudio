@@ -220,6 +220,20 @@ public:
     // it; and this thread only ever reads through const accessors. Both halves
     // are required.
     bool trySubmit(QImage frame) {
+        // The format is a contract with ffmpeg, agreed when the arguments were
+        // built, and a mismatch here would be encoded as though it matched.
+        // Refused rather than converted: converting would put a full frame of
+        // work back on the thread this class exists to keep free, and would
+        // hide a caller that had stopped honouring the contract.
+        if (frame.format() != EncoderPipeline::rawVideoFormat()) {
+            if (!m_warnedFormat.exchange(true)) {
+                qWarning("video transport refused a frame in format %d; the pipe "
+                         "was declared as %d",
+                         int(frame.format()), int(EncoderPipeline::rawVideoFormat()));
+            }
+            return false;
+        }
+
         QMutexLocker lock(&m_mutex);
         if (m_stopping) return false;
         if (m_queue.size() >= kMaxQueuedFrames) return false;
@@ -323,6 +337,7 @@ private:
     }
 
     void*              m_pipe;
+    std::atomic<bool>  m_warnedFormat{false};
     std::atomic<void*> m_selfHandle{nullptr};
     mutable QMutex     m_mutex;
     QWaitCondition     m_wake;
@@ -890,8 +905,8 @@ void EncoderPipeline::onTickVideo() {
         // Un-premultiplying, and scaling when the canvas and the output
         // disagree. Both allocate a full frame and walk every pixel.
         FrameProfile::Scoped timing(FrameProfile::Stage::EncoderConvert);
-        if (out.format() != QImage::Format_ARGB32)
-            out = out.convertToFormat(QImage::Format_ARGB32);
+        if (out.format() != rawVideoFormat())
+            out = out.convertToFormat(rawVideoFormat());
         if (out.width() != MalloyCanvas::Width || out.height() != MalloyCanvas::Height)
             out = out.scaled(MalloyCanvas::Width, MalloyCanvas::Height,
                              Qt::IgnoreAspectRatio, Qt::SmoothTransformation);

@@ -123,6 +123,19 @@ public:
     // so the redaction itself is testable.
     static QString redactDestination(QString text, const QString& destination);
 
+    // The one QImage format the video pipe accepts.
+    //
+    // ffmpeg is told `-pix_fmt bgra` and reads the bytes as they arrive, so the
+    // frame handed over has to be in exactly that byte order. Format_ARGB32 is
+    // it on a little endian machine: BGRA in memory reads back as 0xAARRGGBB.
+    // Anything else would be encoded as though it were, which produces a file
+    // with wrong colours rather than an error.
+    //
+    // Separate from the stride question below, and deliberately so: a frame can
+    // be laid out correctly and still be the wrong format, and handling padded
+    // rows says nothing about which formats this pipe accepts.
+    static QImage::Format rawVideoFormat() { return QImage::Format_ARGB32; }
+
     // Whether a frame can go into a rawvideo stream as one contiguous block.
     //
     // rawvideo has no notion of stride: every row must be exactly width times

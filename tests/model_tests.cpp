@@ -280,6 +280,9 @@ private slots:
     // rawvideo cannot express a stride, so a padded frame has to be sent a
     // row at a time rather than as one block.
     void rawVideoNeedsTightlyPackedRows();
+    // A settings control must be able to show the rate that is stored,
+    // because the page writes back what it shows.
+    void frameRateChoicesAlwaysIncludeTheConfiguredRate();
 };
 
 // Creates a placeholder media file so a clip can pass the graph builder's
@@ -3886,6 +3889,57 @@ void MalloyModelTests::rawVideoNeedsTightlyPackedRows() {
     QVERIFY(!EncoderPipeline::isTightlyPacked(rgb888));
 
     QVERIFY(!EncoderPipeline::isTightlyPacked(QImage()));
+
+    // Layout and format are independent contracts, and passing one says
+    // nothing about the other. The padded RGB888 frame above exercises the row
+    // by row path; it is still not a frame this pipe would accept, because
+    // ffmpeg was told the bytes would be BGRA.
+    QCOMPARE(EncoderPipeline::rawVideoFormat(), QImage::Format_ARGB32);
+    QVERIFY(rgb888.format() != EncoderPipeline::rawVideoFormat());
+    QVERIFY(ordinary.format() == EncoderPipeline::rawVideoFormat());
+
+    // And a premultiplied frame, which is what the compositor works in, is the
+    // near miss worth naming: same depth, same stride, wrong meaning for the
+    // alpha channel, so it would encode as subtly wrong colour rather than
+    // failing.
+    QImage premultiplied(64, 64, QImage::Format_ARGB32_Premultiplied);
+    QVERIFY(EncoderPipeline::isTightlyPacked(premultiplied));
+    QVERIFY(premultiplied.format() != EncoderPipeline::rawVideoFormat());
+}
+
+void MalloyModelTests::frameRateChoicesAlwaysIncludeTheConfiguredRate() {
+    // The case that corrupted a project: 120 was stored, the list offered
+    // 60, 30 and 24, the page showed 60 and wrote 60 back on Apply.
+    const QStringList at120 = OutputSettings::frameRateChoices(120);
+    QVERIFY(at120.contains(QStringLiteral("120")));
+
+    // An ordinary rate is offered once, not twice.
+    const QStringList at60 = OutputSettings::frameRateChoices(60);
+    QCOMPARE(at60.count(QStringLiteral("60")), 1);
+
+    // A rate nobody anticipated is still offered, because the field is an
+    // arbitrary integer everywhere else, including the rate declared to
+    // ffmpeg.
+    const QStringList odd = OutputSettings::frameRateChoices(37);
+    QVERIFY(odd.contains(QStringLiteral("37")));
+    QVERIFY(odd.contains(QStringLiteral("60")));
+
+    // Highest first, and every entry a number.
+    int previous = 1 << 30;
+    for (const QString& entry : odd) {
+        bool ok = false;
+        const int value = entry.toInt(&ok);
+        QVERIFY(ok);
+        QVERIFY(value < previous);
+        previous = value;
+    }
+
+    // An unset or nonsensical stored rate does not add an entry, and the list
+    // is still usable.
+    const QStringList none = OutputSettings::frameRateChoices(0);
+    QVERIFY(!none.contains(QStringLiteral("0")));
+    QVERIFY(none.contains(QStringLiteral("60")));
+    QVERIFY(!OutputSettings::frameRateChoices(-5).contains(QStringLiteral("-5")));
 }
 
 QTEST_MAIN(MalloyModelTests)

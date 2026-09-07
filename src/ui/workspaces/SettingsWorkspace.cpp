@@ -249,7 +249,10 @@ QWidget* SettingsWorkspace::buildRecordingPage() {
     m_crfEdit = line(QStringLiteral("20"), 100);
     m_containerCombo = combo({tr("MKV (Matroska) · recommended"), tr("MP4"), tr("MOV")});
     m_resCombo = combo({QStringLiteral("1920 × 1080"), QStringLiteral("2560 × 1440"), QStringLiteral("3840 × 2160")});
-    m_fpsCombo = combo({QStringLiteral("60"), QStringLiteral("30"), QStringLiteral("24")});
+    // Populated from the stored rate when the page loads, so a configured
+    // value this list does not happen to contain is offered rather than
+    // replaced. See OutputSettings::frameRateChoices.
+    m_fpsCombo = combo({});
     m_replayCheck = check(true);
 
     // Encoder list comes from EncoderRegistry (detected ffmpeg encoders);
@@ -958,8 +961,14 @@ void SettingsWorkspace::loadRecordingSettings() {
     if (m_resCombo)
         m_resCombo->setCurrentIndex(o.width >= 3840 ? 2 : o.width >= 2560 ? 1 : 0);
     if (m_fpsCombo) {
-        const int fi = m_fpsCombo->findText(QString::number(o.fps));
-        m_fpsCombo->setCurrentIndex(fi >= 0 ? fi : 0);
+        // Rebuilt around whatever is stored, so the page can always show the
+        // truth. Falling back to the first entry, as this used to, meant the
+        // page displayed 60 for a project configured at 120 and then wrote
+        // that 60 back on Apply.
+        const QString configured = QString::number(o.fps);
+        m_fpsCombo->clear();
+        m_fpsCombo->addItems(OutputSettings::frameRateChoices(o.fps));
+        m_fpsCombo->setCurrentIndex(m_fpsCombo->findText(configured));
     }
     if (m_containerCombo)
         m_containerCombo->setCurrentIndex(
@@ -986,7 +995,12 @@ void SettingsWorkspace::applyRecordingSettings() {
     const int ri = m_resCombo ? qBound(0, m_resCombo->currentIndex(), 2) : 0;
     o.width = dims[ri][0];
     o.height = dims[ri][1];
-    if (m_fpsCombo) o.fps = m_fpsCombo->currentText().toInt();
+    if (m_fpsCombo) {
+        // Never write a zero back: an empty or unparsable box means the page
+        // has nothing to say about the rate, not that the rate is nothing.
+        const int chosen = m_fpsCombo->currentText().toInt();
+        if (chosen > 0) o.fps = chosen;
+    }
     if (m_containerCombo) {
         const int ci = m_containerCombo->currentIndex();
         o.container = ci == 2 ? QStringLiteral("mov") : ci == 1 ? QStringLiteral("mp4") : QStringLiteral("mkv");
