@@ -61,6 +61,15 @@ StudioStatusBar::StudioStatusBar(QWidget* parent) : QWidget(parent) {
     m_dropStat->setVisible(false);
     row->addWidget(m_dropStat);
 
+    // Same rule for capture-side loss: absent until there is some, then it
+    // stays. It sits next to ENC DROP because the pair is the diagnosis. Loss
+    // here means the machine could not carry frames away from the backend;
+    // loss there means this application composed pictures it could not hand
+    // over. One number covering both would say only that something was lost.
+    m_capDropStat = makeStat(QStringLiteral("CAP DROP"), &m_capDrops);
+    m_capDropStat->setVisible(false);
+    row->addWidget(m_capDropStat);
+
     row->addStretch();
 
     auto* ver = new QLabel(QStringLiteral("v8.0.0  ·  ffmpeg 7.0.2"), this);
@@ -170,6 +179,19 @@ void StudioStatusBar::tickStats() {
     if (m_ram)
         m_ram->setText(ram < 0 ? kNoValue : QStringLiteral("%1%").arg(qRound(ram)));
 
+    // Frames the capture backend produced and could not hand on. Read here
+    // rather than pushed for the reason setCaptureStatsProvider gives, and
+    // shown only once there is loss to report.
+    if (m_captureStats && m_capDropStat && m_capDrops) {
+        const int dropped = m_captureStats().framesDropped;
+        if (dropped > 0) {
+            m_capDropStat->setVisible(true);
+            const QString text = QString::number(dropped);
+            if (m_capDrops->text() != text) m_capDrops->setText(text);
+            Theme::setTone(m_capDrops, QStringLiteral("warn"));
+        }
+    }
+
     // The volume recordings are written to, which is the one the user runs out
     // of room on. The same volume SystemProbe reports in the settings page, so
     // the two figures agree.
@@ -214,6 +236,10 @@ void StudioStatusBar::setEncodeStats(int bitrateKbps, int droppedFrames, int enc
             Theme::setTone(m_drops, QStringLiteral("warn"));
         }
     }
+}
+
+void StudioStatusBar::setCaptureStatsProvider(std::function<CaptureStats()> provider) {
+    m_captureStats = std::move(provider);
 }
 
 void StudioStatusBar::flashMessage(const QString& text, int ms) {

@@ -9,6 +9,8 @@
 
 #include <QStandardPaths>
 
+#include <utility>
+
 MediaController::MediaController(TimedFrameSource* frames,
                                  TimedPcmSource*   audio,
                                  QObject*          parent)
@@ -23,6 +25,10 @@ MediaController::MediaController(TimedFrameSource* frames,
 MediaController::~MediaController() {
     if (m_recorder && m_recorder->isRunning()) m_recorder->stop();
     if (m_streamer && m_streamer->isRunning()) m_streamer->stop();
+}
+
+void MediaController::setCaptureStatsProvider(std::function<CaptureStats()> provider) {
+    m_captureStats = std::move(provider);
 }
 
 bool MediaController::ffmpegAvailable() const {
@@ -48,6 +54,7 @@ bool MediaController::startRecording(const QString& path,
     // Create a fresh RecorderPipeline each time so Windows HANDLE state is clean.
     delete m_recorder;
     m_recorder = new RecorderPipeline(this);
+    m_recorder->setSourceStatsProvider(m_captureStats);
 
     connect(m_recorder, &EncoderPipeline::started, this, &MediaController::recordingStarted);
     connect(m_recorder, &EncoderPipeline::finished, this,
@@ -92,6 +99,7 @@ bool MediaController::startStreaming(const StreamSettings& stream,
 
     delete m_streamer;
     m_streamer = new StreamingPipeline(this);
+    m_streamer->setSourceStatsProvider(m_captureStats);
 
     connect(m_streamer, &EncoderPipeline::started, this, &MediaController::streamingStarted);
     connect(m_streamer, &EncoderPipeline::finished, this,

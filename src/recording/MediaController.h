@@ -1,4 +1,5 @@
 #pragma once
+#include "capture/ICaptureSource.h"
 #include "recording/OutputSettings.h"
 #include "recording/StreamSettings.h"
 #include "media/TimedSource.h"
@@ -6,6 +7,8 @@
 #include <QObject>
 #include <QQueue>
 #include <QString>
+
+#include <functional>
 
 class RtmpKeyRelay;
 class TimedFrameSource;
@@ -31,6 +34,11 @@ public:
 
     // --- ffmpeg availability (both pipelines share the same binary) ---
     bool ffmpegAvailable() const;
+
+    // Passed to both pipelines so a run summary can report what the capture
+    // side produced and lost alongside what the encode side did with it. See
+    // EncoderPipeline::setSourceStatsProvider for why it is a callable.
+    void setCaptureStatsProvider(std::function<CaptureStats()> provider);
 
     // --- Recording ---
     bool isRecording() const;
@@ -86,4 +94,5 @@ private:
     EncoderPipeline*  m_recorder = nullptr;
     EncoderPipeline*  m_streamer = nullptr;
     RtmpKeyRelay*      m_keyRelay = nullptr;   // owns the loopback publish path
+    std::function<CaptureStats()> m_captureStats;
 };

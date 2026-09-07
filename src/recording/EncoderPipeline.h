@@ -1,4 +1,5 @@
 #pragma once
+#include "capture/ICaptureSource.h"
 #include "recording/OutputSettings.h"
 
 #include <QImage>
@@ -8,6 +9,7 @@
 #include <QString>
 
 #include <cstdint>
+#include <functional>
 
 class QProcess;
 class QTimer;
@@ -53,6 +55,22 @@ public:
                TimedFrameSource* frames,
                TimedPcmSource*   audio,
                QString*          error = nullptr);
+
+    // Where the capture side's totals are read from, for the run summary.
+    //
+    // The summary is only interpretable end to end: composed against accepted
+    // says what this application refused to hand over, and it says nothing
+    // about whether the frames existed in the first place. A run that composed
+    // 900 pictures means one thing if the backend offered 900 and another if
+    // it offered 3600 and lost 2700 of them.
+    //
+    // A callable rather than a pointer to the capture layer, because this
+    // class has no business knowing what a capture backend is; it only needs
+    // two numbers at the end of a run. What is reported is the difference
+    // between the start and the end of the run, since the counters are
+    // cumulative for as long as the application has been capturing and a
+    // recording is entitled to report only its own frames.
+    void setSourceStatsProvider(std::function<CaptureStats()> provider);
 
 public slots:
     void stop();
@@ -217,6 +235,12 @@ private:
     // none was lost, and conflating the two is what made a healthy recording
     // look like it was shedding nine frames in ten.
     int m_idleTicks = 0;
+
+    std::function<CaptureStats()> m_sourceStats;
+    // The capture totals as they stood when this run began, so the summary can
+    // report what this run captured rather than what the application has
+    // captured since it launched.
+    CaptureStats m_sourceStatsAtStart;
 
     QString  m_ffmpegPath;
     Target   m_target;

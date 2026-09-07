@@ -1,7 +1,9 @@
 #include "audio/AudioController.h"
 #include "audio/AudioMix.h"
 #include "audio/Resampler.h"
+#include "capture/CaptureBackend.h"
 #include "capture/CaptureController.h"
+#include "capture/WgcCapture.h"
 #include "input/HotkeyManager.h"
 #include "model/Canvas.h"
 #include "model/FilterEffect.h"
@@ -45,26 +47,38 @@
 #include <QUndoStack>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 
 class FakeCaptureSession final : public CaptureSession {
 public:
     FakeCaptureSession(int adapterIndex, int outputIndex, QObject* parent = nullptr)
         : CaptureSession(parent), m_key(CaptureController::keyFor(adapterIndex, outputIndex))
-    {}
+    { created.append(this); }
 
     void startCapture() override { started.append(m_key); }
     void stopCapture() override { stopped.append(m_key); }
 
+    // Stands in for a backend's own counters, so a test can say what a session
+    // produced and lost without running a capture.
+    CaptureStats stats() const override { return m_stats; }
+    void setStats(int produced, int dropped) {
+        m_stats.framesProduced = produced;
+        m_stats.framesDropped  = dropped;
+    }
+
     static QStringList started;
     static QStringList stopped;
+    static QList<FakeCaptureSession*> created;
 
 private:
-    QString m_key;
+    QString      m_key;
+    CaptureStats m_stats;
 };
 
 QStringList FakeCaptureSession::started;
 QStringList FakeCaptureSession::stopped;
+QList<FakeCaptureSession*> FakeCaptureSession::created;
 
 class MalloyModelTests : public QObject {
     Q_OBJECT
@@ -237,6 +251,18 @@ private slots:
     void editorLegacyClipLoadsAsUnlinked();
     void timelineTrimKeepsSourceInSync();
     void timelineSplitDerivesRightHandSourceIn();
+    // Capture backend preference: parses what is in the settings file, and
+    // anything it does not recognise means the backend every machine can run.
+    void captureBackendPreferenceParses();
+    // A WGC frame time is converted, not trusted: a stamp that does not share
+    // this machine's clock base is refused in favour of the arrival time.
+    void wgcBackendTimestampsAreCheckedNotTrusted();
+    // A frame holds its slot in the bounded handoff for exactly as long as it
+    // exists, including while it is moved through a queue.
+    void capturedFrameHoldsItsHandoffSlot();
+    // Backend counters survive the sessions that produced them, so a source
+    // that is restarted mid-run does not reset what the run captured.
+    void captureStatsAccumulateAcrossSessionChurn();
 };
 
 // Creates a placeholder media file so a clip can pass the graph builder's
@@ -3544,6 +3570,108 @@ void MalloyModelTests::smartConfigWarnsRatherThanGuessing() {
         QCOMPARE(makeWeakProfile().preferredEncoderId(), QStringLiteral("libx264"));
         QVERIFY(SystemProfile{}.preferredEncoderId().isEmpty());
     }
+}
+
+void MalloyModelTests::captureBackendPreferenceParses() {
+    using CaptureBackend::Kind;
+    QCOMPARE(CaptureBackend::parse(QStringLiteral("wgc")), Kind::Wgc);
+    QCOMPARE(CaptureBackend::parse(QStringLiteral("WGC")), Kind::Wgc);
+    QCOMPARE(CaptureBackend::parse(QStringLiteral("dxgi")), Kind::Dxgi);
+
+    // An unset or unreadable value is the backend that works everywhere, not
+    // an error and not the newer one.
+    QCOMPARE(CaptureBackend::parse(QString()), Kind::Dxgi);
+    QCOMPARE(CaptureBackend::parse(QStringLiteral("something else")), Kind::Dxgi);
+
+    // What is written is what is read back.
+    QCOMPARE(CaptureBackend::parse(CaptureBackend::name(Kind::Wgc)), Kind::Wgc);
+    QCOMPARE(CaptureBackend::parse(CaptureBackend::name(Kind::Dxgi)), Kind::Dxgi);
+}
+
+void MalloyModelTests::wgcBackendTimestampsAreCheckedNotTrusted() {
+    using namespace std::chrono;
+    const auto now = steady_clock::time_point(seconds(300000));
+    steady_clock::time_point out{};
+
+    // A stamp on the same clock base is used as it stands, converted from
+    // 100 ns units.
+    const qint64 sameInstant = 300000LL * 10000000LL;
+    QVERIFY(WgcCapture::normaliseBackendTime(sameInstant, now, &out));
+    QCOMPARE(duration_cast<milliseconds>(out - now).count(), 0LL);
+
+    // A frame captured 40 ms ago keeps its own time rather than being restamped
+    // with the moment it happened to be handled.
+    QVERIFY(WgcCapture::normaliseBackendTime(sameInstant - 400000LL, now, &out));
+    QCOMPARE(duration_cast<milliseconds>(now - out).count(), 40LL);
+
+    // A stamp from some other clock is refused, and the arrival time stands in.
+    QVERIFY(!WgcCapture::normaliseBackendTime(sameInstant + 60LL * 10000000LL, now, &out));
+    QCOMPARE(out, now);
+    QVERIFY(!WgcCapture::normaliseBackendTime(0, now, &out));
+    QCOMPARE(out, now);
+}
+
+void MalloyModelTests::capturedFrameHoldsItsHandoffSlot() {
+    auto inFlight = std::make_shared<std::atomic<int>>(0);
+    auto claim = [inFlight] {
+        inFlight->fetch_add(1);
+        return std::shared_ptr<void>(nullptr, [inFlight](void*) { inFlight->fetch_sub(1); });
+    };
+
+    {
+        CapturedFrame frame;
+        frame.inFlightSlot = claim();
+        QCOMPARE(inFlight->load(), 1);
+
+        // Moving the frame is what delivery does, and it must not free the
+        // slot early: the bound has to hold until the consumer has the frame.
+        CapturedFrame delivered = std::move(frame);
+        QCOMPARE(inFlight->load(), 1);
+
+        // Taking a copy of the image out does not release the slot either.
+        const QImage taken = delivered.image;
+        QCOMPARE(inFlight->load(), 1);
+    }
+    // Letting the frame go is what frees the slot, whether it was consumed or
+    // dropped undelivered.
+    QCOMPARE(inFlight->load(), 0);
+}
+
+void MalloyModelTests::captureStatsAccumulateAcrossSessionChurn() {
+    FakeCaptureSession::started.clear();
+    FakeCaptureSession::stopped.clear();
+    FakeCaptureSession::created.clear();
+
+    SceneCollection scenes;
+    QUndoStack undo;
+    scenes.setUndoStack(&undo);
+    scenes.addScene(QStringLiteral("Scene"));
+    scenes.addNewSourceToCurrent(QStringLiteral("Display"), Source::Type::DisplayCapture,
+                                 QString(), QColor(), 1, 2);
+
+    CaptureController controller(
+        &scenes,
+        [](int adapterIndex, int outputIndex, QObject* parent) {
+            return new FakeCaptureSession(adapterIndex, outputIndex, parent);
+        });
+
+    QCOMPARE(FakeCaptureSession::created.size(), 1);
+    FakeCaptureSession::created.last()->setStats(100, 7);
+    QCOMPARE(controller.captureStats().framesProduced, 100);
+    QCOMPARE(controller.captureStats().framesDropped, 7);
+
+    // Hiding the source stops the session. What it produced still happened.
+    scenes.setCurrentItemVisible(0, false);
+    QCOMPARE(controller.activeSessionCount(), 0);
+    QCOMPARE(controller.captureStats().framesProduced, 100);
+    QCOMPARE(controller.captureStats().framesDropped, 7);
+
+    // A rebuilt session counts from zero, and the totals carry both.
+    undo.undo();
+    QCOMPARE(FakeCaptureSession::created.size(), 2);
+    FakeCaptureSession::created.last()->setStats(20, 1);
+    QCOMPARE(controller.captureStats().framesProduced, 120);
+    QCOMPARE(controller.captureStats().framesDropped, 8);
 }
 
 QTEST_MAIN(MalloyModelTests)

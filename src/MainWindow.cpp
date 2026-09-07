@@ -28,6 +28,7 @@
 #include "recording/MediaController.h"
 #include "model/SceneCollection.h"
 #include "model/Scene.h"
+#include "capture/CaptureBackend.h"
 #include "capture/CaptureController.h"
 #include "project/ProjectDocument.h"
 #include "project/ClipsRegistry.h"
@@ -76,6 +77,14 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // TimedFrameSource) — created in setupUi(); wire-up happens after.
     setupUi();
     m_media   = new MediaController(m_preview, m_audio, this);
+    // The capture side's totals, for whoever reports them. The controller owns
+    // the only complete account of what the backends produced and lost,
+    // including the sessions it has already stopped, so both the run summary
+    // and the status bar read it from there rather than keeping counts of
+    // their own that would disagree.
+    m_media->setCaptureStatsProvider([this] {
+        return m_captureController ? m_captureController->captureStats() : CaptureStats{};
+    });
     m_hotkeys = new HotkeyManager(this);
     m_hotkeys->loadBindings();
 
@@ -251,6 +260,17 @@ void MainWindow::setupUi() {
             limiterSettings.value(QStringLiteral("audio/limiterThresholdDb"), -3.0).toDouble()));
     }
     // Settings ▸ Hotkeys rebinds global shortcuts on the live HotkeyManager.
+    // Changing the capture backend restarts capture rather than waiting for the
+    // next time a source happens to be rebuilt, so the setting means what it
+    // says the moment it is changed.
+    connect(m_settings, &SettingsWorkspace::captureBackendChanged, this, [this] {
+        if (!m_captureController) return;
+        m_captureController->stopAll();
+        m_captureController->reconcile();
+        flash(tr("Capture backend: %1")
+                  .arg(CaptureBackend::displayName(CaptureBackend::effective())), 4000);
+    });
+
     connect(m_settings, &SettingsWorkspace::hotkeyChanged, this,
             [this](const QString& actionId, const QKeySequence& seq) {
         if (m_hotkeys) m_hotkeys->setBinding(actionId, seq);
@@ -650,6 +670,12 @@ void MainWindow::connectModelSignals() {
                 bar, &StudioStatusBar::setEncodeStats);
         connect(m_media, &MediaController::recordingProgress,
                 bar, &StudioStatusBar::setEncodeStats);
+        // Capture-side loss, which until now had nowhere to appear at all: a
+        // recording could shed frames before composition and the only sign of
+        // it was a shorter file.
+        bar->setCaptureStatsProvider([this] {
+            return m_captureController ? m_captureController->captureStats() : CaptureStats{};
+        });
     }
 
     connect(m_media, &MediaController::errorOccurred,

@@ -1,4 +1,6 @@
 #pragma once
+#include "ICaptureSource.h"
+
 #include <QThread>
 #include <QImage>
 #include <atomic>
@@ -28,16 +30,15 @@ public:
     // object is destroyed while its events are still queued.
     std::shared_ptr<std::atomic<int>> inFlightCounter() const { return m_inFlight; }
 
-    // Frames this backend produced, whether or not anything consumed them.
-    // The SOURCE RX row: it says what the hardware and the desktop actually
-    // offered, which is the only number that makes the rest interpretable.
-    int sourceFramesProduced() const { return m_sourceFramesProduced.load(); }
-
-    // Frames this backend produced and then lost because the consumer was
-    // already at its limit. Capture-side loss, before composition: the
-    // encoder's own rejections are counted separately and mean something
-    // different. This is the CAP DROP half of the pair.
-    int sourceFramesDropped() const { return m_droppedBeforeComposition.load(); }
+    // What this backend produced and what it lost: the SOURCE RX and CAP DROP
+    // rows. Reported in the same shape as every other backend so the two
+    // numbers mean the same thing whichever one is running.
+    CaptureStats stats() const {
+        CaptureStats out;
+        out.framesProduced = m_sourceFramesProduced.load();
+        out.framesDropped  = m_droppedBeforeComposition.load();
+        return out;
+    }
 
 signals:
     void frameReady(QImage frame);

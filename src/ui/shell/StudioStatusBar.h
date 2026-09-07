@@ -1,9 +1,12 @@
 #pragma once
 
+#include "capture/ICaptureSource.h"
 #include "platform/MachineLoad.h"
 
 #include <QString>
 #include <QWidget>
+
+#include <functional>
 
 class QLabel;
 class QTimer;
@@ -40,6 +43,16 @@ public slots:
     void setEncodeStats(int bitrateKbps, int droppedFrames, int encodeFps,
                         int composedFramesRejected);
 
+public:
+    // Where the capture side's frame counts are read from.
+    //
+    // Polled once a second alongside CPU and disk rather than pushed, because
+    // these counters move once per captured frame and nothing is served by
+    // relaying sixty updates a second to a label a person reads at a glance.
+    // A provider rather than a direct dependency so this widget still knows
+    // nothing about what is being captured.
+    void setCaptureStatsProvider(std::function<CaptureStats()> provider);
+
 private:
     QWidget* makeStat(const QString& label, QLabel** valueOut);
     void tickStats();
@@ -62,6 +75,12 @@ private:
     QLabel* m_bitrate = nullptr;
     QWidget* m_dropStat = nullptr;   // hidden until frames are actually lost
     QLabel*  m_drops = nullptr;
+    // Frames lost at the capture backend, before this application composed
+    // anything. A different failure from ENC DROP with a different cause, so
+    // it gets its own row rather than being folded into that one.
+    QWidget* m_capDropStat = nullptr;
+    QLabel*  m_capDrops = nullptr;
+    std::function<CaptureStats()> m_captureStats;
 
     QTimer* m_statsTimer = nullptr;
     QTimer* m_clock = nullptr;

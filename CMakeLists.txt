@@ -20,8 +20,14 @@ find_package(Qt6 6.5 REQUIRED COMPONENTS Widgets Test Svg Network)
 qt_standard_project_setup()
 
 set(MALLOY_CORE_SOURCES
+    src/capture/ICaptureSource.h
+    src/capture/CaptureBackend.h
     src/capture/DxgiCapture.cpp
     src/capture/DxgiCapture.h
+    src/capture/WgcCapture.cpp
+    src/capture/WgcCapture.h
+    src/capture/WgcCaptureSession.cpp
+    src/capture/WgcCaptureSession.h
     src/capture/CaptureController.cpp
     src/capture/CaptureController.h
     src/capture/MonitorInfo.h
@@ -204,6 +210,7 @@ target_link_libraries(MalloyStudio PRIVATE
     mf
     mfreadwrite
     mfuuid
+    runtimeobject
 )
 
 enable_testing()
@@ -251,6 +258,7 @@ target_link_libraries(MalloyStudioTests PRIVATE
     mf
     mfreadwrite
     mfuuid
+    runtimeobject
 )
 
 add_test(NAME MalloyStudioTests COMMAND MalloyStudioTests)

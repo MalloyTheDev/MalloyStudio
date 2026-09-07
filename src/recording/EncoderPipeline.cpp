@@ -325,6 +325,11 @@ bool EncoderPipeline::start(const Target& target,
     m_composedFramesAccepted = 0;
     m_cfrDuplicates = 0;
     m_idleTicks = 0;
+    // The capture side's counters run for as long as the application has been
+    // capturing, which is not the same span as this recording. Taking the
+    // reading here is what makes the summary's source figures belong to this
+    // run.
+    m_sourceStatsAtStart = m_sourceStats ? m_sourceStats() : CaptureStats{};
 
     QStringList args = buildInputArgs(m_target.output, m_audioPipeName);
     args << buildOutputArgs(m_target);
@@ -392,6 +397,10 @@ bool EncoderPipeline::start(const Target& target,
     m_running = true;
     emit started();
     return true;
+}
+
+void EncoderPipeline::setSourceStatsProvider(std::function<CaptureStats()> provider) {
+    m_sourceStats = std::move(provider);
 }
 
 void EncoderPipeline::stop() {
@@ -464,11 +473,20 @@ void EncoderPipeline::stop() {
 
     // The stages, once per run, so a workload is mechanically interpretable
     // rather than a matter of reading a status bar at the right moment. The
-    // gaps between these numbers are the diagnosis: composed against accepted
-    // is what this application refused to hand over, and CFR DUP is what the
-    // output side invented to hold a cadence. Idle ticks are timer
-    // opportunities where nothing new existed, and are not loss of any kind.
-    qInfo("capture stages: COMPOSED %d  ENC ACCEPT %d  ENC DROP %d  CFR DUP %d  IDLE %d",
+    // gaps between these numbers are the diagnosis: source against composed is
+    // what the machine could not carry away from the capture backend, composed
+    // against accepted is what this application refused to hand over, and CFR
+    // DUP is what the output side invented to hold a cadence. Idle ticks are
+    // timer opportunities where nothing new existed, and are not loss of any
+    // kind.
+    //
+    // The two source figures are this run's, not the application's: they are
+    // the difference from the totals taken when the run started.
+    const CaptureStats sourceNow = m_sourceStats ? m_sourceStats() : CaptureStats{};
+    qInfo("capture stages: SOURCE RX %d  CAP DROP %d  COMPOSED %d  ENC ACCEPT %d  "
+          "ENC DROP %d  CFR DUP %d  IDLE %d",
+          sourceNow.framesProduced - m_sourceStatsAtStart.framesProduced,
+          sourceNow.framesDropped  - m_sourceStatsAtStart.framesDropped,
           m_composedFramesAccepted + m_composedFramesRejected,
           m_composedFramesAccepted, m_composedFramesRejected,
           m_cfrDuplicates, m_idleTicks);

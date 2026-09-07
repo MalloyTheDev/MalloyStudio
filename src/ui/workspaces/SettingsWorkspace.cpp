@@ -15,6 +15,7 @@
 #include "recording/OutputSettings.h"
 #include "recording/StreamSettings.h"
 #include "recording/EncoderRegistry.h"
+#include "capture/CaptureBackend.h"
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -29,6 +30,7 @@
 #include <QScrollArea>
 #include <QSettings>
 #include <QShowEvent>
+#include <QStandardItemModel>
 #include <QSpinBox>
 #include <QStackedWidget>
 #include <QStandardPaths>
@@ -810,6 +812,38 @@ QWidget* SettingsWorkspace::buildPerformancePage() {
     maxRenders->setFixedWidth(140);
     connect(maxRenders, &QSpinBox::valueChanged, this,
             [](int v) { QSettings().setValue(QStringLiteral("perf/maxRenders"), v); });
+
+    // How frames are acquired. Two mechanisms with the same output path, kept
+    // switchable because they are being compared against each other: the only
+    // way to attribute a difference in delivered rate to the backend is to
+    // change the backend and nothing else, on one machine, in one sitting.
+    auto* backend = new QComboBox;
+    backend->addItem(tr("Desktop Duplication (DXGI)"),
+                     CaptureBackend::name(CaptureBackend::Kind::Dxgi));
+    backend->addItem(tr("Windows Graphics Capture"),
+                     CaptureBackend::name(CaptureBackend::Kind::Wgc));
+    backend->setFixedWidth(260);
+    backend->setCurrentIndex(CaptureBackend::configured() == CaptureBackend::Kind::Wgc ? 1 : 0);
+
+    QString backendNote = tr("Duplication polls for frames; Graphics Capture is told about them.");
+    if (!WgcCapture::isAvailable()) {
+        // Say so rather than offering a choice that silently does nothing.
+        // The item stays visible because the reason it is unavailable is worth
+        // seeing, and disabled because selecting it would change nothing.
+        auto* model = qobject_cast<QStandardItemModel*>(backend->model());
+        if (model && model->item(1)) model->item(1)->setEnabled(false);
+        backendNote = tr("Graphics Capture needs Windows 10 version 1903 or later; "
+                         "this system runs Desktop Duplication.");
+    }
+    connect(backend, &QComboBox::currentIndexChanged, this, [this, backend](int index) {
+        QSettings().setValue(QLatin1String(CaptureBackend::kSettingsKey),
+                             backend->itemData(index).toString());
+        emit captureBackendChanged();
+    });
+
+    col->addWidget(settingsBlock(tr("Capture"), {
+        {tr("Capture backend"), backendNote, backend},
+    }));
 
     col->addWidget(settingsBlock(tr("Background work"), {
         {tr("Process priority"), tr("Higher priority can reduce dropped frames while recording."),

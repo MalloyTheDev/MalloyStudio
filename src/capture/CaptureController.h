@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ICaptureSource.h"
+
 #include <QObject>
 #include <QHash>
 #include <QImage>
@@ -19,6 +21,13 @@ public:
     virtual void startCapture() = 0;
     virtual void stopCapture() = 0;
 
+    // What this session's backend has produced and lost, for the SOURCE RX and
+    // CAP DROP rows. Sessions whose backend does not count report nothing
+    // rather than zero pretending to be a measurement, which is what the
+    // default here is: a camera or a PrintWindow capture has no such number,
+    // and inventing one would put a confident 0 next to a real drop count.
+    virtual CaptureStats stats() const { return {}; }
+
 signals:
     void frameReady(QImage frame);
     void captureError(QString message);
@@ -32,11 +41,16 @@ public:
 
     void startCapture() override;
     void stopCapture() override;
+    CaptureStats stats() const override;
 
 private:
     int m_adapterIndex = -1;
     int m_outputIndex = -1;
     DxgiCapture* m_capture = nullptr;
+    // The backend's counters, kept once it has been torn down: see
+    // WgcCaptureSession for why a stopped session still has to be able to say
+    // what it produced.
+    CaptureStats m_retired;
 };
 
 class CaptureController : public QObject {
@@ -55,6 +69,20 @@ public:
     // Returns display session count (for tests / status bar compatibility).
     int activeSessionCount() const { return m_sessions.size(); }
     int activeWindowSessionCount() const { return m_windowSessions.size(); }
+
+    // Every display and window backend's production and loss for this run,
+    // including sessions that have already been stopped.
+    //
+    // Summed across sessions and across time on purpose. A source that was
+    // switched away from still lost the frames it lost, and a reconcile that
+    // rebuilds a session must not reset the account of what a recording
+    // captured.
+    //
+    // Never reset. A consumer that wants one run's figures takes a reading at
+    // the start and subtracts, which is what EncoderPipeline does: a counter
+    // that can be zeroed by one consumer is a counter no other consumer can
+    // trust.
+    CaptureStats captureStats() const;
 
     static QString keyFor(int adapterIndex, int outputIndex);
     static QString keyForWindow(quintptr hwnd);
@@ -110,6 +138,10 @@ private:
     QHash<QString, ActiveSession>       m_sessions;
     QHash<QString, ActiveWindowSession> m_windowSessions;
     QHash<QString, ActiveCameraSession> m_cameraSessions;
+    // Backend counters from sessions that have already been stopped, so a run
+    // summary can still account for the frames they produced.
+    CaptureStats m_retiredStats;
+
     QHash<QString, QString> m_lastStatus;
     QSet<QString> m_blockedErrorKeys;
     QString m_statusSummary = QStringLiteral("Idle");

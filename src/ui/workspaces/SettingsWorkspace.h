@@ -45,6 +45,11 @@ signals:
     // A global hotkey binding changed in Settings ▸ Hotkeys. MainWindow forwards
     // it to HotkeyManager::setBinding (which persists + re-registers it).
     void hotkeyChanged(const QString& actionId, const QKeySequence& seq);
+    // The capture backend was changed in Settings ▸ Performance. A running
+    // session keeps the backend it was started with, so MainWindow restarts
+    // capture: the alternative is a setting that appears to have taken effect
+    // and has not, which is the worst of the three possible behaviours.
+    void captureBackendChanged();
 
 protected:
     void showEvent(QShowEvent* event) override;   // focus the section list on entry

@@ -1,5 +1,7 @@
 #include "CaptureController.h"
+#include "CaptureBackend.h"
 #include "DxgiCapture.h"
+#include "WgcCaptureSession.h"
 #include "WindowCaptureSession.h"
 #include "CameraCaptureSession.h"
 #include "model/Scene.h"
@@ -39,14 +41,26 @@ void DxgiCaptureSession::stopCapture() {
     disconnect(m_capture, nullptr, this, nullptr);
     m_capture->requestStop();
     m_capture->wait(4000);
+    m_retired = m_capture->stats();
     delete m_capture;
     m_capture = nullptr;
+}
+
+CaptureStats DxgiCaptureSession::stats() const {
+    return m_capture ? m_capture->stats() : m_retired;
 }
 
 CaptureController::CaptureController(SceneCollection* scenes, QObject* parent)
     : CaptureController(
           scenes,
-          [](int adapterIndex, int outputIndex, QObject* parent) {
+          [](int adapterIndex, int outputIndex, QObject* parent) -> CaptureSession* {
+              // Which backend a display source runs on is decided here, once,
+              // when the session is made. Deciding it per session rather than
+              // per application means switching backends takes effect on the
+              // next capture instead of on the next launch, which is what makes
+              // a two run comparison practical.
+              if (CaptureBackend::effective() == CaptureBackend::Kind::Wgc)
+                  return new WgcCaptureSession(adapterIndex, outputIndex, parent);
               return new DxgiCaptureSession(adapterIndex, outputIndex, parent);
           },
           parent)
@@ -54,7 +68,16 @@ CaptureController::CaptureController(SceneCollection* scenes, QObject* parent)
 
 CaptureController::CaptureController(SceneCollection* scenes, SessionFactory factory, QObject* parent)
     : QObject(parent), m_scenes(scenes), m_factory(std::move(factory)),
-      m_windowFactory([](quintptr hwnd, QObject* p){ return new WindowCaptureSession(hwnd, p); }),
+      m_windowFactory([](quintptr hwnd, QObject* p) -> CaptureSession* {
+          // Window capture has two mechanisms, not one with a setting: WGC
+          // composites the window and survives occlusion, while PrintWindow
+          // asks the application to draw itself. The same preference selects
+          // between them so that a window source is captured the same way a
+          // display source is.
+          if (CaptureBackend::effective() == CaptureBackend::Kind::Wgc)
+              return new WgcCaptureSession(hwnd, p);
+          return new WindowCaptureSession(hwnd, p);
+      }),
       m_cameraFactory([](const QString& id, QObject* p){ return new CameraCaptureSession(id, p); })
 {
     connect(m_scenes, &SceneCollection::currentChanged, this, &CaptureController::reconcile);
@@ -203,6 +226,9 @@ void CaptureController::stopSession(const QString& key, bool setIdleStatus) {
     m_sessions.erase(it);
     if (active.session) {
         active.session->stopCapture();
+        const CaptureStats stats = active.session->stats();
+        m_retiredStats.framesProduced += stats.framesProduced;
+        m_retiredStats.framesDropped  += stats.framesDropped;
         active.session->deleteLater();
     }
     if (setIdleStatus) setMonitorStatus(key, QStringLiteral("Idle"));
@@ -236,6 +262,9 @@ void CaptureController::stopWindowSession(const QString& key) {
     m_windowSessions.erase(it);
     if (active.session) {
         active.session->stopCapture();
+        const CaptureStats stats = active.session->stats();
+        m_retiredStats.framesProduced += stats.framesProduced;
+        m_retiredStats.framesDropped  += stats.framesDropped;
         active.session->deleteLater();
     }
     emit windowFrameCleared(active.hwnd);
@@ -266,6 +295,23 @@ void CaptureController::stopCameraSession(const QString& deviceId) {
         active.session->deleteLater();
     }
     emit cameraFrameCleared(deviceId);
+}
+
+CaptureStats CaptureController::captureStats() const {
+    CaptureStats total = m_retiredStats;
+    for (const ActiveSession& active : m_sessions) {
+        if (!active.session) continue;
+        const CaptureStats stats = active.session->stats();
+        total.framesProduced += stats.framesProduced;
+        total.framesDropped  += stats.framesDropped;
+    }
+    for (const ActiveWindowSession& active : m_windowSessions) {
+        if (!active.session) continue;
+        const CaptureStats stats = active.session->stats();
+        total.framesProduced += stats.framesProduced;
+        total.framesDropped  += stats.framesDropped;
+    }
+    return total;
 }
 
 void CaptureController::setSummary(const QString& summary) {
