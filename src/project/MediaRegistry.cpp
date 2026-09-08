@@ -79,7 +79,11 @@ MediaInfo::Kind MediaInfo::kindForExt(const QString& lowerExt) {
 }
 
 MediaRegistry::MediaRegistry(QObject* parent) : QObject(parent) {
-    m_ffprobe = !QStandardPaths::findExecutable(QStringLiteral("ffprobe")).isEmpty();
+    // Keep the resolved path, not just the fact that one was found. Starting a
+    // bare name later hands the lookup to CreateProcess, whose search order
+    // includes the application directory and the current directory, so a file
+    // named ffprobe.exe dropped beside the program would run instead.
+    m_ffprobe = QStandardPaths::findExecutable(QStringLiteral("ffprobe"));
     m_coalesce = new QTimer(this);
     m_coalesce->setSingleShot(true);
     m_coalesce->setInterval(250);
@@ -184,7 +188,7 @@ void MediaRegistry::rescan() {
 }
 
 void MediaRegistry::probeNext(int generation) {
-    if (!m_ffprobe || generation != m_probeGen) return;
+    if (m_ffprobe.isEmpty() || generation != m_probeGen) return;
     while (m_probeIndex < m_media.size() && m_media[m_probeIndex].probed)
         ++m_probeIndex;
     // Cap probing so a huge media folder can't spawn an unbounded ffprobe chain.
@@ -221,7 +225,7 @@ void MediaRegistry::probeNext(int generation) {
         ++m_probeIndex;
         probeNext(generation);
     });
-    proc->start(QStringLiteral("ffprobe"),
+    proc->start(m_ffprobe,
                 {QStringLiteral("-v"), QStringLiteral("quiet"),
                  QStringLiteral("-print_format"), QStringLiteral("json"),
                  QStringLiteral("-show_format"), QStringLiteral("-show_streams"), path});

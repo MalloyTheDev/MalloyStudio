@@ -67,7 +67,10 @@ private:
     QVector<MediaInfo> m_media;
     bool m_persist = true;
 
-    bool m_ffprobe = false;   // ffprobe available on PATH
+    // Absolute path to ffprobe, empty when it was not found. Resolved once at
+    // construction so the launch below never depends on the process search
+    // order; see the constructor.
+    QString m_ffprobe;
     int  m_probeGen = 0;      // bumped each rescan to drop stale probe results
     int  m_probeIndex = 0;
     QProcess* m_proc = nullptr;   // the single in-flight ffprobe (chain is sequential)
