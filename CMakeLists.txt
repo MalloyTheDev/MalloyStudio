@@ -211,6 +211,7 @@ target_link_libraries(MalloyStudio PRIVATE
     mfreadwrite
     mfuuid
     runtimeobject
+    advapi32
 )
 
 enable_testing()
@@ -263,6 +264,7 @@ target_link_libraries(MalloyStudioTests PRIVATE
     mfreadwrite
     mfuuid
     runtimeobject
+    advapi32
 )
 
 add_test(NAME MalloyStudioTests COMMAND MalloyStudioTests)

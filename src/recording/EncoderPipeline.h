@@ -47,7 +47,10 @@ public:
 
     bool ffmpegAvailable() const { return !m_ffmpegPath.isEmpty(); }
     QString ffmpegPath()   const { return m_ffmpegPath; }
-    bool isRunning()       const { return m_running; }
+    // True while finalising as well as while recording. Finalising spins a
+    // nested event loop, so a caller that treated this as false there would be
+    // free to delete this object while that loop is still on its stack.
+    bool isRunning()       const { return m_running || m_stopping; }
 
     // Returns false (and sets *error) if start fails synchronously.
     // The TimedFrameSource and TimedPcmSource pointers must outlive the
@@ -335,7 +338,7 @@ private:
     QProcess* m_ffmpeg = nullptr;
     QTimer*   m_videoTimer = nullptr;
     QTimer*   m_pipeWatchdog = nullptr;   // single-shot 5s — fails if ffmpeg never opens the audio pipe
-    QThread*  m_pipeAcceptor = nullptr;
+    class PipeAcceptThread* m_pipeAcceptor = nullptr;
 
     void*             m_audioPipe = nullptr;  // HANDLE; void* to avoid windows.h in header
     void*             m_videoPipe = nullptr;
@@ -348,10 +351,13 @@ private:
     // runs, on the same thread that composes the frames. A congested loop
     // therefore starved ffmpeg while the application looked busy and well.
     class VideoPipeWriter* m_videoWriter = nullptr;
-    QThread*  m_videoAcceptor = nullptr;
+    class PipeAcceptThread* m_videoAcceptor = nullptr;
     TimedFrameSource* m_frames = nullptr;
     TimedPcmSource*   m_audio  = nullptr;
 
+    // Set for the duration of stop(), which is not instantaneous: see
+    // isRunning() above.
+    bool m_stopping = false;
     bool m_running   = false;
     bool m_pipeReady = false;
 

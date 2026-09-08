@@ -21,12 +21,82 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <sddl.h>
 
 #include <QMutex>
 #include <QQueue>
 #include <QWaitCondition>
 
 #include <atomic>
+
+// Who may open the pipes.
+//
+// A named pipe created with a null lpSecurityAttributes gets the default
+// descriptor, and Microsoft documents that default as granting read access to
+// the Everyone group and to the anonymous account. These two pipes carry the
+// user's screen and their microphone, and they are created with
+// PIPE_ACCESS_OUTBOUND, so read is exactly the access that matters: the
+// default hands a live feed of both to any local process that opens the pipe
+// before ffmpeg does.
+//
+// The name cannot be the defence. \\.\pipe\ is an enumerable directory, so a
+// watcher sees the name the moment it exists, whatever it is called.
+//
+// So the descriptor is explicit and protected: full control to the system and
+// to the user running this process, no entry for anyone else, and no inherited
+// ACE able to widen it. Construction can fail, and when it does the caller
+// must abandon the recording rather than fall back to the default, which is
+// the thing being fixed.
+class PipeSecurity {
+public:
+    PipeSecurity() {
+        HANDLE token = nullptr;
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return;
+
+        DWORD needed = 0;
+        GetTokenInformation(token, TokenUser, nullptr, 0, &needed);
+        LPWSTR sidText = nullptr;
+        if (needed > 0) {
+            QByteArray buffer(int(needed), Qt::Uninitialized);
+            if (GetTokenInformation(token, TokenUser, buffer.data(), needed, &needed)) {
+                const auto* user = reinterpret_cast<const TOKEN_USER*>(buffer.constData());
+                ConvertSidToStringSidW(user->User.Sid, &sidText);
+            }
+        }
+        CloseHandle(token);
+        if (!sidText) return;
+
+        const std::wstring sddl =
+            L"D:P(A;;GA;;;SY)(A;;GA;;;" + std::wstring(sidText) + L")";
+        LocalFree(sidText);
+
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.c_str(), SDDL_REVISION_1, &m_descriptor, nullptr)) {
+            m_descriptor = nullptr;
+            return;
+        }
+        m_attributes.nLength              = sizeof(m_attributes);
+        m_attributes.lpSecurityDescriptor = m_descriptor;
+        m_attributes.bInheritHandle       = FALSE;
+    }
+
+    ~PipeSecurity() {
+        if (m_descriptor) LocalFree(m_descriptor);
+    }
+
+    PipeSecurity(const PipeSecurity&)            = delete;
+    PipeSecurity& operator=(const PipeSecurity&) = delete;
+
+    bool valid() const { return m_descriptor != nullptr; }
+
+    // Never null when valid(), and never used when not: a null here would mean
+    // the permissive default.
+    SECURITY_ATTRIBUTES* attributes() { return m_descriptor ? &m_attributes : nullptr; }
+
+private:
+    PSECURITY_DESCRIPTOR m_descriptor = nullptr;
+    SECURITY_ATTRIBUTES  m_attributes{};
+};
 
 // ---------------------------------------------------------------------------
 // One video frame on the wire.
@@ -103,6 +173,22 @@ public:
     // the moment there is a reader, whatever else is happening.
     explicit PipeAcceptThread(void* pipe, QImage priming = {}, QObject* parent = nullptr)
         : QThread(parent), m_pipe(pipe), m_priming(std::move(priming)) {}
+
+    void requestStop() { m_stopping.store(true, std::memory_order_relaxed); }
+
+    // A synchronous ConnectNamedPipe or WriteFile ends only when the thread
+    // that issued it cancels it. Both writers already own this; without it
+    // here, an ffmpeg that dies during argument parsing leaves this thread
+    // blocked forever on a pipe the pipeline is about to close underneath it.
+    void unblockPendingIo() {
+        HANDLE self = static_cast<HANDLE>(m_selfHandle.load(std::memory_order_relaxed));
+        if (self) CancelSynchronousIo(self);
+    }
+
+    ~PipeAcceptThread() override {
+        HANDLE self = static_cast<HANDLE>(m_selfHandle.exchange(nullptr));
+        if (self) CloseHandle(self);
+    }
 signals:
     // Carries how many video frames this thread put on the wire before any
     // transport existed: one for a primed pipe, zero otherwise. It travels with
@@ -113,11 +199,41 @@ signals:
     void connectFailed();
 protected:
     void run() override {
+        HANDLE self = nullptr;
+        if (DuplicateHandle(GetCurrentProcess(), GetCurrentThread(),
+                            GetCurrentProcess(), &self, 0, FALSE,
+                            DUPLICATE_SAME_ACCESS)) {
+            m_selfHandle.store(self, std::memory_order_relaxed);
+        }
+        // A stop can be requested before this thread reaches the connect, in
+        // which case there is no I/O to cancel and only the flag catches it.
+        if (stopping()) return;
+
         BOOL ok = ConnectNamedPipe(static_cast<HANDLE>(m_pipe), nullptr);
         if (!ok && GetLastError() != ERROR_PIPE_CONNECTED) {
-            emit connectFailed();
+            // A cancelled connect is a teardown, not a failure to report.
+            if (!stopping()) emit connectFailed();
             return;
         }
+        if (stopping()) return;
+
+        // No check on which process connected, deliberately.
+        //
+        // Identifying the client by process id does not survive contact with
+        // how ffmpeg is actually installed. Chocolatey, scoop and winget all
+        // publish a shim that launches the real binary as a child, so the id
+        // this process launched is the shim's and the id that opens the pipe is
+        // its child's, and an exact match refuses a perfectly good encoder.
+        // Walking the parent chain instead is no better, because a launcher
+        // that exits once it has spawned leaves no chain to walk and the same
+        // refusal follows, this time only on some machines.
+        //
+        // Refusing to record is a worse outcome than the race it would close,
+        // and the race it would close is a process already running as this user.
+        // What keeps other users, the anonymous account and remote clients out
+        // is the descriptor on the pipe, which does not depend on guessing who
+        // the client is. Removing the race entirely means not publishing a name
+        // at all: see the inherited-handle issue.
         int primed = 0;
         if (!m_priming.isNull()) {
             // A failure here means the reader went away between connecting and
@@ -125,13 +241,18 @@ protected:
             // Reporting nothing written keeps the frame count honest either
             // way, and the warning says which of the two happened.
             if (writeFrameToPipe(m_pipe, m_priming)) primed = 1;
-            else qWarning("video pipe priming frame was not written");
+            else if (!stopping()) qWarning("video pipe priming frame was not written");
         }
+        if (stopping()) return;
         emit connectedOk(primed);
     }
 private:
-    void*  m_pipe;
-    QImage m_priming;
+    bool stopping() const { return m_stopping.load(std::memory_order_relaxed); }
+
+    void*              m_pipe;
+    QImage             m_priming;
+    std::atomic<bool>  m_stopping{false};
+    std::atomic<void*> m_selfHandle{nullptr};
 };
 
 // Writes PCM to the audio pipe on its own thread.
@@ -601,7 +722,21 @@ bool EncoderPipeline::start(const Target& target,
     // through QProcess, whose buffer only drains when the Qt event loop runs,
     // and that loop belongs to the thread composing the frames. See
     // VideoPipeWriter.
-    const quint32 salt = QRandomGenerator::global()->generate();
+    // The descriptor is built once and applied to both pipes. If it cannot be
+    // built the recording does not start: continuing would mean creating the
+    // pipes with the permissive default, which is the vulnerability.
+    PipeSecurity pipeSecurity;
+    if (!pipeSecurity.valid()) {
+        setErr(QStringLiteral("Could not secure the encoder pipes (err=%1)")
+                   .arg(GetLastError()));
+        cleanup();
+        return false;
+    }
+
+    // system(), not global(): global() is the seeded non-cryptographic
+    // generator. The name is defence in depth rather than the control, but a
+    // predictable one would let a watcher wait on the name instead of polling.
+    const quint32 salt = QRandomGenerator::system()->generate();
     auto makePipe = [&](const QString& kind, int outBufferBytes,
                         QString* nameOut, void** handleOut) -> bool {
         const QString name = QStringLiteral("\\\\.\\pipe\\malloy_%1_%2_%3")
@@ -612,12 +747,14 @@ bool EncoderPipeline::start(const Target& target,
         HANDLE pipe = CreateNamedPipeW(
             wname.c_str(),
             PIPE_ACCESS_OUTBOUND,                                // server writes
-            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            // Remote clients rejected: without this the same pipe is reachable
+            // over SMB as \\host\pipe\malloy_...
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
             1,                                                   // max instances
             static_cast<DWORD>(outBufferBytes),
             0,                                                   // in buffer
             0,                                                   // default timeout
-            nullptr);
+            pipeSecurity.attributes());
         if (pipe == INVALID_HANDLE_VALUE) return false;
         *nameOut = name;
         *handleOut = pipe;
@@ -751,20 +888,20 @@ bool EncoderPipeline::start(const Target& target,
     // nothing.
     m_lastSentSequence = primedSequence;
 
+    // No deleteLater on these: they own a blocking wait on a pipe handle this
+    // object closes, so stop() joins them explicitly instead.
     auto* videoAccept = new PipeAcceptThread(m_videoPipe, std::move(priming));
     m_videoAcceptor = videoAccept;
     connect(videoAccept, &PipeAcceptThread::connectedOk,
             this, &EncoderPipeline::onVideoPipeConnected);
     connect(videoAccept, &PipeAcceptThread::connectFailed,
             this, &EncoderPipeline::onPipeConnectFailed);
-    connect(videoAccept, &QThread::finished, videoAccept, &QObject::deleteLater);
     videoAccept->start();
 
     auto* accept = new PipeAcceptThread(m_audioPipe);
     m_pipeAcceptor = accept;
     connect(accept, &PipeAcceptThread::connectedOk, this, &EncoderPipeline::onPipeConnected);
     connect(accept, &PipeAcceptThread::connectFailed, this, &EncoderPipeline::onPipeConnectFailed);
-    connect(accept, &QThread::finished, accept, &QObject::deleteLater);
     accept->start();
 
     // --- 4. Start pumping video immediately (audio waits for pipe connect) ---
@@ -799,8 +936,14 @@ void EncoderPipeline::setSourceStatsProvider(std::function<CaptureStats()> provi
 }
 
 void EncoderPipeline::stop() {
-    if (!m_running) return;
-    m_running = false;
+    if (!m_running || m_stopping) return;
+    // isRunning() reports true for as long as this flag is set. Finalising
+    // spins a nested event loop below, so the interface stays live while this
+    // frame is on the stack, and a second Stop or a fresh Start arriving in
+    // that window would otherwise find isRunning() already false and delete
+    // this object from under the loop.
+    m_stopping = true;
+    m_running  = false;
 
     if (m_videoTimer) {
         m_videoTimer->stop();
@@ -815,6 +958,23 @@ void EncoderPipeline::stop() {
     }
 
     if (m_audio) disconnect(m_audio, nullptr, this, nullptr);
+
+    // The acceptors retire first, and for a sharper reason than tidiness. One
+    // may be blocked in ConnectNamedPipe waiting for an ffmpeg that died during
+    // argument parsing, or part way through the priming write. DisconnectNamedPipe
+    // below would then wait on that write while the write waits for a reader:
+    // the deadlock AudioPipeWriter::unblockPendingWrite already documents.
+    // Cancelling their I/O is what makes these joins bounded, and joining them
+    // is what stops cleanup() closing a handle another thread is blocked on.
+    const auto retireAcceptor = [](PipeAcceptThread*& thread) {
+        if (!thread) return;
+        thread->requestStop();
+        thread->unblockPendingIo();
+        if (thread->wait(3000)) delete thread;
+        thread = nullptr;   // leaked rather than freed if it never exits
+    };
+    retireAcceptor(m_videoAcceptor);
+    retireAcceptor(m_pipeAcceptor);
 
     // Close stdin so ffmpeg knows the video stream is done.
     if (m_ffmpeg && m_ffmpeg->state() == QProcess::Running) {
@@ -948,6 +1108,9 @@ void EncoderPipeline::cleanup() {
         m_ffmpeg->deleteLater();
         m_ffmpeg = nullptr;
     }
+    // Nulling the pointer does not remove the connection made in
+    // onPipeConnected, and a surviving one would deliver into the next run.
+    if (m_audio) disconnect(m_audio, nullptr, this, nullptr);
     m_frames    = nullptr;
     m_audio     = nullptr;
     m_pipeReady = false;
@@ -1111,6 +1274,11 @@ bool EncoderPipeline::writeAudioBytes(const QByteArray& pcm) {
 }
 
 void EncoderPipeline::onVideoPipeConnected(int primedFrames) {
+    // Queued from the acceptor thread, so it can arrive after this run has
+    // been torn down. Building a writer then would start a thread on a closed
+    // handle and leak it, since the next run overwrites the pointer.
+    if (!m_running || !m_videoPipe || m_videoWriter) return;
+
     // ffmpeg has opened the video pipe, so there is a reader and writing can
     // begin. The writer owns the handle from here, and starts its count from
     // the frame the accept thread already put on the wire.
@@ -1119,6 +1287,12 @@ void EncoderPipeline::onVideoPipeConnected(int primedFrames) {
 }
 
 void EncoderPipeline::onPipeConnected() {
+    // Same reasoning as the video side, with a sharper consequence: this slot
+    // connects the audio source, and a late delivery would add a second
+    // connection that survives into the next run and enqueues every PCM chunk
+    // twice, which ffmpeg reads as audio running at double rate.
+    if (!m_running || !m_audioPipe || m_audioWriter) return;
+
     m_pipeReady = true;
     if (m_pipeWatchdog) m_pipeWatchdog->stop();   // cancel the 5 s timeout
 
@@ -1204,14 +1378,22 @@ void EncoderPipeline::onFfmpegStderrReady() {
 }
 
 void EncoderPipeline::appendStderrTail(const QString& chunk) {
-    // Redact before storing: this tail is attached to errorOccurred() and shown
-    // to the user, so the key must not survive into it.
+    // Redact the accumulated tail, not the chunk.
+    //
+    // A pipe read returns whatever bytes are available, with no line
+    // atomicity, so a URL can and does arrive split across two reads. Redacting
+    // each chunk on its own then finds neither half contains the destination
+    // and neither contains the key, and the unredacted remainder is joined
+    // afterwards and kept. Joining first and redacting the result is what makes
+    // the split irrelevant.
+    //
     // Only a stream URL carries a secret. A recording's destination is a file
     // path, and masking that would hide the very thing the error is about.
-    const QString safe = redactDestination(
-        chunk, m_target.kind == Target::Kind::Rtmp ? m_target.destination : QString());
     constexpr int kTailCap = 4096;
-    m_stderrTail += safe;
+    m_stderrTail += chunk;
+    m_stderrTail = redactDestination(
+        std::move(m_stderrTail),
+        m_target.kind == Target::Kind::Rtmp ? m_target.destination : QString());
     if (m_stderrTail.size() > kTailCap) {
         // Trim to the most recent kTailCap chars; align to a newline so the
         // surfaced tail starts on a clean line where possible.
