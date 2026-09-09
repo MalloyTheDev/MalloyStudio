@@ -2,6 +2,8 @@
 #include <QString>
 #include <QStringList>
 
+class QSettings;
+
 // App-wide RTMP streaming settings.
 //
 // The stream key is sensitive and stored encrypted via the Windows Credential
@@ -35,6 +37,9 @@ struct StreamSettings {
     // Round-trip through QSettings (service/customUrl/bitrate/keyframe) and
     // Credential Manager (streamKey).
     static StreamSettings load();
+    // Reads non-secret settings only; does not access Credential Manager.
+    static StreamSettings load(QSettings& settings);
+    StreamSettings        normalized() const;
     void                  save() const;
 
     // Returns the full RTMP URL with the stream key substituted.

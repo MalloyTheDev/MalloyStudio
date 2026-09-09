@@ -1,6 +1,8 @@
 #include "StreamSettings.h"
+#include "OutputSettings.h"
 
 #include <QSettings>
+#include <QUrl>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -88,20 +90,40 @@ QString StreamSettings::rtmpUrl() const {
     return url;
 }
 
+StreamSettings StreamSettings::normalized() const {
+    StreamSettings o = *this;
+    o.bitrateKbps = std::clamp(o.bitrateKbps, 500, 51000);
+    o.keyframeSec = std::clamp(o.keyframeSec, 1, 10);
+    if (o.service != Service::Twitch && o.service != Service::YouTube && o.service != Service::Custom)
+        o.service = Service::Twitch;
+    QString probe = o.customUrl;
+    probe.replace(QStringLiteral("{key}"), QStringLiteral("validation-key"));
+    const QUrl url(probe, QUrl::StrictMode);
+    if (!url.isValid() || url.host().isEmpty()
+        || (url.scheme() != QLatin1String("rtmp") && url.scheme() != QLatin1String("rtmps")))
+        o.customUrl = templateFor(Service::Custom);
+    return o;
+}
+
 StreamSettings StreamSettings::load() {
     QSettings s;
+    StreamSettings o = load(s);
+    o.streamKey = loadStreamKey();
+    return o;
+}
+
+StreamSettings StreamSettings::load(QSettings& s) {
     StreamSettings o;
     o.service     = serviceFromString(
         s.value(QStringLiteral("stream/service"), serviceToString(o.service)).toString());
     o.customUrl   = s.value(QStringLiteral("stream/customUrl"),   o.customUrl  ).toString();
-    o.bitrateKbps = s.value(QStringLiteral("stream/bitrateKbps"), o.bitrateKbps).toInt();
-    o.keyframeSec = s.value(QStringLiteral("stream/keyframeSec"), o.keyframeSec).toInt();
+    o.bitrateKbps = OutputSettings::integerValue(s.value(QStringLiteral("stream/bitrateKbps")), o.bitrateKbps);
+    o.keyframeSec = OutputSettings::integerValue(s.value(QStringLiteral("stream/keyframeSec")), o.keyframeSec);
     o.title       = s.value(QStringLiteral("stream/title"),    o.title).toString();
     o.category    = s.value(QStringLiteral("stream/category"), o.category).toString();
     o.tags        = s.value(QStringLiteral("stream/tags"),     o.tags).toStringList();
     o.useKeyRelay = s.value(QStringLiteral("stream/useKeyRelay"), o.useKeyRelay).toBool();
-    o.streamKey   = loadStreamKey();
-    return o;
+    return o.normalized();
 }
 
 void StreamSettings::save() const {

@@ -279,6 +279,15 @@ target_include_directories(MalloyCaptureLifetimeTests PRIVATE src)
 add_test(NAME MalloyCaptureLifetimeTests COMMAND MalloyCaptureLifetimeTests)
 set_tests_properties(MalloyCaptureLifetimeTests PROPERTIES TIMEOUT 20)
 
+qt_add_executable(MalloyOutputSettingsTests
+    tests/output_settings_tests.cpp
+    src/recording/StreamSettings.cpp
+)
+target_include_directories(MalloyOutputSettingsTests PRIVATE src)
+target_link_libraries(MalloyOutputSettingsTests PRIVATE Qt6::Test Qt6::Core advapi32)
+add_test(NAME MalloyOutputSettingsTests COMMAND MalloyOutputSettingsTests)
+set_tests_properties(MalloyOutputSettingsTests PROPERTIES TIMEOUT 20)
+
 qt_add_executable(MalloyCaptureHandoffTests tests/capture_handoff_tests.cpp)
 target_include_directories(MalloyCaptureHandoffTests PRIVATE src)
 target_link_libraries(MalloyCaptureHandoffTests PRIVATE Qt6::Test Qt6::Gui Qt6::Core)
