@@ -242,6 +242,11 @@ void CameraCapture::captureLoop(QString deviceId) {
             continue;
         }
 
+        if (!m_delivering.load(std::memory_order_relaxed)) {
+            safeRelease(sample);
+            continue;
+        }
+
         IMFMediaBuffer* buffer = nullptr;
         if (SUCCEEDED(sample->ConvertToContiguousBuffer(&buffer)) && buffer) {
             BYTE* data = nullptr;
@@ -256,6 +261,13 @@ void CameraCapture::captureLoop(QString deviceId) {
                     safeRelease(buffer);
                     safeRelease(sample);
                     continue;   // drop this frame; the device keeps streaming
+                }
+                CapturedFrame captured;
+                if (!m_handoff.tryAcquire(captured)) {
+                    buffer->Unlock();
+                    safeRelease(buffer);
+                    safeRelease(sample);
+                    continue;
                 }
                 QImage frame(reinterpret_cast<const uchar*>(data),
                              static_cast<int>(width), static_cast<int>(height),
@@ -273,7 +285,10 @@ void CameraCapture::captureLoop(QString deviceId) {
                     out = frame.copy();
                 }
                 buffer->Unlock();
-                if (!out.isNull()) emit frameReady(out);
+                if (!out.isNull()) {
+                    captured.image = std::move(out);
+                    emit frameReady(CaptureFrameHandoff::imageForDelivery(std::move(captured)));
+                }
             }
             safeRelease(buffer);
         }

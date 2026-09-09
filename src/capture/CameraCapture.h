@@ -1,4 +1,5 @@
 #pragma once
+#include "CaptureFrameHandoff.h"
 #include <QImage>
 #include <QList>
 #include <QObject>
@@ -58,6 +59,10 @@ public:
 
     void start(const QString& deviceId);   // spawn the read thread (no-op if running)
     void stop();                            // stop + join the read thread
+    void setDelivering(bool delivering) {
+        m_delivering.store(delivering, std::memory_order_relaxed);
+    }
+    CaptureStats stats() const { return m_handoff.stats(); }
 
 signals:
     void frameReady(QImage frame);
@@ -68,6 +73,8 @@ private:
 
     std::thread       m_thread;
     std::atomic<bool> m_running{false};
+    std::atomic<bool> m_delivering{true};
+    CaptureFrameHandoff m_handoff;
 };
 
 // Carries enumeration results from a worker thread to the main thread.
@@ -86,4 +93,3 @@ public:
 signals:
     void devicesRefreshed(const QList<CameraCapture::Device>& devices);
 };
-

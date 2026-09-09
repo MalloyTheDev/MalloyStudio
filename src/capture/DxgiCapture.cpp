@@ -18,12 +18,11 @@ QList<MonitorInfo> enumerateMonitors() {
         return result;
 
     IDXGIAdapter1* adapter = nullptr;
-    for (UINT ai = 0; factory->EnumAdapters1(ai, &adapter) != DXGI_ERROR_NOT_FOUND; ++ai) {
+    for (UINT ai = 0; SUCCEEDED(factory->EnumAdapters1(ai, &adapter)) && adapter; ++ai) {
         IDXGIOutput* output = nullptr;
-        for (UINT oi = 0; adapter->EnumOutputs(oi, &output) != DXGI_ERROR_NOT_FOUND; ++oi) {
+        for (UINT oi = 0; SUCCEEDED(adapter->EnumOutputs(oi, &output)) && output; ++oi) {
             DXGI_OUTPUT_DESC desc = {};
-            output->GetDesc(&desc);
-            if (desc.AttachedToDesktop) {
+            if (SUCCEEDED(output->GetDesc(&desc)) && desc.AttachedToDesktop) {
                 MonitorInfo mi;
                 mi.name = QString::fromWCharArray(desc.DeviceName);
                 mi.geometry = QRect(
@@ -36,8 +35,10 @@ QList<MonitorInfo> enumerateMonitors() {
                 result.append(mi);
             }
             output->Release();
+            output = nullptr;
         }
         adapter->Release();
+        adapter = nullptr;
     }
     factory->Release();
     return result;
@@ -69,10 +70,11 @@ void DxgiCapture::run() {
     }
 
     IDXGIAdapter1* adapter = nullptr;
-    if (factory->EnumAdapters1(static_cast<UINT>(m_adapterIndex), &adapter)
-        == DXGI_ERROR_NOT_FOUND) {
+    HRESULT hr = factory->EnumAdapters1(static_cast<UINT>(m_adapterIndex), &adapter);
+    if (FAILED(hr) || !adapter) {
         factory->Release();
-        emit captureError(QStringLiteral("Adapter not found"));
+        emit captureError(QStringLiteral("EnumAdapters1 failed: 0x%1")
+                              .arg(static_cast<quint32>(hr), 8, 16, QLatin1Char('0')));
         return;
     }
     factory->Release();
@@ -81,7 +83,7 @@ void DxgiCapture::run() {
     D3D_FEATURE_LEVEL featureLevel;
     ID3D11Device*        device  = nullptr;
     ID3D11DeviceContext* context = nullptr;
-    HRESULT hr = D3D11CreateDevice(
+    hr = D3D11CreateDevice(
         adapter,
         D3D_DRIVER_TYPE_UNKNOWN,
         nullptr, 0, nullptr, 0,
@@ -97,24 +99,46 @@ void DxgiCapture::run() {
     // Re-acquire the adapter through the device so we can reach its outputs.
     IDXGIDevice*  dxgiDev  = nullptr;
     IDXGIAdapter* dxgiAdap = nullptr;
-    device->QueryInterface(__uuidof(IDXGIDevice),  reinterpret_cast<void**>(&dxgiDev));
-    dxgiDev->GetParent(  __uuidof(IDXGIAdapter), reinterpret_cast<void**>(&dxgiAdap));
+    hr = device->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&dxgiDev));
+    if (FAILED(hr) || !dxgiDev) {
+        context->Release();
+        device->Release();
+        emit captureError(QStringLiteral("QueryInterface(IDXGIDevice) failed: 0x%1")
+                              .arg(static_cast<quint32>(hr), 8, 16, QLatin1Char('0')));
+        return;
+    }
+    hr = dxgiDev->GetParent(__uuidof(IDXGIAdapter), reinterpret_cast<void**>(&dxgiAdap));
     dxgiDev->Release();
+    if (FAILED(hr) || !dxgiAdap) {
+        context->Release();
+        device->Release();
+        emit captureError(QStringLiteral("GetParent(IDXGIAdapter) failed: 0x%1")
+                              .arg(static_cast<quint32>(hr), 8, 16, QLatin1Char('0')));
+        return;
+    }
 
     // --- Grab the chosen output ---
     IDXGIOutput* output = nullptr;
-    if (dxgiAdap->EnumOutputs(static_cast<UINT>(m_outputIndex), &output)
-        == DXGI_ERROR_NOT_FOUND) {
+    hr = dxgiAdap->EnumOutputs(static_cast<UINT>(m_outputIndex), &output);
+    if (FAILED(hr) || !output) {
         dxgiAdap->Release();
         device->Release(); context->Release();
-        emit captureError(QStringLiteral("Output not found"));
+        emit captureError(QStringLiteral("EnumOutputs failed: 0x%1")
+                              .arg(static_cast<quint32>(hr), 8, 16, QLatin1Char('0')));
         return;
     }
     dxgiAdap->Release();
 
     IDXGIOutput1* output1 = nullptr;
-    output->QueryInterface(__uuidof(IDXGIOutput1), reinterpret_cast<void**>(&output1));
+    hr = output->QueryInterface(__uuidof(IDXGIOutput1), reinterpret_cast<void**>(&output1));
     output->Release();
+    if (FAILED(hr) || !output1) {
+        context->Release();
+        device->Release();
+        emit captureError(QStringLiteral("QueryInterface(IDXGIOutput1) failed: 0x%1")
+                              .arg(static_cast<quint32>(hr), 8, 16, QLatin1Char('0')));
+        return;
+    }
 
     // --- Create the duplication ---
     IDXGIOutputDuplication* dup = nullptr;
@@ -151,7 +175,15 @@ void DxgiCapture::run() {
     stageDesc.CPUAccessFlags   = D3D11_CPU_ACCESS_READ;
 
     ID3D11Texture2D* staging = nullptr;
-    device->CreateTexture2D(&stageDesc, nullptr, &staging);
+    hr = device->CreateTexture2D(&stageDesc, nullptr, &staging);
+    if (FAILED(hr) || !staging) {
+        dup->Release();
+        context->Release();
+        device->Release();
+        emit captureError(QStringLiteral("CreateTexture2D(staging) failed: 0x%1")
+                              .arg(static_cast<quint32>(hr), 8, 16, QLatin1Char('0')));
+        return;
+    }
 
     // --- Capture loop (~30 fps via 33 ms timeout) ---
     while (m_running.load(std::memory_order_relaxed)) {

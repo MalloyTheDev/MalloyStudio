@@ -94,7 +94,7 @@ public:
     // measurement taken across a resize can be recognised as one.
     int poolRecreations() const;
 
-    // What the last start() failed for, when it returned false.
+    // The latest startup or runtime failure. Safe to read during capture.
     QString lastError() const;
 
     // Converts a WGC SystemRelativeTime, in 100 ns units, to the steady clock

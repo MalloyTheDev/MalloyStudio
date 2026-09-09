@@ -1,4 +1,5 @@
 #pragma once
+#include "CaptureFrameHandoff.h"
 #include <QImage>
 #include <QThread>
 #include <QString>
@@ -23,6 +24,10 @@ public:
 
     // Thread-safe: may be called from any thread.
     void requestStop();
+    void setDelivering(bool delivering) {
+        m_delivering.store(delivering, std::memory_order_relaxed);
+    }
+    CaptureStats stats() const { return m_handoff.stats(); }
 
 signals:
     void frameReady(QImage frame);
@@ -36,4 +41,6 @@ protected:
 private:
     quintptr          m_hwnd;
     std::atomic<bool> m_running{false};
+    std::atomic<bool> m_delivering{true};
+    CaptureFrameHandoff m_handoff;
 };

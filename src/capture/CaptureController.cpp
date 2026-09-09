@@ -286,6 +286,7 @@ void CaptureController::stopWindowSession(const QString& key) {
 
 void CaptureController::startCameraSession(const QString& deviceId) {
     CaptureSession* session = m_cameraFactory(deviceId, this);
+    session->setDelivering(m_delivering);
     m_cameraSessions.insert(deviceId, ActiveCameraSession{deviceId, session});
 
     connect(session, &CaptureSession::frameReady, this, [this, deviceId](QImage frame) {
@@ -306,6 +307,9 @@ void CaptureController::stopCameraSession(const QString& deviceId) {
     m_cameraSessions.erase(it);
     if (active.session) {
         active.session->stopCapture();
+        const CaptureStats stats = active.session->stats();
+        m_retiredStats.framesProduced += stats.framesProduced;
+        m_retiredStats.framesDropped += stats.framesDropped;
         active.session->deleteLater();
     }
     emit cameraFrameCleared(deviceId);
@@ -324,6 +328,12 @@ CaptureStats CaptureController::captureStats() const {
         const CaptureStats stats = active.session->stats();
         total.framesProduced += stats.framesProduced;
         total.framesDropped  += stats.framesDropped;
+    }
+    for (const ActiveCameraSession& active : m_cameraSessions) {
+        if (!active.session) continue;
+        const CaptureStats stats = active.session->stats();
+        total.framesProduced += stats.framesProduced;
+        total.framesDropped += stats.framesDropped;
     }
     return total;
 }

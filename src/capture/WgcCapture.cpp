@@ -1,4 +1,5 @@
 #include "WgcCapture.h"
+#include "CaptureCallbackGate.h"
 #include "platform/FrameProfile.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -130,11 +131,9 @@ struct WgcCapture::Impl {
 
     std::atomic<State> state{State::Idle};
 
-    // Held for the whole body of a frame callback. stop() takes it after
-    // detaching the event, which is what makes "no callback after teardown"
-    // true rather than likely: a callback already running is waited out, and
-    // one that has not started sees a state that is no longer Running.
-    std::mutex delivery;
+    // Sinks retain the gate until their final Invoke has returned. The gate
+    // drains callbacks before resource teardown without retaining Impl itself.
+    std::shared_ptr<CaptureCallbackGate<Impl>> callbacks;
 
     std::shared_ptr<std::atomic<int>> inFlight =
         std::make_shared<std::atomic<int>>(0);
@@ -152,6 +151,7 @@ struct WgcCapture::Impl {
     std::atomic<bool> clockUsable{true};
 
     QString lastError;
+    mutable std::mutex errorMutex;
 
     bool  createDevice();
     bool  createItem();
@@ -160,6 +160,7 @@ struct WgcCapture::Impl {
     bool  ensureStaging(int width, int height);
     QImage readBack(ID3D11Texture2D* texture, int width, int height);
     void  reportError(const QString& message);
+    void  setLastError(const QString& message);
     void  releaseAll();
 };
 
@@ -173,7 +174,8 @@ namespace {
 
 class FrameArrivedSink final : public FrameArrivedHandler {
 public:
-    explicit FrameArrivedSink(WgcCapture::Impl* impl) : m_impl(impl) {}
+    explicit FrameArrivedSink(std::shared_ptr<CaptureCallbackGate<WgcCapture::Impl>> gate)
+        : m_gate(std::move(gate)) {}
 
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** out) override {
         if (!out) return E_POINTER;
@@ -197,18 +199,19 @@ public:
 
     HRESULT STDMETHODCALLTYPE Invoke(wgc::IDirect3D11CaptureFramePool* sender,
                                      IInspectable*) override {
-        if (m_impl) m_impl->onFrameArrived(sender);
+        m_gate->invoke([sender](WgcCapture::Impl& impl) { impl.onFrameArrived(sender); });
         return S_OK;
     }
 
 private:
     std::atomic<ULONG> m_refs{1};
-    WgcCapture::Impl*  m_impl = nullptr;
+    std::shared_ptr<CaptureCallbackGate<WgcCapture::Impl>> m_gate;
 };
 
 class ItemClosedSink final : public ItemClosedHandler {
 public:
-    explicit ItemClosedSink(WgcCapture::Impl* impl) : m_impl(impl) {}
+    explicit ItemClosedSink(std::shared_ptr<CaptureCallbackGate<WgcCapture::Impl>> gate)
+        : m_gate(std::move(gate)) {}
 
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** out) override {
         if (!out) return E_POINTER;
@@ -231,18 +234,21 @@ public:
     }
 
     HRESULT STDMETHODCALLTYPE Invoke(wgc::IGraphicsCaptureItem*, IInspectable*) override {
-        if (!m_impl) return S_OK;
         // The window closed or the monitor went away. Nothing failed, so this
         // is not an error path: the caller is told the source is gone and
         // decides what that means.
-        std::lock_guard<std::mutex> guard(m_impl->delivery);
-        if (m_impl->onClosed) m_impl->onClosed();
+        m_gate->invoke([](WgcCapture::Impl& impl) {
+            if (impl.state.load(std::memory_order_acquire) == WgcCapture::Impl::State::Running
+                && impl.onClosed) {
+                impl.onClosed();
+            }
+        });
         return S_OK;
     }
 
 private:
     std::atomic<ULONG> m_refs{1};
-    WgcCapture::Impl*  m_impl = nullptr;
+    std::shared_ptr<CaptureCallbackGate<WgcCapture::Impl>> m_gate;
 };
 
 }  // namespace
@@ -296,11 +302,11 @@ void* WgcCapture::monitorHandleFor(int adapterIndex, int outputIndex) {
 
     HMONITOR handle = nullptr;
     IDXGIAdapter1* adapter = nullptr;
-    if (factory->EnumAdapters1(static_cast<UINT>(adapterIndex), &adapter)
-        != DXGI_ERROR_NOT_FOUND) {
+    if (SUCCEEDED(factory->EnumAdapters1(static_cast<UINT>(adapterIndex), &adapter))
+        && adapter) {
         IDXGIOutput* output = nullptr;
-        if (adapter->EnumOutputs(static_cast<UINT>(outputIndex), &output)
-            != DXGI_ERROR_NOT_FOUND) {
+        if (SUCCEEDED(adapter->EnumOutputs(static_cast<UINT>(outputIndex), &output))
+            && output) {
             DXGI_OUTPUT_DESC desc = {};
             if (SUCCEEDED(output->GetDesc(&desc)) && desc.AttachedToDesktop)
                 handle = desc.Monitor;
@@ -376,18 +382,23 @@ int WgcCapture::poolRecreations() const {
 }
 
 QString WgcCapture::lastError() const {
+    std::lock_guard<std::mutex> guard(m_impl->errorMutex);
     return m_impl->lastError;
 }
 
 bool WgcCapture::start(FrameCallback onFrame) {
-    if (m_impl->state.load() == Impl::State::Running) return true;
+    const auto state = m_impl->state.load();
+    if (state == Impl::State::Running || state == Impl::State::RecreatingPool) return true;
+    // A device-loss error can leave a stopped session with resources to retire.
+    stop();
     if (!isAvailable()) {
-        m_impl->lastError = QStringLiteral("Windows.Graphics.Capture is not available on this system");
+        m_impl->setLastError(QStringLiteral("Windows.Graphics.Capture is not available on this system"));
         return false;
     }
 
     m_impl->onFrame = std::move(onFrame);
-    m_impl->lastError.clear();
+    m_impl->setLastError({});
+    m_impl->callbacks = std::make_shared<CaptureCallbackGate<Impl>>(m_impl.get());
 
     if (!m_impl->createDevice() || !m_impl->createItem() || !m_impl->createPoolAndSession()) {
         m_impl->releaseAll();
@@ -399,7 +410,7 @@ bool WgcCapture::start(FrameCallback onFrame) {
     const HRESULT hr = m_impl->session->StartCapture();
     if (FAILED(hr)) {
         m_impl->state.store(Impl::State::Idle);
-        m_impl->lastError = QStringLiteral("StartCapture failed: ") + hresultText(hr);
+        m_impl->setLastError(QStringLiteral("StartCapture failed: ") + hresultText(hr));
         m_impl->releaseAll();
         return false;
     }
@@ -407,30 +418,9 @@ bool WgcCapture::start(FrameCallback onFrame) {
 }
 
 void WgcCapture::stop() {
-    if (m_impl->state.load() == Impl::State::Idle) {
-        m_impl->releaseAll();
-        return;
-    }
-
-    // Order matters. Detach the event first so no new callback can begin, mark
-    // the session stopped so one that began between those two steps returns
-    // without delivering, and only then take the delivery lock, which waits
-    // out a callback already inside its body. After this returns, no callback
-    // is running and none will start.
-    if (m_impl->pool && m_impl->frameToken.value != 0) {
-        m_impl->pool->remove_FrameArrived(m_impl->frameToken);
-        m_impl->frameToken = {};
-    }
-    if (m_impl->item && m_impl->closedToken.value != 0) {
-        m_impl->item->remove_Closed(m_impl->closedToken);
-        m_impl->closedToken = {};
-    }
-    m_impl->state.store(Impl::State::Stopped);
-    {
-        std::lock_guard<std::mutex> guard(m_impl->delivery);
-        m_impl->onFrame = nullptr;
-    }
-
+    // Revoking a WinRT event does not drain handlers already dispatched.
+    // releaseAll closes the shared gate before detaching either event, so a
+    // handler delayed before entering it cannot touch Impl after teardown.
     m_impl->releaseAll();
     m_impl->state.store(Impl::State::Idle);
 }
@@ -450,14 +440,14 @@ bool WgcCapture::Impl::createDevice() {
                                D3D11_SDK_VERSION, &device, &level, &context);
     }
     if (FAILED(hr)) {
-        lastError = QStringLiteral("D3D11CreateDevice failed: ") + hresultText(hr);
+        setLastError(QStringLiteral("D3D11CreateDevice failed: ") + hresultText(hr));
         return false;
     }
 
     IDXGIDevice* dxgiDevice = nullptr;
     hr = device->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&dxgiDevice));
     if (FAILED(hr) || !dxgiDevice) {
-        lastError = QStringLiteral("No IDXGIDevice on the D3D11 device: ") + hresultText(hr);
+        setLastError(QStringLiteral("No IDXGIDevice on the D3D11 device: ") + hresultText(hr));
         return false;
     }
 
@@ -465,7 +455,7 @@ bool WgcCapture::Impl::createDevice() {
     hr = CreateDirect3D11DeviceFromDXGIDevice(dxgiDevice, &inspectable);
     dxgiDevice->Release();
     if (FAILED(hr) || !inspectable) {
-        lastError = QStringLiteral("CreateDirect3D11DeviceFromDXGIDevice failed: ") + hresultText(hr);
+        setLastError(QStringLiteral("CreateDirect3D11DeviceFromDXGIDevice failed: ") + hresultText(hr));
         return false;
     }
 
@@ -473,7 +463,7 @@ bool WgcCapture::Impl::createDevice() {
                                      reinterpret_cast<void**>(&runtimeDevice));
     inspectable->Release();
     if (FAILED(hr) || !runtimeDevice) {
-        lastError = QStringLiteral("No IDirect3DDevice on the interop device: ") + hresultText(hr);
+        setLastError(QStringLiteral("No IDirect3DDevice on the interop device: ") + hresultText(hr));
         return false;
     }
     return true;
@@ -484,7 +474,7 @@ bool WgcCapture::Impl::createItem() {
     HRESULT hr = activationFactory(RuntimeClass_Windows_Graphics_Capture_GraphicsCaptureItem,
                                    &interop);
     if (FAILED(hr) || !interop) {
-        lastError = QStringLiteral("GraphicsCaptureItem factory failed: ") + hresultText(hr);
+        setLastError(QStringLiteral("GraphicsCaptureItem factory failed: ") + hresultText(hr));
         return false;
     }
 
@@ -496,29 +486,32 @@ bool WgcCapture::Impl::createItem() {
                                       reinterpret_cast<void**>(&item));
     } else {
         interop->Release();
-        lastError = QStringLiteral("No capture target");
+        setLastError(QStringLiteral("No capture target"));
         return false;
     }
     interop->Release();
 
     if (FAILED(hr) || !item) {
-        lastError = (monitor ? QStringLiteral("CreateForMonitor failed: ")
+        setLastError((monitor ? QStringLiteral("CreateForMonitor failed: ")
                              : QStringLiteral("CreateForWindow failed: "))
-                    + hresultText(hr);
+                    + hresultText(hr));
         return false;
     }
 
     if (FAILED(item->get_Size(&poolSize)) || poolSize.Width <= 0 || poolSize.Height <= 0) {
-        lastError = QStringLiteral("Capture item reported no size");
+        setLastError(QStringLiteral("Capture item reported no size"));
         return false;
     }
 
-    // The sink is handed to the item, which holds the reference that keeps it
-    // alive; this one is dropped straight away so detaching the event is what
-    // destroys it.
-    auto* sink = new ItemClosedSink(this);
-    item->add_Closed(sink, &closedToken);
+    // The item owns the subscription reference. An already dispatched event
+    // can retain the sink and its closed gate after the subscription is gone.
+    auto* sink = new ItemClosedSink(callbacks);
+    hr = item->add_Closed(sink, &closedToken);
     sink->Release();
+    if (FAILED(hr)) {
+        setLastError(QStringLiteral("add_Closed failed: ") + hresultText(hr));
+        return false;
+    }
     return true;
 }
 
@@ -527,7 +520,7 @@ bool WgcCapture::Impl::createPoolAndSession() {
     HRESULT hr = activationFactory(RuntimeClass_Windows_Graphics_Capture_Direct3D11CaptureFramePool,
                                    &statics);
     if (FAILED(hr) || !statics) {
-        lastError = QStringLiteral("Frame pool factory failed: ") + hresultText(hr);
+        setLastError(QStringLiteral("Frame pool factory failed: ") + hresultText(hr));
         return false;
     }
 
@@ -540,21 +533,21 @@ bool WgcCapture::Impl::createPoolAndSession() {
                                      kFramePoolBuffers, poolSize, &pool);
     statics->Release();
     if (FAILED(hr) || !pool) {
-        lastError = QStringLiteral("CreateFreeThreaded failed: ") + hresultText(hr);
+        setLastError(QStringLiteral("CreateFreeThreaded failed: ") + hresultText(hr));
         return false;
     }
 
-    auto* sink = new FrameArrivedSink(this);
+    auto* sink = new FrameArrivedSink(callbacks);
     hr = pool->add_FrameArrived(sink, &frameToken);
     sink->Release();            // the pool holds it for as long as it is subscribed
     if (FAILED(hr)) {
-        lastError = QStringLiteral("add_FrameArrived failed: ") + hresultText(hr);
+        setLastError(QStringLiteral("add_FrameArrived failed: ") + hresultText(hr));
         return false;
     }
 
     hr = pool->CreateCaptureSession(item, &session);
     if (FAILED(hr) || !session) {
-        lastError = QStringLiteral("CreateCaptureSession failed: ") + hresultText(hr);
+        setLastError(QStringLiteral("CreateCaptureSession failed: ") + hresultText(hr));
         return false;
     }
 
@@ -632,12 +625,9 @@ QImage WgcCapture::Impl::readBack(ID3D11Texture2D* texture, int width, int heigh
 }
 
 void WgcCapture::Impl::onFrameArrived(wgc::IDirect3D11CaptureFramePool* sender) {
-    // Cheap check before the lock: a stopped session should cost a load and a
-    // return, not a contended mutex.
-    if (state.load(std::memory_order_acquire) == State::Stopped) return;
-
-    std::lock_guard<std::mutex> guard(delivery);
-    if (state.load(std::memory_order_acquire) == State::Stopped) return;
+    // The sink's shared gate serializes this whole body with item closure
+    // and keeps teardown outside it. Setup and stopped sessions do no work.
+    if (state.load(std::memory_order_acquire) != State::Running) return;
     if (!sender) return;
 
     wgc::IDirect3D11CaptureFrame* frame = nullptr;
@@ -760,11 +750,19 @@ void WgcCapture::Impl::onFrameArrived(wgc::IDirect3D11CaptureFramePool* sender) 
 }
 
 void WgcCapture::Impl::reportError(const QString& message) {
-    lastError = message;
+    setLastError(message);
     if (onError) onError(message);
 }
 
+void WgcCapture::Impl::setLastError(const QString& message) {
+    std::lock_guard<std::mutex> guard(errorMutex);
+    lastError = message;
+}
+
 void WgcCapture::Impl::releaseAll() {
+    if (callbacks) callbacks->close();
+    state.store(State::Stopped, std::memory_order_release);
+    onFrame = nullptr;
     if (pool && frameToken.value != 0) {
         pool->remove_FrameArrived(frameToken);
         frameToken = {};

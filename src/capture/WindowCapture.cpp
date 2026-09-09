@@ -32,6 +32,11 @@ void WindowCapture::run() {
             break;
         }
 
+        if (!m_delivering.load(std::memory_order_relaxed)) {
+            msleep(kFrameMs);
+            continue;
+        }
+
         RECT rc{};
         if (!GetClientRect(hwnd, &rc)) {
             msleep(kFrameMs);
@@ -85,7 +90,13 @@ void WindowCapture::run() {
             // on little-endian expects the same layout (B@0, G@1, R@2, A@3).
             QImage frame(reinterpret_cast<const uchar*>(bits.constData()),
                          w, h, w * 4, QImage::Format_ARGB32);
-            emit frameReady(frame.copy());   // must copy before bits goes out of scope
+            CapturedFrame captured;
+            if (m_handoff.tryAcquire(captured)) {
+                // Reserve before copying; a full queue costs a dropped frame,
+                // not another owned image. The lease travels with the signal.
+                captured.image = frame.copy();
+                emit frameReady(CaptureFrameHandoff::imageForDelivery(std::move(captured)));
+            }
         } else {
             emit captureError(QStringLiteral("WindowCapture: GetDIBits failed"));
         }

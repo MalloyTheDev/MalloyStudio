@@ -268,3 +268,14 @@ target_link_libraries(MalloyStudioTests PRIVATE
 )
 
 add_test(NAME MalloyStudioTests COMMAND MalloyStudioTests)
+
+add_executable(MalloyCaptureLifetimeTests tests/capture_lifetime_tests.cpp)
+target_include_directories(MalloyCaptureLifetimeTests PRIVATE src)
+add_test(NAME MalloyCaptureLifetimeTests COMMAND MalloyCaptureLifetimeTests)
+set_tests_properties(MalloyCaptureLifetimeTests PROPERTIES TIMEOUT 20)
+
+qt_add_executable(MalloyCaptureHandoffTests tests/capture_handoff_tests.cpp)
+target_include_directories(MalloyCaptureHandoffTests PRIVATE src)
+target_link_libraries(MalloyCaptureHandoffTests PRIVATE Qt6::Test Qt6::Gui Qt6::Core)
+add_test(NAME MalloyCaptureHandoffTests COMMAND MalloyCaptureHandoffTests)
+set_tests_properties(MalloyCaptureHandoffTests PROPERTIES TIMEOUT 20)
