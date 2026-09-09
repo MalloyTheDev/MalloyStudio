@@ -23,6 +23,7 @@
 #include "recording/OutputSettings.h"
 #include "platform/MachineLoad.h"
 #include "recording/EncoderPipeline.h"
+#include "recording/MediaController.h"
 #include "recording/RingTimedPcmSource.h"
 #include "recording/StreamSettings.h"
 #include "recording/RtmpKeyRelay.h"
@@ -41,6 +42,8 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QPointer>
+#include <QProcess>
 #include <QSettings>
 #include <QSignalSpy>
 #include <QTemporaryDir>
@@ -93,6 +96,8 @@ private slots:
     void captureControllerReconcilesVisibleDisplaySources();
     void audioReservationInProjectJson();
     void recorderConstructsRegardlessOfFfmpegPresence();
+    void recorderCanRestartAfterFinalization();
+    void controllerCanReplacePipelineFromFinishedSignal();
     void audioControllerHasDefaultLoopbackInput();
     void audioControllerPersistsVolumeAndMute();
     // v5 new tests
@@ -551,6 +556,140 @@ void MalloyModelTests::recorderConstructsRegardlessOfFfmpegPresence() {
     const QString url = ss.rtmpUrl();
     QVERIFY(url.startsWith(QStringLiteral("rtmp://")));
     QVERIFY(url.contains(ss.streamKey));
+}
+
+namespace {
+class RecordingTestFrames final : public TimedFrameSource {
+public:
+    RecordingTestFrames() : m_image(1920, 1080, QImage::Format_ARGB32) {
+        m_image.fill(QColor(40, 110, 180));
+    }
+    QImage currentFrame() override { return m_image; }
+    int nativeWidth() const override { return m_image.width(); }
+    int nativeHeight() const override { return m_image.height(); }
+private:
+    QImage m_image;
+};
+
+class RecordingTestAudio final : public TimedPcmSource {
+public:
+    RecordingTestAudio() {
+        connect(&m_timer, &QTimer::timeout, this, [this] {
+            emit pcmReady(QByteArray(3840, '\0')); // 20 ms of 48 kHz stereo PCM
+        });
+        m_timer.start(20);
+    }
+    int sampleRate() const override { return 48000; }
+    int channels() const override { return 2; }
+private:
+    QTimer m_timer;
+};
+
+OutputSettings recordingTestSettings() {
+    OutputSettings settings;
+    settings.width = 320;
+    settings.height = 180;
+    settings.fps = 10;
+    settings.preset = QStringLiteral("ultrafast");
+    return settings;
+}
+
+bool recordingDecodes(const QString& ffmpeg, const QString& path) {
+    QProcess decoder;
+    decoder.start(ffmpeg, {QStringLiteral("-v"), QStringLiteral("error"),
+        QStringLiteral("-i"), path, QStringLiteral("-map"), QStringLiteral("0:v:0"),
+        QStringLiteral("-map"), QStringLiteral("0:a:0"),
+        QStringLiteral("-f"), QStringLiteral("null"), QStringLiteral("-")});
+    if (!decoder.waitForFinished(10000)) {
+        decoder.kill();
+        decoder.waitForFinished();
+        return false;
+    }
+    const QByteArray errors = decoder.readAllStandardError();
+    if (!errors.isEmpty()) qWarning().noquote() << errors;
+    return decoder.exitStatus() == QProcess::NormalExit && decoder.exitCode() == 0
+        && errors.isEmpty();
+}
+}
+
+void MalloyModelTests::recorderCanRestartAfterFinalization() {
+    RecorderPipeline pipeline;
+    if (!pipeline.ffmpegAvailable()) QSKIP("Real encoder lifecycle requires ffmpeg in PATH");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    RecordingTestFrames frames;
+    RecordingTestAudio audio;
+    QSignalSpy finished(&pipeline, &EncoderPipeline::finished);
+    QSignalSpy errors(&pipeline, &EncoderPipeline::errorOccurred);
+    EncoderPipeline::Target target;
+    target.output = recordingTestSettings();
+    QString error;
+
+    for (int run = 0; run < 2; ++run) {
+        target.destination = dir.filePath(QStringLiteral("restart-%1.mp4").arg(run));
+        QVERIFY2(pipeline.start(target, &frames, &audio, &error), qPrintable(error));
+        QVERIFY(pipeline.isRunning());
+        QTest::qWait(1500);
+        pipeline.stop();
+        QVERIFY(!pipeline.isRunning());
+        QCOMPARE(finished.size(), run + 1);
+        QCOMPARE(errors.size(), 0);
+        QVERIFY(finished.last().at(1).toLongLong() > 0);
+        QVERIFY(recordingDecodes(pipeline.ffmpegPath(), target.destination));
+    }
+
+    // Stop before queued pipe-connection callbacks are delivered, then reuse
+    // the same object. A stop request must survive worker startup races.
+    for (int run = 0; run < 8; ++run) {
+        target.destination = dir.filePath(QStringLiteral("cancel-%1.mp4").arg(run));
+        QVERIFY2(pipeline.start(target, &frames, &audio, &error), qPrintable(error));
+        pipeline.stop();
+        QVERIFY(!pipeline.isRunning());
+        QCOMPARE(finished.size(), run + 3);
+        QCoreApplication::processEvents();
+        QVERIFY(!pipeline.isRunning());
+    }
+}
+
+void MalloyModelTests::controllerCanReplacePipelineFromFinishedSignal() {
+    RecordingTestFrames frames;
+    RecordingTestAudio audio;
+    MediaController controller(&frames, &audio);
+    if (!controller.ffmpegAvailable()) QSKIP("Real encoder lifecycle requires ffmpeg in PATH");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const OutputSettings settings = recordingTestSettings();
+    QString error;
+    QSignalSpy finished(&controller, &MediaController::recordingFinished);
+    QSignalSpy errors(&controller, &MediaController::errorOccurred);
+    QPointer<RecorderPipeline> first;
+    bool restarted = false;
+    bool survivedCallback = false;
+    connect(&controller, &MediaController::recordingFinished, &controller,
+            [&](const QString&, qint64) {
+        if (finished.size() != 1) return;
+        restarted = controller.startRecording(dir.filePath(QStringLiteral("second.mp4")),
+                                               settings, &error);
+        survivedCallback = !first.isNull();
+    });
+    QVERIFY2(controller.startRecording(dir.filePath(QStringLiteral("first.mp4")),
+                                        settings, &error), qPrintable(error));
+    first = controller.findChild<RecorderPipeline*>();
+    QVERIFY(first);
+    const QString ffmpeg = first->ffmpegPath();
+    QTest::qWait(1500);
+    controller.stopRecording();
+    QVERIFY2(restarted, qPrintable(error));
+    QVERIFY(survivedCallback);
+    QVERIFY(controller.isRecording());
+    QTRY_VERIFY(first.isNull());
+    QTest::qWait(1500);
+    controller.stopRecording();
+    QVERIFY(!controller.isRecording());
+    QCOMPARE(finished.size(), 2);
+    QCOMPARE(errors.size(), 0);
+    QVERIFY(recordingDecodes(ffmpeg, dir.filePath(QStringLiteral("first.mp4"))));
+    QVERIFY(recordingDecodes(ffmpeg, dir.filePath(QStringLiteral("second.mp4"))));
 }
 
 void MalloyModelTests::audioControllerHasDefaultLoopbackInput() {

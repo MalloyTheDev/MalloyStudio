@@ -52,7 +52,10 @@ bool MediaController::startRecording(const QString& path,
     }
 
     // Create a fresh RecorderPipeline each time so Windows HANDLE state is clean.
-    delete m_recorder;
+    if (m_recorder) {
+        disconnect(m_recorder, nullptr, this, nullptr);
+        m_recorder->deleteLater();
+    }
     m_recorder = new RecorderPipeline(this);
     m_recorder->setSourceStatsProvider(m_captureStats);
 
@@ -97,7 +100,10 @@ bool MediaController::startStreaming(const StreamSettings& stream,
         return false;
     }
 
-    delete m_streamer;
+    if (m_streamer) {
+        disconnect(m_streamer, nullptr, this, nullptr);
+        m_streamer->deleteLater();
+    }
     m_streamer = new StreamingPipeline(this);
     m_streamer->setSourceStatsProvider(m_captureStats);
 
