@@ -269,6 +269,11 @@ target_link_libraries(MalloyStudioTests PRIVATE
 
 add_test(NAME MalloyStudioTests COMMAND MalloyStudioTests)
 
+add_executable(MalloyPipeIoTests tests/pipe_io_tests.cpp)
+target_include_directories(MalloyPipeIoTests PRIVATE src)
+add_test(NAME MalloyPipeIoTests COMMAND MalloyPipeIoTests)
+set_tests_properties(MalloyPipeIoTests PROPERTIES TIMEOUT 20)
+
 add_executable(MalloyCaptureLifetimeTests tests/capture_lifetime_tests.cpp)
 target_include_directories(MalloyCaptureLifetimeTests PRIVATE src)
 add_test(NAME MalloyCaptureLifetimeTests COMMAND MalloyCaptureLifetimeTests)

@@ -4,12 +4,14 @@
 #include "model/Canvas.h"
 #include "platform/FrameProfile.h"
 #include "recording/EncoderRegistry.h"
+#include "recording/CancellablePipeIo.h"
 
 #include <QDateTime>
 #include <QEventLoop>
 #include <QFileInfo>
 #include <QImage>
 #include <QProcess>
+#include <QPointer>
 #include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QStandardPaths>
@@ -111,26 +113,12 @@ private:
 // ---------------------------------------------------------------------------
 namespace {
 
-// Every byte, or a failure. A pipe may take a write in pieces, so a short
-// write is ordinary and only a refusal is fatal.
-bool writeAllToPipe(void* pipe, const char* data, qint64 bytes) {
-    qint64 offset = 0;
-    while (offset < bytes) {
-        DWORD written = 0;
-        const BOOL ok = WriteFile(static_cast<HANDLE>(pipe), data + offset,
-                                  static_cast<DWORD>(bytes - offset), &written, nullptr);
-        if (!ok || written == 0) return false;
-        offset += written;
-    }
-    return true;
-}
-
 // Serialises one frame into the pipe.
 //
 // Checked, never corrected. Converting here would hide a caller that had
 // stopped honouring the contract, and would spend a full frame of work on
 // whichever thread happened to be writing.
-bool writeFrameToPipe(void* pipe, const QImage& frame) {
+bool writeFrameToPipe(CancellablePipeIo& pipe, const QImage& frame) {
     if (!EncoderPipeline::conformsToPipeDeclaration(frame)) return false;
 
     // Rows go one at a time only when Qt has padded them; a tightly packed
@@ -143,11 +131,10 @@ bool writeFrameToPipe(void* pipe, const QImage& frame) {
     // and defeat the point of handing the frame over instead of copying it.
     const qint64 rowBytes = qint64(frame.width()) * (frame.depth() / 8);
     if (EncoderPipeline::isTightlyPacked(frame))
-        return writeAllToPipe(pipe, reinterpret_cast<const char*>(frame.constBits()),
-                              rowBytes * frame.height());
+        return pipe.writeAll(reinterpret_cast<const char*>(frame.constBits()),
+                             rowBytes * frame.height());
     for (int y = 0; y < frame.height(); ++y)
-        if (!writeAllToPipe(pipe, reinterpret_cast<const char*>(frame.constScanLine(y)),
-                            rowBytes))
+        if (!pipe.writeAll(reinterpret_cast<const char*>(frame.constScanLine(y)), rowBytes))
             return false;
     return true;
 }
@@ -172,23 +159,10 @@ public:
     // Priming here removes the dependency: the bytes go out on this thread,
     // the moment there is a reader, whatever else is happening.
     explicit PipeAcceptThread(void* pipe, QImage priming = {}, QObject* parent = nullptr)
-        : QThread(parent), m_pipe(pipe), m_priming(std::move(priming)) {}
+        : QThread(parent), m_io(pipe), m_priming(std::move(priming)) {}
 
-    void requestStop() { m_stopping.store(true, std::memory_order_relaxed); }
-
-    // A synchronous ConnectNamedPipe or WriteFile ends only when the thread
-    // that issued it cancels it. Both writers already own this; without it
-    // here, an ffmpeg that dies during argument parsing leaves this thread
-    // blocked forever on a pipe the pipeline is about to close underneath it.
-    void unblockPendingIo() {
-        HANDLE self = static_cast<HANDLE>(m_selfHandle.load(std::memory_order_relaxed));
-        if (self) CancelSynchronousIo(self);
-    }
-
-    ~PipeAcceptThread() override {
-        HANDLE self = static_cast<HANDLE>(m_selfHandle.exchange(nullptr));
-        if (self) CloseHandle(self);
-    }
+    void requestStop() { m_io.requestStop(); }
+    int framesWritten() const { return m_primed.load(std::memory_order_relaxed); }
 signals:
     // Carries how many video frames this thread put on the wire before any
     // transport existed: one for a primed pipe, zero otherwise. It travels with
@@ -199,18 +173,9 @@ signals:
     void connectFailed();
 protected:
     void run() override {
-        HANDLE self = nullptr;
-        if (DuplicateHandle(GetCurrentProcess(), GetCurrentThread(),
-                            GetCurrentProcess(), &self, 0, FALSE,
-                            DUPLICATE_SAME_ACCESS)) {
-            m_selfHandle.store(self, std::memory_order_relaxed);
-        }
-        // A stop can be requested before this thread reaches the connect, in
-        // which case there is no I/O to cancel and only the flag catches it.
+        if (!m_io.valid()) { emit connectFailed(); return; }
         if (stopping()) return;
-
-        BOOL ok = ConnectNamedPipe(static_cast<HANDLE>(m_pipe), nullptr);
-        if (!ok && GetLastError() != ERROR_PIPE_CONNECTED) {
+        if (!m_io.connect()) {
             // A cancelled connect is a teardown, not a failure to report.
             if (!stopping()) emit connectFailed();
             return;
@@ -240,19 +205,19 @@ protected:
             // reading, which the pipeline discovers on its own first write.
             // Reporting nothing written keeps the frame count honest either
             // way, and the warning says which of the two happened.
-            if (writeFrameToPipe(m_pipe, m_priming)) primed = 1;
+            if (writeFrameToPipe(m_io, m_priming)) primed = 1;
             else if (!stopping()) qWarning("video pipe priming frame was not written");
         }
+        m_primed.store(primed, std::memory_order_relaxed);
         if (stopping()) return;
         emit connectedOk(primed);
     }
 private:
-    bool stopping() const { return m_stopping.load(std::memory_order_relaxed); }
+    bool stopping() const { return m_io.stopped(); }
 
-    void*              m_pipe;
+    CancellablePipeIo  m_io;
     QImage             m_priming;
-    std::atomic<bool>  m_stopping{false};
-    std::atomic<void*> m_selfHandle{nullptr};
+    std::atomic<int>   m_primed{0};
 };
 
 // Writes PCM to the audio pipe on its own thread.
@@ -284,7 +249,7 @@ public:
     static constexpr int kMaxQueuedChunks = 1500;
 
     explicit AudioPipeWriter(void* pipe, QObject* parent = nullptr)
-        : QThread(parent), m_pipe(pipe) {}
+        : QThread(parent), m_io(pipe) {}
 
     void enqueue(const QByteArray& pcm) {
         QMutexLocker lock(&m_mutex);
@@ -297,31 +262,13 @@ public:
         m_wake.wakeOne();
     }
 
-    // Asks the thread to finish. Does not block, and on its own is not enough:
-    // the thread may be inside a WriteFile that returns only once the write
-    // completes or is cancelled, so callers pair this with
-    // unblockPendingWrite() before joining.
+    // Stop cancels current and future I/O, including before run() starts.
     void requestStop() {
+        m_io.requestStop();
         QMutexLocker lock(&m_mutex);
         m_stopping = true;
+        m_queue.clear();
         m_wake.wakeAll();
-    }
-
-    // Cancels a WriteFile this thread is currently blocked in.
-    //
-    // Needed because the owner cannot break the pipe to free us:
-    // DisconnectNamedPipe on a handle with a synchronous write pending from
-    // another thread waits for that write, which is itself waiting for the
-    // reader, so neither returns. CancelSynchronousIo targets the blocked
-    // thread directly and is the supported way out.
-    void unblockPendingWrite() {
-        HANDLE self = static_cast<HANDLE>(m_selfHandle.load());
-        if (self) CancelSynchronousIo(self);
-    }
-
-    ~AudioPipeWriter() override {
-        HANDLE self = static_cast<HANDLE>(m_selfHandle.exchange(nullptr));
-        if (self) CloseHandle(self);
     }
 
     int droppedChunks() const {
@@ -331,16 +278,6 @@ public:
 
 protected:
     void run() override {
-        // A real handle to this thread, so the owner can cancel a blocking
-        // write from outside. GetCurrentThread() alone is a pseudo-handle and
-        // means nothing to another thread.
-        HANDLE self = nullptr;
-        if (DuplicateHandle(GetCurrentProcess(), GetCurrentThread(),
-                            GetCurrentProcess(), &self, 0, FALSE,
-                            DUPLICATE_SAME_ACCESS)) {
-            m_selfHandle.store(self);
-        }
-
         for (;;) {
             QByteArray chunk;
             {
@@ -351,27 +288,12 @@ protected:
                 chunk = m_queue.dequeue();
             }
 
-            // Partial writes are possible on a byte-mode pipe, so keep going
-            // until the chunk is gone or the pipe fails.
-            qint64 offset = 0;
-            while (offset < chunk.size()) {
-                DWORD written = 0;
-                const BOOL ok = WriteFile(static_cast<HANDLE>(m_pipe),
-                                          chunk.constData() + offset,
-                                          static_cast<DWORD>(chunk.size() - offset),
-                                          &written, nullptr);
-                // A cancelled write reports ERROR_OPERATION_ABORTED and lands
-                // here too, which is the intended exit during shutdown.
-                if (!ok || written == 0) return;   // closed, broken or cancelled
-                offset += written;
-            }
+            if (!m_io.writeAll(chunk.constData(), chunk.size())) return;
         }
     }
 
 private:
-    void*               m_pipe;
-    // Set once at thread start; read by the owning thread to cancel a write.
-    std::atomic<void*>  m_selfHandle{nullptr};
+    CancellablePipeIo   m_io;
     mutable QMutex      m_mutex;
     QWaitCondition      m_wake;
     QQueue<QByteArray>  m_queue;
@@ -413,7 +335,7 @@ public:
     // transport that reported everything except the first frame would make
     // PIPE WRITE quietly false in every recording.
     explicit VideoPipeWriter(void* pipe, int alreadyWritten = 0, QObject* parent = nullptr)
-        : QThread(parent), m_pipe(pipe), m_written(alreadyWritten) {}
+        : QThread(parent), m_io(pipe), m_written(alreadyWritten) {}
 
     // Hands a frame to the transport, or refuses it. Never blocks: the caller
     // is the thread that composes, and it must not wait on a pipe.
@@ -485,32 +407,15 @@ public:
     int framesWritten() const { return m_written.load(std::memory_order_relaxed); }
 
     void requestStop() {
+        m_io.requestStop();
         QMutexLocker lock(&m_mutex);
         m_stopping = true;
+        m_queue.clear();
         m_wake.wakeAll();
-    }
-
-    // Same reasoning as the audio writer: a synchronous WriteFile can only be
-    // broken by cancelling it on the thread that issued it.
-    void unblockPendingWrite() {
-        HANDLE self = static_cast<HANDLE>(m_selfHandle.load());
-        if (self) CancelSynchronousIo(self);
-    }
-
-    ~VideoPipeWriter() override {
-        HANDLE self = static_cast<HANDLE>(m_selfHandle.exchange(nullptr));
-        if (self) CloseHandle(self);
     }
 
 protected:
     void run() override {
-        HANDLE self = nullptr;
-        if (DuplicateHandle(GetCurrentProcess(), GetCurrentThread(),
-                            GetCurrentProcess(), &self, 0, FALSE,
-                            DUPLICATE_SAME_ACCESS)) {
-            m_selfHandle.store(self);
-        }
-
         for (;;) {
             QImage frame;
             {
@@ -526,15 +431,14 @@ protected:
 
             // Everything in the queue conformed at admission, so a refusal here
             // is the pipe: closed, broken, or the write was cancelled.
-            if (!writeFrameToPipe(m_pipe, frame)) return;
+            if (!writeFrameToPipe(m_io, frame)) return;
             m_written.fetch_add(1, std::memory_order_relaxed);
         }
     }
 
 private:
-    void*              m_pipe;
+    CancellablePipeIo   m_io;
     std::atomic<bool>  m_warnedFormat{false};
-    std::atomic<void*> m_selfHandle{nullptr};
     mutable QMutex     m_mutex;
     QWaitCondition     m_wake;
     QQueue<QImage>     m_queue;
@@ -707,7 +611,8 @@ bool EncoderPipeline::start(const Target& target,
                             QString* error) {
     auto setErr = [&](const QString& m) { if (error) *error = m; };
 
-    if (m_running) { setErr(QStringLiteral("Already running")); return false; }
+    if (isRunning()) { setErr(QStringLiteral("Already running")); return false; }
+    m_framesPiped = 0;
     if (m_ffmpegPath.isEmpty()) { setErr(QStringLiteral("ffmpeg.exe not found in PATH")); return false; }
     if (!frames || !audio) { setErr(QStringLiteral("frame / audio source missing")); return false; }
 
@@ -715,6 +620,7 @@ bool EncoderPipeline::start(const Target& target,
     m_frames    = frames;
     m_audio     = audio;
     m_pipeReady = false;
+    ++m_runId;
 
     // --- 1. Create the two named pipes (server side, synchronous) ---
     //
@@ -746,7 +652,7 @@ bool EncoderPipeline::start(const Target& target,
         const std::wstring wname = name.toStdWString();
         HANDLE pipe = CreateNamedPipeW(
             wname.c_str(),
-            PIPE_ACCESS_OUTBOUND,                                // server writes
+            PIPE_ACCESS_OUTBOUND | FILE_FLAG_OVERLAPPED,
             // Remote clients rejected: without this the same pipe is reachable
             // over SMB as \\host\pipe\malloy_...
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
@@ -892,16 +798,28 @@ bool EncoderPipeline::start(const Target& target,
     // object closes, so stop() joins them explicitly instead.
     auto* videoAccept = new PipeAcceptThread(m_videoPipe, std::move(priming));
     m_videoAcceptor = videoAccept;
+    const QPointer<PipeAcceptThread> videoGuard(videoAccept);
     connect(videoAccept, &PipeAcceptThread::connectedOk,
-            this, &EncoderPipeline::onVideoPipeConnected);
+            this, [this, videoGuard](int primed) {
+        if (videoGuard && videoGuard == m_videoAcceptor) onVideoPipeConnected(primed);
+    });
     connect(videoAccept, &PipeAcceptThread::connectFailed,
-            this, &EncoderPipeline::onPipeConnectFailed);
+            this, [this, videoGuard] {
+        if (videoGuard && videoGuard == m_videoAcceptor)
+            onPipeConnectFailed(QStringLiteral("Video"));
+    });
     videoAccept->start();
 
     auto* accept = new PipeAcceptThread(m_audioPipe);
     m_pipeAcceptor = accept;
-    connect(accept, &PipeAcceptThread::connectedOk, this, &EncoderPipeline::onPipeConnected);
-    connect(accept, &PipeAcceptThread::connectFailed, this, &EncoderPipeline::onPipeConnectFailed);
+    const QPointer<PipeAcceptThread> audioGuard(accept);
+    connect(accept, &PipeAcceptThread::connectedOk, this, [this, audioGuard] {
+        if (audioGuard && audioGuard == m_pipeAcceptor) onPipeConnected();
+    });
+    connect(accept, &PipeAcceptThread::connectFailed, this, [this, audioGuard] {
+        if (audioGuard && audioGuard == m_pipeAcceptor)
+            onPipeConnectFailed(QStringLiteral("Audio"));
+    });
     accept->start();
 
     // --- 4. Start pumping video immediately (audio waits for pipe connect) ---
@@ -966,17 +884,9 @@ void EncoderPipeline::stop() {
     // the deadlock AudioPipeWriter::unblockPendingWrite already documents.
     // Cancelling their I/O is what makes these joins bounded, and joining them
     // is what stops cleanup() closing a handle another thread is blocked on.
-    const auto retireAcceptor = [](PipeAcceptThread*& thread) {
-        if (!thread) return;
-        thread->requestStop();
-        thread->unblockPendingIo();
-        if (thread->wait(3000)) delete thread;
-        thread = nullptr;   // leaked rather than freed if it never exits
-    };
-    retireAcceptor(m_videoAcceptor);
-    retireAcceptor(m_pipeAcceptor);
+    retirePipeWorkers();
 
-    // Close stdin so ffmpeg knows the video stream is done.
+    // Neither media input uses stdin. Close the unused control channel too.
     if (m_ffmpeg && m_ffmpeg->state() == QProcess::Running) {
         m_ffmpeg->closeWriteChannel();
     }
@@ -996,26 +906,11 @@ void EncoderPipeline::stop() {
     // Retire the writer completely before touching the pipe. Cancelling its
     // in-flight write is what makes this join bounded; disconnecting first
     // hangs, because the disconnect waits on the very write it would free.
-    if (m_audioWriter) {
-        m_audioWriter->requestStop();
-        m_audioWriter->unblockPendingWrite();
-        if (m_audioWriter->wait(3000)) delete m_audioWriter;
-        m_audioWriter = nullptr;   // leaked rather than freed if it never exits
-    }
-
     // The video transport retires the same way and for the same reason: ask it
     // to finish, cancel the write it may be blocked inside, then join with a
     // bound. Frames still queued are abandoned deliberately rather than
     // drained, because stopping should not wait on an encoder that has already
     // stopped reading.
-    if (m_videoWriter) {
-        m_framesPiped = m_videoWriter->framesWritten();
-        m_videoWriter->requestStop();
-        m_videoWriter->unblockPendingWrite();
-        if (m_videoWriter->wait(3000)) delete m_videoWriter;
-        m_videoWriter = nullptr;
-    }
-
     if (m_audioPipe) {
         DisconnectNamedPipe(static_cast<HANDLE>(m_audioPipe));
     }
@@ -1057,7 +952,7 @@ void EncoderPipeline::stop() {
     // A run that ends mid burst still had that burst.
     closeDropBurst();
 
-    const int piped = m_videoWriter ? m_videoWriter->framesWritten() : m_framesPiped;
+    const int piped = m_framesPiped;
     qInfo("capture stages: SOURCE RX %d  CAP DROP %d  COMPOSED %d  ENC ACCEPT %d  "
           "PIPE WRITE %d  ENC DROP %d  ENC DROP BURST MAX %.2f s  "
           "CFR DUP %d  IDLE %d",
@@ -1076,26 +971,43 @@ void EncoderPipeline::stop() {
                               : 0;
     const QString destination = m_target.destination;
     cleanup();
+    m_stopping = false;
     emit finished(destination, bytes);
 }
 
-void EncoderPipeline::cleanup() {
-    // Defensive: stop() normally does this, but cleanup() is also reachable
-    // from failed starts where the writer may exist without a stop. Same
-    // ordering rule as stop(): cancel the pending write, then join.
-    if (m_audioWriter) {
-        m_audioWriter->requestStop();
-        m_audioWriter->unblockPendingWrite();
-        if (m_audioWriter->wait(3000)) delete m_audioWriter;
-        m_audioWriter = nullptr;
+void EncoderPipeline::retirePipeWorkers() {
+    // Signal every worker before joining any of them. No pipe is disconnected
+    // or closed until all outstanding I/O has completed or been cancelled.
+    if (m_videoAcceptor) m_videoAcceptor->requestStop();
+    if (m_pipeAcceptor) m_pipeAcceptor->requestStop();
+    if (m_videoWriter) m_videoWriter->requestStop();
+    if (m_audioWriter) m_audioWriter->requestStop();
+    if (m_videoAcceptor) {
+        m_videoAcceptor->wait();
+        if (!m_videoWriter) m_framesPiped = m_videoAcceptor->framesWritten();
+        delete m_videoAcceptor;
+        m_videoAcceptor = nullptr;
+    }
+    if (m_pipeAcceptor) {
+        m_pipeAcceptor->wait();
+        delete m_pipeAcceptor;
+        m_pipeAcceptor = nullptr;
     }
     if (m_videoWriter) {
+        m_videoWriter->wait();
         m_framesPiped = m_videoWriter->framesWritten();
-        m_videoWriter->requestStop();
-        m_videoWriter->unblockPendingWrite();
-        if (m_videoWriter->wait(3000)) delete m_videoWriter;
+        delete m_videoWriter;
         m_videoWriter = nullptr;
     }
+    if (m_audioWriter) {
+        m_audioWriter->wait();
+        delete m_audioWriter;
+        m_audioWriter = nullptr;
+    }
+}
+
+void EncoderPipeline::cleanup() {
+    retirePipeWorkers();
     if (m_audioPipe) {
         CloseHandle(static_cast<HANDLE>(m_audioPipe));
         m_audioPipe = nullptr;
@@ -1105,6 +1017,7 @@ void EncoderPipeline::cleanup() {
         m_videoPipe = nullptr;
     }
     if (m_ffmpeg) {
+        disconnect(m_ffmpeg, nullptr, this, nullptr);
         m_ffmpeg->deleteLater();
         m_ffmpeg = nullptr;
     }
@@ -1114,8 +1027,6 @@ void EncoderPipeline::cleanup() {
     m_frames    = nullptr;
     m_audio     = nullptr;
     m_pipeReady = false;
-    // m_pipeAcceptor self-deletes via finished signal
-    m_pipeAcceptor = nullptr;
 }
 
 bool EncoderPipeline::shouldWriteFrame(Cadence cadence, quint64 compositionSequence,
@@ -1302,15 +1213,18 @@ void EncoderPipeline::onPipeConnected() {
     m_audioWriter->start();
 
     if (m_audio) {
+        const quint64 run = m_runId;
         connect(m_audio, &TimedPcmSource::pcmReady,
-                this,    &EncoderPipeline::onMixedSamples,
+                this, [this, run](QByteArray pcm) {
+                    if (run == m_runId) onMixedSamples(std::move(pcm));
+                },
                 Qt::QueuedConnection);
     }
 }
 
-void EncoderPipeline::onPipeConnectFailed() {
+void EncoderPipeline::onPipeConnectFailed(const QString& pipeName) {
     if (!m_running) return;
-    QString msg = QStringLiteral("Audio pipe did not connect to ffmpeg");
+    QString msg = QStringLiteral("%1 pipe did not connect to ffmpeg").arg(pipeName);
     if (!m_stderrTail.isEmpty())
         msg += QStringLiteral("\n\nLast stderr:\n") + m_stderrTail;
     emit errorOccurred(msg);

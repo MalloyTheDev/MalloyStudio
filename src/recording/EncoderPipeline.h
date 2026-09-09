@@ -205,11 +205,12 @@ private slots:
     void onFfmpegFinished(int exitCode);
     void onPipeConnected();
     void onVideoPipeConnected(int primedFrames);
-    void onPipeConnectFailed();
+    void onPipeConnectFailed(const QString& pipeName);
     void onFfmpegStderrReady();
 
 private:
     void cleanup();
+    void retirePipeWorkers();
     bool writeAudioBytes(const QByteArray& pcm);
     void appendStderrTail(const QString& chunk);
     void parseProgressLine(QStringView line);
@@ -360,6 +361,7 @@ private:
     bool m_stopping = false;
     bool m_running   = false;
     bool m_pipeReady = false;
+    quint64 m_runId = 0;
 
     // Ring-trimmed tail of ffmpeg's stderr — included in errorOccurred()
     // messages so users see the actual diagnostic. Capped at ~4 KB.
