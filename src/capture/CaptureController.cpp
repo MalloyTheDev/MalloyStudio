@@ -121,7 +121,12 @@ void CaptureController::reconcile() {
     QSet<QString> requiredWindows;
     QSet<QString> requiredCameras;
 
-    if (Scene* scene = m_scenes ? m_scenes->currentScene() : nullptr) {
+    // A project just loaded from a file opens no device until the user agrees.
+    // Leaving the required sets empty also stops whatever the previous project
+    // had running, so the hold cannot be escaped by loading over a live scene.
+    const bool held = m_scenes && m_scenes->deviceConsentPending();
+
+    if (Scene* scene = (m_scenes && !held) ? m_scenes->currentScene() : nullptr) {
         for (int i = 0; i < scene->itemCount(); ++i) {
             SceneItem* item = scene->itemAt(i);
             Source* source = m_scenes->sourceForItem(item);

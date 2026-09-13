@@ -58,6 +58,31 @@ public:
 
     QJsonObject toJson() const;
     bool loadFromJson(const QJsonObject& root, QString* error = nullptr);
+
+    // Consent to open the devices a project names.
+    //
+    // A project file names cameras, microphones, monitors and windows, and
+    // loading one used to start every device it named with no confirmation
+    // anywhere. A file is not evidence of intent: ProjectRegistry seeds its
+    // search with Movies and Documents and rescans at startup, so a file
+    // written into either is listed in the interface and is one click from
+    // opening the webcam and the microphone of whoever opens it.
+    //
+    // So a load from a file holds those devices until the user says yes. This
+    // is deliberately not applied inside loadFromJson: undo snapshots and new
+    // projects go through the same function and are this application's own
+    // state rather than someone else's file. The file is the trust boundary,
+    // so the hold is applied there.
+    bool deviceConsentPending() const { return m_deviceConsentPending; }
+
+    // What the loaded project is asking to open, for the user to read before
+    // deciding. Empty when nothing device backed was loaded.
+    QStringList pendingDeviceRequests() const;
+
+    // Called after a load from a file. Holds only if there is something to
+    // hold, so a project without devices never prompts.
+    void holdDeviceConsent();
+    void grantDeviceConsent();
     void clear();
 
     void addScene(const QString& name = {});
@@ -138,6 +163,7 @@ signals:
     void sourceChanged(int sourceId);
     void sourcesChanged();
     void collectionReset();
+    void deviceConsentChanged();
     // Emitted when visible AudioInput sources change (for AudioController::reconcileInputs).
     void audioInputsChanged();
 
@@ -152,6 +178,7 @@ private:
     void recordCommand(const QString& text, const QJsonObject& before);
 
     QList<Source*> m_sources;
+    bool m_deviceConsentPending = false;
     QList<Scene*> m_scenes;
     int           m_currentIndex = -1;
     int           m_programIndex = -1;   // on-air (TimedFrameSource renders this)

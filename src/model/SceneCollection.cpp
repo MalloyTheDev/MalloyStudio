@@ -653,6 +653,13 @@ void SceneCollection::renameCurrentItemAt(int index, const QString& name) {
 }
 
 void SceneCollection::setCurrentItemVisible(int index, bool visible) {
+    // Switching a source on is the user asking for that project's devices, and
+    // is the route back for someone who declined the prompt and changed their
+    // mind. It releases the whole hold rather than one source: by this point
+    // the user has decided to work with this project, and a per source hold
+    // would ask again for every item in it.
+    if (visible) grantDeviceConsent();
+
     SceneItem* item = currentScene() ? currentScene()->itemAt(index) : nullptr;
     if (!item || item->isVisible() == visible) return;
     const QJsonObject before = snapshot();
@@ -833,7 +840,81 @@ SceneItem* SceneCollection::addAudioInputToCurrent(const QString& name, const QS
     return item;
 }
 
+namespace {
+// The source types that reach a physical device or the contents of the screen.
+// Everything else an untrusted project can name is inert: an image is drawn,
+// text is drawn, a browser source is a placeholder.
+bool needsDeviceConsent(Source::Type type) {
+    switch (type) {
+        case Source::Type::DisplayCapture:
+        case Source::Type::WindowCapture:
+        case Source::Type::AudioInput:
+        case Source::Type::Camera:
+            return true;
+        case Source::Type::Image:
+        case Source::Type::Text:
+        case Source::Type::ColorBlock:
+        case Source::Type::Browser:
+            return false;
+    }
+    // A type added later is held rather than allowed through by default.
+    return true;
+}
+}  // namespace
+
+QStringList SceneCollection::pendingDeviceRequests() const {
+    QStringList out;
+    for (const Source* source : m_sources) {
+        if (!source || !needsDeviceConsent(source->type())) continue;
+        switch (source->type()) {
+            case Source::Type::Camera:
+                out << tr("Camera: %1").arg(source->cameraName().isEmpty()
+                                                ? source->name()
+                                                : source->cameraName());
+                break;
+            case Source::Type::AudioInput:
+                out << tr("Microphone: %1").arg(source->name());
+                break;
+            case Source::Type::DisplayCapture:
+                out << tr("Screen capture: %1").arg(source->name());
+                break;
+            case Source::Type::WindowCapture:
+                out << tr("Window capture: %1").arg(source->name());
+                break;
+            default:
+                break;
+        }
+    }
+    out.removeDuplicates();
+    return out;
+}
+
+void SceneCollection::holdDeviceConsent() {
+    bool wanted = false;
+    for (const Source* source : m_sources) {
+        if (source && needsDeviceConsent(source->type())) { wanted = true; break; }
+    }
+    if (m_deviceConsentPending == wanted) return;
+    m_deviceConsentPending = wanted;
+    emit deviceConsentChanged();
+    // Both reconcilers read the hold, so both are told to look again.
+    emit sourcesChanged();
+    emit audioInputsChanged();
+}
+
+void SceneCollection::grantDeviceConsent() {
+    if (!m_deviceConsentPending) return;
+    m_deviceConsentPending = false;
+    emit deviceConsentChanged();
+    emit sourcesChanged();
+    emit audioInputsChanged();
+}
+
 QStringList SceneCollection::gatherVisibleAudioIds() const {
+    // Held devices report nothing, which is what stops AudioController opening
+    // a microphone a project asked for before the user agreed to it.
+    if (m_deviceConsentPending) return {};
+
     QStringList ids;
     // Use the on-air (program) scene, not the staged/current scene.
     if (const Scene* s = sceneAt(m_programIndex)) {

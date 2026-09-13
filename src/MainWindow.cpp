@@ -885,6 +885,27 @@ bool MainWindow::loadProject(const QString& filePath) {
     }
     if (m_editor) m_editor->setTimelineJson(timeline);
 
+    // A project names cameras, microphones, monitors and windows, and opening
+    // one used to start all of them. Nothing is running at this point: the
+    // collection holds them until this is answered. Declining leaves the
+    // sources in the scene and inert, and switching one on later releases the
+    // hold, so the decision is recoverable either way.
+    if (m_scenes->deviceConsentPending()) {
+        const QStringList wanted = m_scenes->pendingDeviceRequests();
+        QMessageBox ask(this);
+        ask.setIcon(QMessageBox::Question);
+        ask.setWindowTitle(tr("Allow This Project To Use Your Devices?"));
+        ask.setText(tr("%1 wants to use %n device(s).", nullptr, wanted.size())
+                        .arg(QFileInfo(filePath).fileName()));
+        ask.setInformativeText(tr("Allow this only if you trust where this project "
+                                  "came from. You can switch sources on yourself "
+                                  "later instead."));
+        ask.setDetailedText(wanted.join(QLatin1Char('\n')));
+        ask.setStandardButtons(QMessageBox::Yes | QMessageBox::No);
+        ask.setDefaultButton(QMessageBox::No);
+        if (ask.exec() == QMessageBox::Yes) m_scenes->grantDeviceConsent();
+    }
+
     m_projectPath = filePath;
     m_undoStack->clear();
     m_undoStack->setClean();

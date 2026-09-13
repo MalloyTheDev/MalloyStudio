@@ -245,6 +245,7 @@ private slots:
     void twitchApiParsesHelixPayloads();
     void rtmpRelaySubstitutesAcrossReadBoundaries();
     void rtmpRelayTransportFollowsTheScheme();
+    void loadedProjectHoldsItsDevicesUntilAllowed();
     void encoderRedactsTheStreamKeyFromFfmpegOutput();
     void addingAConfiguredLayerIsOneUndoStep();
     void hotkeyManagerReportsRefusedBindings();
@@ -3249,6 +3250,59 @@ void MalloyModelTests::encoderRedactsTheStreamKeyFromFfmpegOutput() {
     const QString shortUrl = QStringLiteral("rtmp://example.com/live/ab");
     const QString text = QStringLiteral("ab is a common fragment, cabbage included");
     QVERIFY(EncoderPipeline::redactDestination(text, shortUrl).contains(QStringLiteral("cabbage")));
+}
+
+void MalloyModelTests::loadedProjectHoldsItsDevicesUntilAllowed() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString path = dir.filePath(QStringLiteral("hostile.malloy.json"));
+
+    // A project carrying a camera and a microphone, both visible, which is the
+    // shape that used to open both the moment the file was opened.
+    {
+        SceneCollection authored;
+        authored.ensureCurrentScene();
+        QVERIFY(authored.addCameraToCurrent(QStringLiteral("Front Camera"),
+                                            QStringLiteral("\\\\?\\usb#vid_dead&pid_beef"),
+                                            QStringLiteral("Front Camera")) != nullptr);
+        QVERIFY(authored.addAudioInputToCurrent(QStringLiteral("Desk Mic"),
+                                                QStringLiteral("{mic-device-id}")) != nullptr);
+        QVERIFY(ProjectDocument::saveToFile(authored, path));
+    }
+
+    SceneCollection opened;
+    QString error;
+    QVERIFY2(ProjectDocument::loadFromFile(opened, path, &error), qPrintable(error));
+
+    // Held. The audio reconciler is driven entirely by this list, so an empty
+    // one is what keeps the microphone shut.
+    QVERIFY(opened.deviceConsentPending());
+    QVERIFY(opened.gatherVisibleAudioIds().isEmpty());
+
+    // The user is told what is being asked for, by name, rather than being
+    // asked to approve an unexplained prompt.
+    const QStringList wanted = opened.pendingDeviceRequests();
+    QCOMPARE(wanted.size(), 2);
+    QVERIFY(wanted.join(QLatin1Char('\n')).contains(QStringLiteral("Front Camera")));
+    QVERIFY(wanted.join(QLatin1Char('\n')).contains(QStringLiteral("Desk Mic")));
+
+    opened.grantDeviceConsent();
+    QVERIFY(!opened.deviceConsentPending());
+    QCOMPARE(opened.gatherVisibleAudioIds(), QStringList{QStringLiteral("{mic-device-id}")});
+
+    // A project with nothing device backed must not prompt at all.
+    const QString inert = dir.filePath(QStringLiteral("inert.malloy.json"));
+    {
+        SceneCollection authored;
+        authored.ensureCurrentScene();
+        QVERIFY(authored.addNewSourceToCurrent(QStringLiteral("Title"), Source::Type::Text,
+                                               QStringLiteral("hello")) != nullptr);
+        QVERIFY(ProjectDocument::saveToFile(authored, inert));
+    }
+    SceneCollection quiet;
+    QVERIFY(ProjectDocument::loadFromFile(quiet, inert, &error));
+    QVERIFY(!quiet.deviceConsentPending());
+    QVERIFY(quiet.pendingDeviceRequests().isEmpty());
 }
 
 void MalloyModelTests::rtmpRelayTransportFollowsTheScheme() {
