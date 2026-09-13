@@ -5,6 +5,7 @@
 #include <QPointer>
 #include <QElapsedTimer>
 #include <QCoreApplication>
+#include <QDebug>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -162,6 +163,66 @@ void CameraCapture::stop() {
     if (m_thread.joinable()) m_thread.join();
 }
 
+namespace {
+
+// Picks the camera's best native format and makes it current: highest frame
+// rate first, then largest frame within a sane cap.
+//
+// Native rather than converted, because this decides what the device produces.
+// The reader is still asked for RGB32 afterwards, which converts from whatever
+// is chosen here.
+void selectNativeMediaType(IMFSourceReader* reader) {
+    if (!reader) return;
+
+    constexpr UINT32 kMaxWidth  = 1920;
+    constexpr UINT32 kMaxHeight = 1080;
+
+    IMFMediaType* best = nullptr;
+    double bestRate = -1.0;
+    UINT64 bestArea = 0;
+
+    for (DWORD i = 0;; ++i) {
+        IMFMediaType* candidate = nullptr;
+        const HRESULT hr = reader->GetNativeMediaType(
+            static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), i, &candidate);
+        if (FAILED(hr) || !candidate) break;   // MF_E_NO_MORE_TYPES ends the walk
+
+        UINT32 w = 0, h = 0;
+        UINT32 num = 0, den = 0;
+        double rate = 0.0;
+        if (SUCCEEDED(MFGetAttributeSize(candidate, MF_MT_FRAME_SIZE, &w, &h))
+            && w > 0 && h > 0 && w <= kMaxWidth && h <= kMaxHeight) {
+            if (SUCCEEDED(MFGetAttributeRatio(candidate, MF_MT_FRAME_RATE, &num, &den))
+                && den > 0) {
+                rate = double(num) / double(den);
+            }
+            const UINT64 area = UINT64(w) * UINT64(h);
+            // Rate first, then area. The comparison is on the rate rounded to a
+            // whole frame, because 60000/1001 and 60/1 are the same choice as
+            // far as this decision goes.
+            const double roundedRate = double(qRound(rate));
+            const double roundedBest = double(qRound(bestRate));
+            if (roundedRate > roundedBest
+                || (qFuzzyCompare(roundedRate + 1.0, roundedBest + 1.0) && area > bestArea)) {
+                safeRelease(best);
+                best = candidate;
+                best->AddRef();
+                bestRate = rate;
+                bestArea = area;
+            }
+        }
+        safeRelease(candidate);
+    }
+
+    if (best) {
+        reader->SetCurrentMediaType(
+            static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), nullptr, best);
+        safeRelease(best);
+    }
+}
+
+}  // namespace
+
 void CameraCapture::captureLoop(QString deviceId) {
     // Own COM + MF on this worker thread.
     const bool com = SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
@@ -200,7 +261,23 @@ void CameraCapture::captureLoop(QString deviceId) {
         return;
     }
 
-    // Request RGB32 (BGRA in memory — matches QImage::Format_RGB32).
+    // Choose which of the camera's own formats to run, rather than accepting
+    // whichever one it happens to offer first.
+    //
+    // A webcam advertises a list, and the first entry is not the best one. An
+    // Elgato Facecam offers 960x540, 1280x720 and 1920x1080, each at 30 and at
+    // 60, and taking the default can leave a 60 fps camera running at 30. The
+    // rate is what is chosen for here, since dropped smoothness is what a user
+    // notices; among equal rates the larger frame wins, capped so a capture
+    // card claiming something enormous does not set the canvas cost.
+    //
+    // Failing to find one is not fatal: leaving the reader alone falls back to
+    // exactly the previous behaviour, which worked.
+    selectNativeMediaType(reader);
+
+    // Request RGB32 (BGRA in memory, matching QImage::Format_RGB32). The
+    // reader converts from whatever native format was chosen above; no camera
+    // here offers RGB32 itself.
     IMFMediaType* outType = nullptr;
     MFCreateMediaType(&outType);
     outType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
@@ -228,6 +305,22 @@ void CameraCapture::captureLoop(QString deviceId) {
         return;
     }
     if (stride == 0) stride = static_cast<LONG>(width) * 4;
+
+    // What the camera actually agreed to, once. Until now nothing reported the
+    // negotiated format, so a camera quietly running at half its advertised
+    // rate looked identical to one running properly.
+    {
+        UINT32 rateNum = 0, rateDen = 0;
+        IMFMediaType* agreed = nullptr;
+        if (SUCCEEDED(reader->GetCurrentMediaType(
+                static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), &agreed))
+            && agreed) {
+            MFGetAttributeRatio(agreed, MF_MT_FRAME_RATE, &rateNum, &rateDen);
+            safeRelease(agreed);
+        }
+        qInfo("camera format: %ux%u @ %.2f fps", width, height,
+              rateDen ? double(rateNum) / double(rateDen) : 0.0);
+    }
 
     while (m_running.load()) {
         DWORD streamFlags = 0;
