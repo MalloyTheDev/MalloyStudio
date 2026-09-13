@@ -825,7 +825,12 @@ bool EncoderPipeline::start(const Target& target,
     // --- 4. Start pumping video immediately (audio waits for pipe connect) ---
     m_videoTimer = new QTimer(this);
     m_videoTimer->setTimerType(Qt::PreciseTimer);
-    m_videoTimer->setInterval(1000 / std::max(1, m_target.output.fps));
+    // Rounded rather than truncated. Integer division turns 60 into 16 ms and
+    // so ticks at 62.5 Hz, which a file sink absorbs because it follows the
+    // source, but a stream holds its own cadence and would then run fast
+    // against the rate it declared to the ingest.
+    const int fps = std::max(1, m_target.output.fps);
+    m_videoTimer->setInterval(std::max(1, (1000 + fps / 2) / fps));
     connect(m_videoTimer, &QTimer::timeout, this, &EncoderPipeline::onTickVideo);
     m_videoTimer->start();
 

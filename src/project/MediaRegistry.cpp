@@ -5,6 +5,8 @@
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
+
+#include <cmath>
 #include <QJsonObject>
 #include <QProcess>
 #include <QSet>
@@ -209,7 +211,12 @@ void MediaRegistry::probeNext(int generation) {
             MediaInfo& m = m_media[idx];
             const double dur = root.value(QStringLiteral("format")).toObject()
                                    .value(QStringLiteral("duration")).toString().toDouble();
-            if (dur > 0) m.durationSecs = int(dur + 0.5);
+            // Comes from the file being probed, so it is whatever that file
+            // says. A conversion to int is undefined once the double is larger
+            // than int can hold, so the value is bounded before it is narrowed
+            // rather than trusted to be a plausible duration.
+            if (std::isfinite(dur) && dur > 0 && dur < 2147483647.0)
+                m.durationSecs = int(dur + 0.5);
             for (const QJsonValue& sv : root.value(QStringLiteral("streams")).toArray()) {
                 const QJsonObject s = sv.toObject();
                 if (s.value(QStringLiteral("codec_type")).toString() == QLatin1String("video")) {

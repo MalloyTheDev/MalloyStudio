@@ -30,6 +30,15 @@ struct Clip {
     int     channels = 0;
 };
 
+// Ranges for values a project file supplies. They exist to keep the arithmetic
+// below defined, so they are deliberately generous: a day of timeline, a
+// hundredfold scale, and the decibel range a mixer offers.
+constexpr double kMaxClipSeconds  = 86400.0;
+constexpr double kMinScalePercent = 1.0;
+constexpr double kMaxScalePercent = 10000.0;
+constexpr int    kMinGainDb       = -60;
+constexpr int    kMaxGainDb       = 30;
+
 QString clipName(const Clip& c) {
     return c.label.isEmpty() ? QStringLiteral("clip %1").arg(c.index + 1) : c.label;
 }
@@ -114,8 +123,30 @@ RenderGraph TimelineGraphBuilder::build(const QJsonArray& timeline, const Output
         if (!QFileInfo::exists(c.sourcePath))
             return fail(QStringLiteral("The source file for \"%1\" is missing: %2")
                             .arg(clipName(c), c.sourcePath));
-        if (c.dur <= 0.0)
-            return fail(QStringLiteral("\"%1\" has no duration.").arg(clipName(c)));
+        // Bounded at both ends, and finite. These come out of a project file
+        // and are used in arithmetic that is undefined rather than merely wrong
+        // for an extreme value: c.scale reaches std::lround and then a narrowing
+        // to int, and c.start reaches llround. A duration bounded only below
+        // also lets a render run effectively forever and fill the disk, since
+        // it becomes the -t the encoder is given.
+        if (!std::isfinite(c.dur) || c.dur <= 0.0 || c.dur > kMaxClipSeconds)
+            return fail(QStringLiteral("\"%1\" has no usable duration.").arg(clipName(c)));
+        if (!std::isfinite(c.start) || c.start < 0.0 || c.start > kMaxClipSeconds)
+            return fail(QStringLiteral("\"%1\" starts outside the supported range.")
+                            .arg(clipName(c)));
+        if (!std::isfinite(c.sourceIn) || c.sourceIn < 0.0 || c.sourceIn > kMaxClipSeconds)
+            return fail(QStringLiteral("\"%1\" starts outside its source.").arg(clipName(c)));
+        if (!std::isfinite(c.scale) || c.scale < kMinScalePercent || c.scale > kMaxScalePercent)
+            return fail(QStringLiteral("\"%1\" has an unsupported scale of %2%.")
+                            .arg(clipName(c), num(c.scale)));
+        if (c.opacity < 0 || c.opacity > 100)
+            return fail(QStringLiteral("\"%1\" has an unsupported opacity of %2.")
+                            .arg(clipName(c)).arg(c.opacity));
+        if (c.gainDb < kMinGainDb || c.gainDb > kMaxGainDb)
+            return fail(QStringLiteral("\"%1\" has an unsupported gain of %2 dB.")
+                            .arg(clipName(c)).arg(c.gainDb));
+        if (!std::isfinite(c.speed))
+            return fail(QStringLiteral("\"%1\" has an unsupported speed.").arg(clipName(c)));
         if (c.speed < 0.1 || c.speed > 4.0)
             return fail(QStringLiteral("\"%1\" has an unsupported speed of %2x.")
                             .arg(clipName(c)).arg(num(c.speed)));

@@ -59,6 +59,18 @@ bool ProjectDocument::loadFromFile(SceneCollection& scenes, QJsonArray* timeline
     }
 
     QJsonParseError parseError;
+    // Bounded before it is read, not after. A project is a scene description
+    // rather than media, so a file this large is either broken or hostile, and
+    // reading it to find out is the part worth avoiding. ProjectRegistry
+    // already caps its own peek at these files for the same reason.
+    constexpr qint64 kMaxProjectBytes = 32 * 1024 * 1024;
+    if (file.size() > kMaxProjectBytes) {
+        if (error)
+            *error = QStringLiteral("This project file is too large to open (%1 MB).")
+                         .arg(file.size() / (1024 * 1024));
+        return false;
+    }
+
     const QJsonDocument doc = QJsonDocument::fromJson(file.readAll(), &parseError);
     if (parseError.error != QJsonParseError::NoError) {
         if (error) *error = parseError.errorString();

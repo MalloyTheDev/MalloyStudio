@@ -48,6 +48,7 @@
 #include <QSettings>
 #include <QSignalSpy>
 #include <QTemporaryDir>
+#include <limits>
 #include <QTimer>
 #include <QtTest/QtTest>
 #include <QUndoStack>
@@ -258,6 +259,7 @@ private slots:
     void timelineGraphPlacesTrimsAndScalesClips();
     void timelineGraphMixesAudioAndKeepsPathsOutOfTheGraph();
     void timelineGraphRefusesWhatItCannotRender();
+    void timelineGraphBoundsNumbersBeforeArithmetic();
     void editorClipRoundTripPreservesSourceReference();
     void editorLegacyClipLoadsAsUnlinked();
     void timelineTrimKeepsSourceInSync();
@@ -2649,6 +2651,62 @@ void MalloyModelTests::renderQueueRejectsUnrenderableRequests() {
     QVERIFY(!q.enqueue(makeRenderRequest(dir.filePath(QStringLiteral("d.mp4"))), &error).isEmpty());
     QVERIFY(error.isEmpty());
     QCOMPARE(q.jobs().size(), 1);
+}
+
+void MalloyModelTests::timelineGraphBoundsNumbersBeforeArithmetic() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString media = makeMediaFile(dir.filePath(QStringLiteral("a.mp4")));
+    QVERIFY(!media.isEmpty());
+
+    OutputSettings out;
+    out.width = 1920; out.height = 1080; out.fps = 60;
+
+    // These numbers come out of a project file and feed arithmetic that is
+    // undefined rather than merely wrong at the extremes: scale reaches
+    // std::lround and then a narrowing to int, start reaches llround. A
+    // duration bounded only below also becomes the -t handed to the encoder, so
+    // an absurd one is a render that never ends and a disk that fills.
+    const auto refused = [&](const char* what, const QJsonObject& clip) {
+        QJsonArray timeline;
+        timeline.append(clip);
+        const RenderGraph g = TimelineGraphBuilder::build(timeline, out);
+        QVERIFY2(!g.ok, what);
+        QVERIFY2(!g.error.isEmpty(), what);
+    };
+
+    const double huge = 1e300;
+    const double nan  = std::numeric_limits<double>::quiet_NaN();
+    const double inf  = std::numeric_limits<double>::infinity();
+
+    QJsonObject c = makeClip(media, 0.0, 5.0);
+    c.insert(QStringLiteral("transform"), QJsonObject{{QStringLiteral("scale"), huge}});
+    refused("a scale of 1e300 must be refused before it reaches lround", c);
+
+    c = makeClip(media, 0.0, 5.0);
+    c.insert(QStringLiteral("transform"), QJsonObject{{QStringLiteral("scale"), nan}});
+    refused("a scale of NaN must be refused", c);
+
+    refused("an infinite duration must be refused", makeClip(media, 0.0, inf));
+    refused("an absurd duration must be refused", makeClip(media, 0.0, huge));
+    refused("an absurd start must be refused", makeClip(media, huge, 5.0));
+    refused("a negative start must be refused", makeClip(media, -1.0, 5.0));
+    refused("a NaN start must be refused", makeClip(media, nan, 5.0));
+
+    c = makeClip(media, 0.0, 5.0);
+    c.insert(QStringLiteral("transform"), QJsonObject{{QStringLiteral("opacity"), 5000}});
+    refused("an opacity outside 0 to 100 must be refused", c);
+
+    c = makeClip(media, 0.0, 5.0, 0.0, /*audio=*/true);
+    c.insert(QStringLiteral("audioParams"), QJsonObject{{QStringLiteral("gainDb"), 100000}});
+    refused("an absurd gain must be refused", c);
+
+    // The ordinary case still builds, so the bounds are not so tight that they
+    // refuse real timelines.
+    QJsonArray fine;
+    fine.append(makeClip(media, 4.0, 6.0, 12.5));
+    const RenderGraph g = TimelineGraphBuilder::build(fine, out);
+    QVERIFY2(g.ok, qPrintable(g.error));
 }
 
 void MalloyModelTests::timelineGraphPlacesTrimsAndScalesClips() {

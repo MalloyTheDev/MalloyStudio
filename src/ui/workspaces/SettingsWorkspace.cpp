@@ -564,7 +564,13 @@ void SettingsWorkspace::beginTwitchConnect() {
         dialog->close();
     });
     connect(openButton, &QPushButton::clicked, dialog, [uri] {
-        if (!uri->isEmpty()) QDesktopServices::openUrl(QUrl(*uri));
+        // The address arrives in a response, so it is checked rather than
+        // handed to the shell as given. openUrl dispatches by scheme, and the
+        // registered handler for something like ms-settings or a custom
+        // application scheme is not a browser. Only an https page belongs here.
+        const QUrl target(*uri);
+        if (target.isValid() && target.scheme() == QLatin1String("https"))
+            QDesktopServices::openUrl(target);
     });
     connect(copyButton, &QPushButton::clicked, dialog, [code] {
         QGuiApplication::clipboard()->setText(code->text());
@@ -574,6 +580,10 @@ void SettingsWorkspace::beginTwitchConnect() {
             [instructions, code, openButton, copyButton, uri](
                 const QString& userCode, const QString& verificationUri, int) {
         *uri = verificationUri;
+        // Plain text, because the address is not ours: a label left on
+        // Qt::AutoText renders anything that looks like markup, including a
+        // link pointing somewhere else entirely.
+        instructions->setTextFormat(Qt::PlainText);
         instructions->setText(
             tr("Open %1 and enter this code:").arg(verificationUri));
         code->setText(userCode);
