@@ -1,6 +1,7 @@
 #include "recording/RtmpKeyRelay.h"
 
 #include <QRandomGenerator>
+#include <QSslSocket>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QUrl>
@@ -17,8 +18,25 @@ constexpr int kPlaceholderCharCount = sizeof(kPlaceholderChars) - 1;
 // enough to plausibly occur in the media payload by chance.
 constexpr int kMinKeyLength = 8;
 
-constexpr quint16 kDefaultRtmpPort = 1935;
+constexpr quint16 kDefaultRtmpPort  = 1935;
+constexpr quint16 kDefaultRtmpsPort = 443;
 }  // namespace
+
+bool RtmpKeyRelay::upstreamTransport(const QString& scheme, bool* useTls,
+                                     quint16* defaultPort) {
+    const QString normalised = scheme.trimmed().toLower();
+    if (normalised == QLatin1String("rtmp")) {
+        if (useTls) *useTls = false;
+        if (defaultPort) *defaultPort = kDefaultRtmpPort;
+        return true;
+    }
+    if (normalised == QLatin1String("rtmps")) {
+        if (useTls) *useTls = true;
+        if (defaultPort) *defaultPort = kDefaultRtmpsPort;
+        return true;
+    }
+    return false;
+}
 
 RtmpKeyRelay::RtmpKeyRelay(QObject* parent) : QObject(parent) {}
 
@@ -71,6 +89,21 @@ QString RtmpKeyRelay::start(const QString& realUrl, QString* error) {
     if (!url.isValid() || url.host().isEmpty())
         return bail(tr("The stream URL could not be parsed."));
 
+    // Read the scheme before anything else. Everything below carries the real
+    // key, so the transport has to be settled first, and a scheme this relay
+    // cannot carry has to stop the session rather than fall back to one it can.
+    bool wantTls = false;
+    quint16 schemePort = kDefaultRtmpPort;
+    if (!upstreamTransport(url.scheme(), &wantTls, &schemePort))
+        return bail(tr("The relay cannot carry a %1 stream.").arg(url.scheme()));
+
+    // No TLS support in this build means no rtmps, rather than rtmps without
+    // the TLS. Failing here costs the user a stream; the alternative costs them
+    // the key.
+    if (wantTls && !QSslSocket::supportsSsl())
+        return bail(tr("This build cannot open a secure connection, so the "
+                       "stream key cannot be relayed over rtmps."));
+
     const QString path = url.path();
     const int lastSlash = path.lastIndexOf(QLatin1Char('/'));
     if (lastSlash < 0 || lastSlash + 1 >= path.size())
@@ -89,9 +122,10 @@ QString RtmpKeyRelay::start(const QString& realUrl, QString* error) {
 
     m_substitutions = 0;
     m_upstreamHost = url.host();
-    m_upstreamPort = url.port(kDefaultRtmpPort) > 0
-                         ? static_cast<quint16>(url.port(kDefaultRtmpPort))
-                         : kDefaultRtmpPort;
+    m_upstreamTls  = wantTls;
+    // The default comes from the scheme, not from a constant: QUrl knows no
+    // default port for rtmps, so asking it for one returns the cleartext port.
+    m_upstreamPort = url.port() > 0 ? static_cast<quint16>(url.port()) : schemePort;
 
     m_server = new QTcpServer(this);
     connect(m_server, &QTcpServer::newConnection, this, &RtmpKeyRelay::onIncomingConnection);
@@ -135,8 +169,12 @@ void RtmpKeyRelay::stop() {
         m_upstream = nullptr;
     }
     m_pending.clear();
+    // Whatever is queued here has already been through substituteAll, so it
+    // holds the real key rather than the placeholder. Same treatment as the key.
+    m_outboundQueue.fill('\0');
     m_outboundQueue.clear();
     m_upstreamReady = false;
+    m_upstreamTls   = false;
     // The substitution count deliberately survives stop(): it is the evidence
     // that the relay did its job, and it is read after a session ends. start()
     // resets it for the next one.
@@ -169,12 +207,38 @@ void RtmpKeyRelay::onIncomingConnection() {
     connect(m_client, &QTcpSocket::disconnected, this, &RtmpKeyRelay::onSocketError);
     connect(m_client, &QTcpSocket::errorOccurred, this, &RtmpKeyRelay::onSocketError);
 
-    m_upstream = new QTcpSocket(this);
-    connect(m_upstream, &QTcpSocket::connected, this, &RtmpKeyRelay::onUpstreamConnected);
+    // A secure upstream is a different socket, not the same socket used
+    // differently, so there is no code path that can write the key in the clear.
+    if (m_upstreamTls) {
+        auto* secure = new QSslSocket(this);
+        m_upstream = secure;
+        // Readiness waits for the handshake rather than the connection. Nothing
+        // outbound is written before encrypted() arrives, and a handshake that
+        // never completes leaves the queue unsent.
+        connect(secure, &QSslSocket::encrypted, this, &RtmpKeyRelay::onUpstreamConnected);
+        // Deliberately no ignoreSslErrors: leaving these unhandled is what makes
+        // Qt abort the handshake. This slot only reports why.
+        connect(secure, &QSslSocket::sslErrors, this,
+                [this](const QList<QSslError>& errors) {
+                    QStringList reasons;
+                    reasons.reserve(errors.size());
+                    for (const QSslError& e : errors) reasons << e.errorString();
+                    fail(tr("The relay could not verify %1: %2")
+                             .arg(m_upstreamHost, reasons.join(QStringLiteral("; "))));
+                });
+    } else {
+        m_upstream = new QTcpSocket(this);
+        connect(m_upstream, &QTcpSocket::connected, this, &RtmpKeyRelay::onUpstreamConnected);
+    }
     connect(m_upstream, &QTcpSocket::readyRead, this, &RtmpKeyRelay::onUpstreamReadable);
     connect(m_upstream, &QTcpSocket::disconnected, this, &RtmpKeyRelay::onSocketError);
     connect(m_upstream, &QTcpSocket::errorOccurred, this, &RtmpKeyRelay::onSocketError);
-    m_upstream->connectToHost(m_upstreamHost, m_upstreamPort);
+
+    if (m_upstreamTls)
+        static_cast<QSslSocket*>(m_upstream)->connectToHostEncrypted(m_upstreamHost,
+                                                                     m_upstreamPort);
+    else
+        m_upstream->connectToHost(m_upstreamHost, m_upstreamPort);
 }
 
 void RtmpKeyRelay::onUpstreamConnected() {

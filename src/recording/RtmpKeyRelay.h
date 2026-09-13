@@ -61,6 +61,16 @@ public:
     // length) and returns how many were replaced.
     static int substituteAll(QByteArray& data, const QByteArray& from, const QByteArray& to);
 
+    // Which transport a scheme requires, and the port to use when the URL does
+    // not name one. Returns false for a scheme this relay cannot carry.
+    //
+    // Pure, because getting this wrong is not a visible failure. The relay used
+    // to read only the host and the port, so an rtmps URL kept its host, fell
+    // back to the cleartext port, and was carried over a plain socket: the key
+    // this class exists to hide went out in the clear, and the stream worked, so
+    // nothing looked wrong.
+    static bool upstreamTransport(const QString& scheme, bool* useTls, quint16* defaultPort);
+
     // Number of trailing bytes of `data` that form a PROPER prefix of `needle`,
     // and so might be the start of an occurrence split across two reads. Those
     // bytes must be held back rather than forwarded.
@@ -91,6 +101,7 @@ private:
 
     QString    m_upstreamHost;
     quint16    m_upstreamPort = 1935;
+    bool       m_upstreamTls  = false;
     QByteArray m_placeholder;
     QByteArray m_secret;
 

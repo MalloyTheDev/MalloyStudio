@@ -244,6 +244,7 @@ private slots:
     void twitchTokensExpireAndRoundTrip();
     void twitchApiParsesHelixPayloads();
     void rtmpRelaySubstitutesAcrossReadBoundaries();
+    void rtmpRelayTransportFollowsTheScheme();
     void encoderRedactsTheStreamKeyFromFfmpegOutput();
     void addingAConfiguredLayerIsOneUndoStep();
     void hotkeyManagerReportsRefusedBindings();
@@ -3248,6 +3249,43 @@ void MalloyModelTests::encoderRedactsTheStreamKeyFromFfmpegOutput() {
     const QString shortUrl = QStringLiteral("rtmp://example.com/live/ab");
     const QString text = QStringLiteral("ab is a common fragment, cabbage included");
     QVERIFY(EncoderPipeline::redactDestination(text, shortUrl).contains(QStringLiteral("cabbage")));
+}
+
+void MalloyModelTests::rtmpRelayTransportFollowsTheScheme() {
+    bool tls = true;
+    quint16 port = 0;
+
+    // Cleartext RTMP, on the port it has always used.
+    QVERIFY(RtmpKeyRelay::upstreamTransport(QStringLiteral("rtmp"), &tls, &port));
+    QCOMPARE(tls, false);
+    QCOMPARE(port, quint16(1935));
+
+    // rtmps must be carried encrypted, and on 443 rather than the cleartext
+    // port. This is the case that used to go out in the clear: QUrl knows no
+    // default port for rtmps, so asking it for one yields 1935, and the relay
+    // then opened a plain socket to it and wrote the real key into it.
+    QVERIFY(RtmpKeyRelay::upstreamTransport(QStringLiteral("rtmps"), &tls, &port));
+    QCOMPARE(tls, true);
+    QCOMPARE(port, quint16(443));
+
+    // Case and surrounding space come from a user-editable settings field.
+    QVERIFY(RtmpKeyRelay::upstreamTransport(QStringLiteral("  RTMPS "), &tls, &port));
+    QCOMPARE(tls, true);
+
+    // Anything else is refused rather than mapped onto a transport that merely
+    // resembles it. A scheme the relay cannot carry must stop the session, not
+    // pick the nearest one it can.
+    for (const QString& scheme : {QStringLiteral("http"), QStringLiteral("https"),
+                                  QStringLiteral("rtmpe"), QStringLiteral("rtmpt"),
+                                  QStringLiteral("srt"), QStringLiteral("")}) {
+        QVERIFY2(!RtmpKeyRelay::upstreamTransport(scheme, &tls, &port),
+                 qPrintable(QStringLiteral("scheme %1 must not be relayed").arg(scheme)));
+    }
+
+    // The mapping must be answerable without out-parameters, since start()
+    // calls it once to decide whether to run at all.
+    QVERIFY(RtmpKeyRelay::upstreamTransport(QStringLiteral("rtmp"), nullptr, nullptr));
+    QVERIFY(!RtmpKeyRelay::upstreamTransport(QStringLiteral("gopher"), nullptr, nullptr));
 }
 
 void MalloyModelTests::rtmpRelaySubstitutesAcrossReadBoundaries() {
