@@ -1,4 +1,5 @@
 #include "recording/TimelineGraphBuilder.h"
+#include "project/MediaPathPolicy.h"
 #include "recording/EncoderRegistry.h"
 
 #include <QFileInfo>
@@ -103,6 +104,13 @@ RenderGraph TimelineGraphBuilder::build(const QJsonArray& timeline, const Output
         if (c.sourcePath.isEmpty())
             return fail(QStringLiteral("\"%1\" has no source media, so it cannot be rendered.")
                             .arg(clipName(c)));
+        // Checked before the existence test, not after. Asking whether a UNC
+        // path exists is what performs the outbound authentication, so the
+        // question has to be refused rather than answered.
+        if (!MediaPathPolicy::isAllowed(c.sourcePath))
+            return fail(QStringLiteral("The source for \"%1\" is not a local file, "
+                                       "so it will not be opened: %2")
+                            .arg(clipName(c), c.sourcePath));
         if (!QFileInfo::exists(c.sourcePath))
             return fail(QStringLiteral("The source file for \"%1\" is missing: %2")
                             .arg(clipName(c), c.sourcePath));

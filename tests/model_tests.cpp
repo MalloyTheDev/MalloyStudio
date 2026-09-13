@@ -14,6 +14,7 @@
 #include "model/SceneItem.h"
 #include "model/Source.h"
 #include "project/ProjectDocument.h"
+#include "project/MediaPathPolicy.h"
 #include "project/ClipsRegistry.h"
 #include "project/ProjectRegistry.h"
 #include "project/MediaRegistry.h"
@@ -246,6 +247,7 @@ private slots:
     void rtmpRelaySubstitutesAcrossReadBoundaries();
     void rtmpRelayTransportFollowsTheScheme();
     void loadedProjectHoldsItsDevicesUntilAllowed();
+    void projectMediaPathsMustBeLocalFiles();
     void encoderRedactsTheStreamKeyFromFfmpegOutput();
     void addingAConfiguredLayerIsOneUndoStep();
     void hotkeyManagerReportsRefusedBindings();
@@ -3250,6 +3252,70 @@ void MalloyModelTests::encoderRedactsTheStreamKeyFromFfmpegOutput() {
     const QString shortUrl = QStringLiteral("rtmp://example.com/live/ab");
     const QString text = QStringLiteral("ab is a common fragment, cabbage included");
     QVERIFY(EncoderPipeline::redactDestination(text, shortUrl).contains(QStringLiteral("cabbage")));
+}
+
+void MalloyModelTests::projectMediaPathsMustBeLocalFiles() {
+    // Ordinary local media, in both slash forms.
+    QVERIFY(MediaPathPolicy::isAllowed(QStringLiteral("C:\\Users\\me\\Videos\\clip.mp4")));
+    QVERIFY(MediaPathPolicy::isAllowed(QStringLiteral("C:/Users/me/Videos/clip.mp4")));
+    QVERIFY(MediaPathPolicy::isAllowed(QStringLiteral("e:/MalloyStudio/logo.png")));
+
+    // UNC, which is the case that matters. Answering any question about one of
+    // these, including whether it exists, makes Windows authenticate outbound
+    // to a host the project chose, handing over an NTLMv2 response.
+    QVERIFY(!MediaPathPolicy::isAllowed(QStringLiteral("\\\\attacker.example.com\\s\\x.png")));
+    QVERIFY(!MediaPathPolicy::isAllowed(QStringLiteral("//attacker.example.com/s/x.png")));
+    QVERIFY(!MediaPathPolicy::isAllowed(QStringLiteral("\\\\?\\C:\\Users\\me\\clip.mp4")));
+    QVERIFY(!MediaPathPolicy::isAllowed(QStringLiteral("C:\\\\attacker\\share\\x.png")));
+
+    // Protocol strings, which ffmpeg would read as an input of its own choosing
+    // rather than as a file. These used to be stopped only by the accident that
+    // QFileInfo::exists() is false for them.
+    for (const QString& hostile : {QStringLiteral("http://attacker.example.com/x.mp4"),
+                                   QStringLiteral("https://attacker.example.com/x.mp4"),
+                                   QStringLiteral("concat:a.mp4|b.mp4"),
+                                   QStringLiteral("tee:out.mp4"),
+                                   QStringLiteral("file:C:/x.mp4"),
+                                   QStringLiteral("data:text/plain,hello")}) {
+        QVERIFY2(!MediaPathPolicy::isAllowed(hostile),
+                 qPrintable(QStringLiteral("must refuse %1").arg(hostile)));
+    }
+
+    // Relative paths resolve against whatever the working directory happens to
+    // be, which the project does not get to decide.
+    QVERIFY(!MediaPathPolicy::isAllowed(QStringLiteral("clip.mp4")));
+    QVERIFY(!MediaPathPolicy::isAllowed(QStringLiteral("..\\..\\secrets\\id_rsa")));
+    QVERIFY(!MediaPathPolicy::isAllowed(QStringLiteral("/etc/passwd")));
+    QVERIFY(!MediaPathPolicy::isAllowed(QString()));
+    QVERIFY(!MediaPathPolicy::isAllowed(QStringLiteral("C:")));
+
+    // And the boundary the policy actually defends: a UNC image path in a
+    // project is dropped at load, so nothing downstream can reach it.
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString path = dir.filePath(QStringLiteral("unc.malloy.json"));
+    {
+        SceneCollection authored;
+        authored.ensureCurrentScene();
+        SceneItem* item = authored.addNewSourceToCurrent(QStringLiteral("Logo"),
+                                                         Source::Type::Image);
+        QVERIFY(item != nullptr);
+        Source* src = authored.sourceById(item->sourceId());
+        QVERIFY(src != nullptr);
+        src->setImagePath(QStringLiteral("\\\\attacker.example.com\\share\\logo.png"));
+        QVERIFY(ProjectDocument::saveToFile(authored, path));
+    }
+
+    SceneCollection opened;
+    QString error;
+    QVERIFY2(ProjectDocument::loadFromFile(opened, path, &error), qPrintable(error));
+    Source* loaded = nullptr;
+    for (Source* s : opened.sources()) {
+        if (s && s->type() == Source::Type::Image) { loaded = s; break; }
+    }
+    QVERIFY(loaded != nullptr);
+    QVERIFY2(loaded->imagePath().isEmpty(),
+             "a UNC image path must not survive the load into the model");
 }
 
 void MalloyModelTests::loadedProjectHoldsItsDevicesUntilAllowed() {

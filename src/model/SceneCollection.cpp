@@ -1,4 +1,5 @@
 #include "SceneCollection.h"
+#include "project/MediaPathPolicy.h"
 #include "Canvas.h"
 #include "FilterEffect.h"
 #include "Scene.h"
@@ -370,7 +371,18 @@ bool SceneCollection::loadFromJson(const QJsonObject& root, QString* error) {
             }
 
             const QString imagePath = sourceObject.value(QStringLiteral("imagePath")).toString();
-            if (!imagePath.isEmpty()) source->setImagePath(imagePath);
+            // Dropped rather than carried, so a path the policy refuses cannot
+            // be reached later by composition. The source loads and stays
+            // empty: the rest of the project is still the user's, and refusing
+            // to open it at all over one image would be out of proportion.
+            if (!imagePath.isEmpty()) {
+                if (MediaPathPolicy::isAllowed(imagePath)) {
+                    source->setImagePath(imagePath);
+                } else {
+                    qWarning("project names an image path that will not be opened: %s",
+                             qUtf8Printable(imagePath));
+                }
+            }
 
             const QJsonObject windowObj = sourceObject.value(QStringLiteral("window")).toObject();
             if (!windowObj.isEmpty()) {
