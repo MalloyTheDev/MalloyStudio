@@ -260,6 +260,7 @@ private slots:
     void timelineGraphMixesAudioAndKeepsPathsOutOfTheGraph();
     void timelineGraphRefusesWhatItCannotRender();
     void timelineGraphBoundsNumbersBeforeArithmetic();
+    void restoredRenderJobsAreValidatedLikeEnqueuedOnes();
     void editorClipRoundTripPreservesSourceReference();
     void editorLegacyClipLoadsAsUnlinked();
     void timelineTrimKeepsSourceInSync();
@@ -2651,6 +2652,32 @@ void MalloyModelTests::renderQueueRejectsUnrenderableRequests() {
     QVERIFY(!q.enqueue(makeRenderRequest(dir.filePath(QStringLiteral("d.mp4"))), &error).isEmpty());
     QVERIFY(error.isEmpty());
     QCOMPARE(q.jobs().size(), 1);
+}
+
+void MalloyModelTests::restoredRenderJobsAreValidatedLikeEnqueuedOnes() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    QJsonArray timeline;
+    timeline.append(makeClip(dir.filePath(QStringLiteral("a.mp4")), 0.0, 2.0));
+
+    // The rule enqueue applies, stated once so both callers can be held to it.
+    QVERIFY(RenderQueue::whyNotRunnable(timeline,
+                                        dir.filePath(QStringLiteral("out.mp4"))).isEmpty());
+
+    // An empty timeline renders nothing.
+    QVERIFY(!RenderQueue::whyNotRunnable(QJsonArray(),
+                                         dir.filePath(QStringLiteral("out.mp4"))).isEmpty());
+    // No output file.
+    QVERIFY(!RenderQueue::whyNotRunnable(timeline, QString()).isEmpty());
+    // A folder is not a file to write.
+    QVERIFY(!RenderQueue::whyNotRunnable(timeline, dir.path()).isEmpty());
+    // A folder that does not exist: caught before ffmpeg is spawned, which is
+    // the case the restored path used to miss entirely.
+    const QString missing = RenderQueue::whyNotRunnable(
+        timeline, dir.filePath(QStringLiteral("nope/deeper/out.mp4")));
+    QVERIFY(!missing.isEmpty());
+    QVERIFY(missing.contains(QStringLiteral("does not exist")));
 }
 
 void MalloyModelTests::timelineGraphBoundsNumbersBeforeArithmetic() {

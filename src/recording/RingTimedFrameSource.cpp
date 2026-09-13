@@ -15,18 +15,28 @@ RingTimedFrameSource::RingTimedFrameSource(QQueue<ReplayFrame> frames,
 }
 
 QImage RingTimedFrameSource::currentFrame() {
-    if (!m_frames.isEmpty()) {
-        const ReplayFrame& rf = m_frames.front();
-        QImage img;
-        if (img.loadFromData(rf.jpeg, "JPEG"))
-            m_last = std::move(img);
-        m_frames.dequeue();
-        ++m_served;
+    QImage frame;
+    bool justExhausted = false;
+    {
+        QMutexLocker lock(&m_mutex);
+        if (!m_frames.isEmpty()) {
+            const ReplayFrame& rf = m_frames.front();
+            QImage img;
+            if (img.loadFromData(rf.jpeg, "JPEG"))
+                m_last = std::move(img);
+            m_frames.dequeue();
+            ++m_served;
 
-        if (m_frames.isEmpty() && !m_exhausted) {
-            m_exhausted = true;
-            emit exhausted();
+            if (m_frames.isEmpty() && !m_exhausted) {
+                m_exhausted = true;
+                justExhausted = true;
+            }
         }
+        frame = m_last;
     }
-    return m_last;
+    // Emitted outside the lock. A receiver may call back into this object, and
+    // holding the lock across an emission is how that becomes a deadlock rather
+    // than a re-entrant call.
+    if (justExhausted) emit exhausted();
+    return frame;
 }

@@ -80,6 +80,18 @@ public:
     // inside the encoder.
     QString enqueue(const RenderRequest& request, QString* error = nullptr);
 
+    // Why a job cannot be run, or empty when it can.
+    //
+    // Shared by enqueue and by load, which is the point of it existing. The
+    // queue is restored from disk and started at construction, so a job that
+    // arrived any way other than through enqueue used to reach ffmpeg without
+    // any of the checks enqueue performs. Anything that can write the store can
+    // therefore choose an invocation, and the next launch runs it with no user
+    // action at all.
+    //
+    // Pure, so both callers demonstrably apply the same rule.
+    static QString whyNotRunnable(const QJsonArray& timeline, const QString& outputPath);
+
     // Display string for a job's encoder settings, e.g.
     // "1920x1080 60fps libx264 CRF 23". Public so the enqueue call sites and
     // tests agree on one rendering of the same settings.

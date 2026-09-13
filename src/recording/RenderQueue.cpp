@@ -146,24 +146,32 @@ QString RenderQueue::describeTarget(const OutputSettings& output) {
         .arg(output.width).arg(output.height).arg(output.fps).arg(codec, rate);
 }
 
+QString RenderQueue::whyNotRunnable(const QJsonArray& timeline, const QString& outputPath) {
+    if (timeline.isEmpty())
+        return QObject::tr("The timeline is empty, so there is nothing to render.");
+    if (outputPath.isEmpty())
+        return QObject::tr("No output file was given.");
+
+    const QFileInfo out(outputPath);
+    if (out.isDir())
+        return QObject::tr("The output path is a folder; a file name is required.");
+    const QDir parent = out.absoluteDir();
+    if (!parent.exists())
+        return QObject::tr("The output folder does not exist: %1")
+            .arg(QDir::toNativeSeparators(parent.absolutePath()));
+    return QString();
+}
+
 QString RenderQueue::enqueue(const RenderRequest& request, QString* error) {
     auto fail = [error](const QString& message) {
         if (error) *error = message;
         return QString();
     };
 
-    if (request.timeline.isEmpty())
-        return fail(QObject::tr("The timeline is empty, so there is nothing to render."));
-    if (request.outputPath.isEmpty())
-        return fail(QObject::tr("No output file was given."));
+    const QString why = whyNotRunnable(request.timeline, request.outputPath);
+    if (!why.isEmpty()) return fail(why);
 
     const QFileInfo out(request.outputPath);
-    if (out.isDir())
-        return fail(QObject::tr("The output path is a folder; a file name is required."));
-    const QDir parent = out.absoluteDir();
-    if (!parent.exists())
-        return fail(QObject::tr("The output folder does not exist: %1")
-                        .arg(QDir::toNativeSeparators(parent.absolutePath())));
 
     RenderJob j;
     j.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -276,7 +284,9 @@ void RenderQueue::startNext() {
 void RenderQueue::load() {
     m_jobs.clear();
     QFile f(resolvedStorePath());
-    if (f.open(QIODevice::ReadOnly)) {
+    // A queue of jobs, not media: anything this size is broken or hostile.
+    constexpr qint64 kMaxStoreBytes = 16 * 1024 * 1024;
+    if (f.open(QIODevice::ReadOnly) && f.size() <= kMaxStoreBytes) {
         const QJsonDocument doc = QJsonDocument::fromJson(f.readAll());
         // Schema 0 was a bare array of jobs; schema 1 wraps them so the file can
         // say what it is.
@@ -296,6 +306,19 @@ void RenderQueue::load() {
                 j.progress = 0;
                 j.error = QObject::tr("Job predates render settings and cannot be "
                                       "rendered. Enqueue it again.");
+            }
+            // Restored jobs get the checks an enqueued one gets. startNext runs
+            // from the constructor, so without this a job written straight into
+            // the store reaches ffmpeg at the next launch having been validated
+            // by nobody. Failed and visible, rather than quietly dropped: the
+            // user should be able to see what the queue refused.
+            if (j.state == RenderJob::Pending) {
+                const QString why = whyNotRunnable(j.timeline, j.outputPath);
+                if (!why.isEmpty()) {
+                    j.state = RenderJob::Failed;
+                    j.progress = 0;
+                    j.error = why;
+                }
             }
             m_jobs.push_back(j);
         }

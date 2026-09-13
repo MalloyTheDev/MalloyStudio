@@ -2,6 +2,7 @@
 #include "media/TimedSource.h"
 
 #include <QObject>
+#include <QMutex>
 #include <QQueue>
 
 // Replays a snapshot of the PreviewWidget replay ring through the
@@ -19,18 +20,30 @@ public:
                                   QObject* parent = nullptr);
 
     // TimedFrameSource
+    // Serves the buffered frames in order, so each call consumes one and the
+    // last decoded frame is repeated once they run out. That is a different
+    // meaning from a live source, where the same call returns whatever is
+    // currently composed and consumes nothing, and it is why a caller that
+    // merely wants to look at the picture takes a frame off the replay.
+    //
+    // Thread-safe, as the interface requires: the encoder calls this from
+    // whichever thread its tick runs on, and priming calls it once before that
+    // thread exists.
     QImage currentFrame() override;
     int nativeWidth()  const override { return m_width; }
     int nativeHeight() const override { return m_height; }
 
-    bool isExhausted() const { return m_exhausted; }
-    int  totalFrames() const { return m_total; }
-    int  servedFrames() const { return m_served; }
+    bool isExhausted() const { QMutexLocker lock(&m_mutex); return m_exhausted; }
+    int  totalFrames() const { QMutexLocker lock(&m_mutex); return m_total; }
+    int  servedFrames() const { QMutexLocker lock(&m_mutex); return m_served; }
 
 signals:
     void exhausted();   // emitted once when all frames have been served
 
 private:
+    // Guards everything below. currentFrame mutates all of it, so the
+    // interface's thread-safety requirement is not satisfied by reading alone.
+    mutable QMutex      m_mutex;
     QQueue<ReplayFrame> m_frames;
     QImage              m_last;   // last decoded frame (returned after exhaustion)
     int                 m_width;
