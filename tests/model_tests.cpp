@@ -3437,8 +3437,35 @@ void MalloyModelTests::loadedProjectHoldsItsDevicesUntilAllowed() {
     QVERIFY(wanted.join(QLatin1Char('\n')).contains(QStringLiteral("Front Camera")));
     QVERIFY(wanted.join(QLatin1Char('\n')).contains(QStringLiteral("Desk Mic")));
 
+    // Consent is per source. Allowing the camera must not also open the
+    // microphone sitting next to it in the same project, which is the shape
+    // that teaches people to approve a prompt without reading it.
+    Source* camera = nullptr;
+    Source* mic = nullptr;
+    for (Source* s : opened.sources()) {
+        if (!s) continue;
+        if (s->type() == Source::Type::Camera)     camera = s;
+        if (s->type() == Source::Type::AudioInput) mic = s;
+    }
+    QVERIFY(camera != nullptr);
+    QVERIFY(mic != nullptr);
+    QVERIFY(opened.deviceHeld(camera->id()));
+    QVERIFY(opened.deviceHeld(mic->id()));
+
+    opened.grantDeviceConsent(camera->id());
+    QVERIFY(!opened.deviceHeld(camera->id()));
+    QVERIFY2(opened.deviceHeld(mic->id()),
+             "allowing the camera must not release the microphone");
+    QVERIFY2(opened.deviceConsentPending(),
+             "something is still held, so the project is not fully allowed");
+    QVERIFY2(opened.gatherVisibleAudioIds().isEmpty(),
+             "the microphone is still held, so it must still report nothing");
+    QCOMPARE(opened.pendingDeviceRequests().size(), 1);
+
+    // The prompt's single yes releases whatever is left.
     opened.grantDeviceConsent();
     QVERIFY(!opened.deviceConsentPending());
+    QVERIFY(!opened.deviceHeld(mic->id()));
     QCOMPARE(opened.gatherVisibleAudioIds(), QStringList{QStringLiteral("{mic-device-id}")});
 
     // A project with nothing device backed must not prompt at all.

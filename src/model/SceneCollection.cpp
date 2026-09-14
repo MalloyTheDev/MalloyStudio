@@ -461,6 +461,7 @@ bool SceneCollection::loadFromJson(const QJsonObject& root, QString* error) {
     m_restoring = false;
     m_recordUndo = oldRecordUndo;
 
+    m_heldDeviceSources.clear();
     emit collectionReset();
     emit currentChanged(m_currentIndex);
     emit sourcesChanged();
@@ -665,12 +666,14 @@ void SceneCollection::renameCurrentItemAt(int index, const QString& name) {
 }
 
 void SceneCollection::setCurrentItemVisible(int index, bool visible) {
-    // Switching a source on is the user asking for that project's devices, and
-    // is the route back for someone who declined the prompt and changed their
-    // mind. It releases the whole hold rather than one source: by this point
-    // the user has decided to work with this project, and a per source hold
-    // would ask again for every item in it.
-    if (visible) grantDeviceConsent();
+    // Switching a source on is the user asking for that source, and is the
+    // route back for someone who declined the prompt and changed their mind.
+    // It releases that source only: turning on a screen share is not a
+    // statement about the camera sitting next to it in the same project.
+    if (visible) {
+        if (const SceneItem* item = currentScene() ? currentScene()->itemAt(index) : nullptr)
+            grantDeviceConsent(item->sourceId());
+    }
 
     SceneItem* item = currentScene() ? currentScene()->itemAt(index) : nullptr;
     if (!item || item->isVisible() == visible) return;
@@ -877,7 +880,7 @@ bool needsDeviceConsent(Source::Type type) {
 QStringList SceneCollection::pendingDeviceRequests() const {
     QStringList out;
     for (const Source* source : m_sources) {
-        if (!source || !needsDeviceConsent(source->type())) continue;
+        if (!source || !m_heldDeviceSources.contains(source->id())) continue;
         switch (source->type()) {
             case Source::Type::Camera:
                 out << tr("Camera: %1").arg(source->cameraName().isEmpty()
@@ -902,12 +905,12 @@ QStringList SceneCollection::pendingDeviceRequests() const {
 }
 
 void SceneCollection::holdDeviceConsent() {
-    bool wanted = false;
+    QSet<int> wanted;
     for (const Source* source : m_sources) {
-        if (source && needsDeviceConsent(source->type())) { wanted = true; break; }
+        if (source && needsDeviceConsent(source->type())) wanted.insert(source->id());
     }
-    if (m_deviceConsentPending == wanted) return;
-    m_deviceConsentPending = wanted;
+    if (m_heldDeviceSources == wanted) return;
+    m_heldDeviceSources = wanted;
     emit deviceConsentChanged();
     // Both reconcilers read the hold, so both are told to look again.
     emit sourcesChanged();
@@ -915,18 +918,21 @@ void SceneCollection::holdDeviceConsent() {
 }
 
 void SceneCollection::grantDeviceConsent() {
-    if (!m_deviceConsentPending) return;
-    m_deviceConsentPending = false;
+    if (m_heldDeviceSources.isEmpty()) return;
+    m_heldDeviceSources.clear();
+    emit deviceConsentChanged();
+    emit sourcesChanged();
+    emit audioInputsChanged();
+}
+
+void SceneCollection::grantDeviceConsent(int sourceId) {
+    if (m_heldDeviceSources.remove(sourceId) == 0) return;
     emit deviceConsentChanged();
     emit sourcesChanged();
     emit audioInputsChanged();
 }
 
 QStringList SceneCollection::gatherVisibleAudioIds() const {
-    // Held devices report nothing, which is what stops AudioController opening
-    // a microphone a project asked for before the user agreed to it.
-    if (m_deviceConsentPending) return {};
-
     QStringList ids;
     // Use the on-air (program) scene, not the staged/current scene.
     if (const Scene* s = sceneAt(m_programIndex)) {
@@ -934,7 +940,12 @@ QStringList SceneCollection::gatherVisibleAudioIds() const {
             const SceneItem* item = s->itemAt(i);
             if (!item->isVisible()) continue;
             const Source* src = sourceById(item->sourceId());
-            if (src && src->type() == Source::Type::AudioInput && !src->audioDeviceId().isEmpty())
+            // A held source reports nothing, which is what stops AudioController
+            // opening a microphone a project asked for before the user agreed
+            // to that microphone.
+            if (src && src->type() == Source::Type::AudioInput
+                && !src->audioDeviceId().isEmpty()
+                && !m_heldDeviceSources.contains(src->id()))
                 ids << src->audioDeviceId();
         }
     }

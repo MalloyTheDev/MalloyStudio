@@ -1,5 +1,6 @@
 #pragma once
 #include <QObject>
+#include <QSet>
 #include <QList>
 #include <QString>
 #include <QRectF>
@@ -73,7 +74,13 @@ public:
     // projects go through the same function and are this application's own
     // state rather than someone else's file. The file is the trust boundary,
     // so the hold is applied there.
-    bool deviceConsentPending() const { return m_deviceConsentPending; }
+    bool deviceConsentPending() const { return !m_heldDeviceSources.isEmpty(); }
+
+    // Whether this particular source is still waiting. Held per source rather
+    // than per project: allowing a project that wants a screen share should not
+    // also open its camera and its microphones, and a single answer covering
+    // all of them is the shape that teaches people to say yes without reading.
+    bool deviceHeld(int sourceId) const { return m_heldDeviceSources.contains(sourceId); }
 
     // What the loaded project is asking to open, for the user to read before
     // deciding. Empty when nothing device backed was loaded.
@@ -82,7 +89,12 @@ public:
     // Called after a load from a file. Holds only if there is something to
     // hold, so a project without devices never prompts.
     void holdDeviceConsent();
+
+    // Everything, which is what the prompt's single yes means.
     void grantDeviceConsent();
+
+    // One source, which is what switching that source on means.
+    void grantDeviceConsent(int sourceId);
     void clear();
 
     void addScene(const QString& name = {});
@@ -178,7 +190,8 @@ private:
     void recordCommand(const QString& text, const QJsonObject& before);
 
     QList<Source*> m_sources;
-    bool m_deviceConsentPending = false;
+    // Source ids waiting for the user. Empty means nothing is held.
+    QSet<int> m_heldDeviceSources;
     QList<Scene*> m_scenes;
     int           m_currentIndex = -1;
     int           m_programIndex = -1;   // on-air (TimedFrameSource renders this)
