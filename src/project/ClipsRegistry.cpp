@@ -54,6 +54,11 @@ ClipsRegistry::ClipsRegistry(QObject* parent) : QObject(parent) {
     load();
 }
 
+ClipsRegistry::ClipsRegistry(const QString& storePath, QObject* parent)
+    : QObject(parent), m_storePath(storePath) {
+    load();
+}
+
 void ClipsRegistry::setStorePath(const QString& path) {
     m_storePath = path;
     load();

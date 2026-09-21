@@ -125,6 +125,28 @@ bool MediaRegistry::isCloudOnly(const QString& path) {
     return (attrs & (FILE_ATTRIBUTE_OFFLINE | kRecallOnDataAccess | kRecallOnOpen)) != 0;
 }
 
+MediaRegistry::ProbeReport MediaRegistry::parseProbeOutput(const QByteArray& ffprobeJson) {
+    ProbeReport report;
+    const QJsonObject root = QJsonDocument::fromJson(ffprobeJson).object();
+    const double dur = root.value(QStringLiteral("format")).toObject()
+                           .value(QStringLiteral("duration")).toString().toDouble();
+    // A conversion to int is undefined once the double is larger than int can
+    // hold, so the value is bounded before it is narrowed rather than trusted
+    // to be a plausible duration.
+    if (std::isfinite(dur) && dur > 0 && dur < 2147483647.0)
+        report.durationSecs = int(dur + 0.5);
+    for (const QJsonValue& sv : root.value(QStringLiteral("streams")).toArray()) {
+        const QJsonObject s = sv.toObject();
+        if (s.value(QStringLiteral("codec_type")).toString() == QLatin1String("video")) {
+            const int w = s.value(QStringLiteral("width")).toInt();
+            const int h = s.value(QStringLiteral("height")).toInt();
+            if (w > 0 && h > 0) report.resolution = QStringLiteral("%1×%2").arg(w).arg(h);
+            break;
+        }
+    }
+    return report;
+}
+
 void MediaRegistry::setProbeCommandForTesting(const QString& program,
                                               const QStringList& leadingArgs, int timeoutMs) {
     m_ffprobe = program;
@@ -335,25 +357,10 @@ void MediaRegistry::probeNext(int generation) {
         proc->deleteLater();
         if (generation != m_probeGen) return;        // a newer rescan superseded us
         if (status == QProcess::NormalExit && code == 0 && idx < m_media.size()) {
-            const QJsonObject root = QJsonDocument::fromJson(out).object();
+            const ProbeReport report = parseProbeOutput(out);
             MediaInfo& m = m_media[idx];
-            const double dur = root.value(QStringLiteral("format")).toObject()
-                                   .value(QStringLiteral("duration")).toString().toDouble();
-            // Comes from the file being probed, so it is whatever that file
-            // says. A conversion to int is undefined once the double is larger
-            // than int can hold, so the value is bounded before it is narrowed
-            // rather than trusted to be a plausible duration.
-            if (std::isfinite(dur) && dur > 0 && dur < 2147483647.0)
-                m.durationSecs = int(dur + 0.5);
-            for (const QJsonValue& sv : root.value(QStringLiteral("streams")).toArray()) {
-                const QJsonObject s = sv.toObject();
-                if (s.value(QStringLiteral("codec_type")).toString() == QLatin1String("video")) {
-                    const int w = s.value(QStringLiteral("width")).toInt();
-                    const int h = s.value(QStringLiteral("height")).toInt();
-                    if (w > 0 && h > 0) m.resolution = QStringLiteral("%1×%2").arg(w).arg(h);
-                    break;
-                }
-            }
+            if (report.durationSecs > 0) m.durationSecs = report.durationSecs;
+            if (!report.resolution.isEmpty()) m.resolution = report.resolution;
         }
         finishProbe(generation, idx);
     });

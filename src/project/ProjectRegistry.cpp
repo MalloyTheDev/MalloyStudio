@@ -10,6 +10,7 @@
 #include <QSet>
 #include <QSettings>
 #include <QStandardPaths>
+#include <QTimer>
 
 #include <algorithm>
 
@@ -42,7 +43,10 @@ ProjectRegistry::ProjectRegistry(QObject* parent) : QObject(parent) {
         const QString d = QStandardPaths::writableLocation(loc);
         if (!d.isEmpty() && !m_dirs.contains(d)) m_dirs << d;
     }
-    rescan();
+    // The first scan waits for the event loop, as MediaRegistry's does: a
+    // caller that sets its own folders first (tests do) should not have the
+    // user's Movies and Documents read on its behalf.
+    QTimer::singleShot(0, this, [this] { if (!m_scanned) rescan(); });
 }
 
 void ProjectRegistry::setSearchDirs(const QStringList& dirs) {
@@ -70,6 +74,7 @@ void ProjectRegistry::saveDirs() const {
 }
 
 void ProjectRegistry::rescan() {
+    m_scanned = true;
     m_projects.clear();
     QSet<QString> seen;
     for (const QString& dir : m_dirs) {

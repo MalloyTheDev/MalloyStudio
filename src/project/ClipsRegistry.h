@@ -36,6 +36,9 @@ class ClipsRegistry : public QObject {
     Q_OBJECT
 public:
     explicit ClipsRegistry(QObject* parent = nullptr);
+    // Uses `storePath` from the start, so the app-data store is never read
+    // (tests). Empty => default app-data location.
+    explicit ClipsRegistry(const QString& storePath, QObject* parent = nullptr);
 
     // Custom store path (used by tests). Empty => default app-data location.
     void setStorePath(const QString& path);

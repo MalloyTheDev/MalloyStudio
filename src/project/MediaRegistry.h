@@ -59,6 +59,16 @@ public:
     // file is listed but never probed, because opening it downloads it.
     static bool isCloudOnly(const QString& path);
 
+    // What one ffprobe run (-print_format json -show_format -show_streams)
+    // says about a file. The output describes the file being probed, so it is
+    // whatever that file claims: a duration that is not a finite positive
+    // number an int can hold is left unknown rather than narrowed.
+    struct ProbeReport {
+        int     durationSecs = 0;   // 0 = unknown
+        QString resolution;         // first video stream, "W×H"; empty otherwise
+    };
+    static ProbeReport parseProbeOutput(const QByteArray& ffprobeJson);
+
     // ---- For tests ---------------------------------------------------------
     // Runs `program`, with `leadingArgs` before the usual ffprobe arguments,
     // in place of ffprobe, and gives each run `timeoutMs` before it is killed.

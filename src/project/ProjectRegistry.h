@@ -47,4 +47,5 @@ private:
     QStringList m_dirs;
     QVector<ProjectInfo> m_projects;
     bool m_persist = true;   // false for tests using setSearchDirs
+    bool m_scanned = false;  // a scan has run; the deferred first one is then not needed
 };

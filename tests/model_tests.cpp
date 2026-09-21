@@ -369,6 +369,15 @@ private slots:
     // Registries degrade gracefully: missing/corrupt stores load empty, ops on
     // unknown ids no-op, scans of empty/nonexistent dirs yield nothing.
     void registriesDegradeGracefullyOnBadInput();
+    // A registry given its folders before the event loop runs never reads the
+    // ones it would otherwise start with, which on a real install are the
+    // user's own Movies, Pictures, Music and Documents.
+    void registriesReadOnlyTheFoldersTheyAreGiven();
+    // The load-time bounds on what a file can make the application do: a
+    // project over the size cap is refused unread, and a probed duration is
+    // bounded before it is narrowed to int.
+    void anOversizedProjectIsRefusedUnread();
+    void probeOutputIsBoundedBeforeItIsNarrowed();
     // Recent recordings: the dashboard panel lists real capture files, so the
     // scan must filter by extension, order newest first, honour the limit and
     // tolerate a missing folder.
@@ -3239,8 +3248,7 @@ void MalloyModelTests::clipsRegistryRoundTrips() {
     const QString store = dir.filePath(QStringLiteral("clips.json"));
 
     {
-        ClipsRegistry reg;
-        reg.setStorePath(store);
+        ClipsRegistry reg(store);
         QCOMPARE(reg.count(), 0);
 
         ClipInfo a;
@@ -3268,8 +3276,7 @@ void MalloyModelTests::clipsRegistryRoundTrips() {
     }
 
     // Reload into a fresh registry: state must persist.
-    ClipsRegistry reg2;
-    reg2.setStorePath(store);
+    ClipsRegistry reg2(store);
     QCOMPARE(reg2.count(), 2);
     const ClipInfo& first = reg2.clips().at(1);
     QCOMPARE(first.name, QStringLiteral("First clip"));
@@ -3328,6 +3335,8 @@ void MalloyModelTests::mediaRegistryClassifiesByExtension() {
     touch(QStringLiteral("scene.malloy.json")); // ignored (not a media ext)
 
     MediaRegistry reg;
+    reg.setProbeCachePathForTesting(dir.filePath(QStringLiteral("probe-cache.json")));
+    reg.setProbeCommandForTesting(QString(), {}, 0);   // no ffprobe; not what this tests
     reg.setSearchDirs({dir.path()});
     QCOMPARE(reg.count(), 3);
     QCOMPARE(reg.countOfKind(MediaInfo::Video), 1);
@@ -3614,8 +3623,7 @@ void MalloyModelTests::registriesDegradeGracefullyOnBadInput() {
     // (1) ClipsRegistry: a missing store loads empty and setFavorite on an
     //     unknown id is a harmless no-op.
     {
-        ClipsRegistry reg;
-        reg.setStorePath(dir.filePath(QStringLiteral("missing.json")));
+        ClipsRegistry reg(dir.filePath(QStringLiteral("missing.json")));
         QCOMPARE(reg.count(), 0);
         reg.setFavorite(QStringLiteral("no-such-id"), true);
         QCOMPARE(reg.count(), 0);
@@ -3627,8 +3635,7 @@ void MalloyModelTests::registriesDegradeGracefullyOnBadInput() {
         QVERIFY(f.open(QIODevice::WriteOnly));
         f.write("{ this is not valid json ]]]");
         f.close();
-        ClipsRegistry reg;
-        reg.setStorePath(corrupt);
+        ClipsRegistry reg(corrupt);
         QCOMPARE(reg.count(), 0);
     }
 
@@ -3646,11 +3653,136 @@ void MalloyModelTests::registriesDegradeGracefullyOnBadInput() {
         const QString emptyDir = dir.filePath(QStringLiteral("empty_media"));
         QVERIFY(QDir().mkpath(emptyDir));
         MediaRegistry reg;
+        reg.setProbeCachePathForTesting(dir.filePath(QStringLiteral("probe-cache.json")));
+        reg.setProbeCommandForTesting(QString(), {}, 0);
         reg.setSearchDirs({emptyDir});
         QCOMPARE(reg.count(), 0);
         reg.setSearchDirs({dir.filePath(QStringLiteral("nonexistent_media"))});
         QCOMPARE(reg.count(), 0);
     }
+}
+
+void MalloyModelTests::registriesReadOnlyTheFoldersTheyAreGiven() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    // `saved` stands in for the folders a registry starts with: the persisted
+    // list, which on a real install holds the user's own folders.
+    const QString saved = dir.filePath(QStringLiteral("saved"));
+    const QString given = dir.filePath(QStringLiteral("given"));
+    QVERIFY(QDir().mkpath(saved));
+    QVERIFY(QDir().mkpath(given));
+    auto write = [](const QString& path, const QByteArray& content) {
+        QFile f(path);
+        return f.open(QIODevice::WriteOnly) && f.write(content) == content.size();
+    };
+    QVERIFY(write(QDir(saved).filePath(QStringLiteral("old.malloy.json")), R"({"scenes":[{}]})"));
+    QVERIFY(write(QDir(saved).filePath(QStringLiteral("old.png")), "x"));
+    QVERIFY(write(QDir(given).filePath(QStringLiteral("new.malloy.json")), R"({"scenes":[{},{}]})"));
+    QVERIFY(write(QDir(given).filePath(QStringLiteral("new.wav")), "x"));
+
+    QSettings settings;
+    const QStringList keys{QStringLiteral("projects/searchDirs"), QStringLiteral("media/searchDirs")};
+    QVariantList previous;
+    for (const QString& key : keys) previous << settings.value(key);
+    const auto restore = qScopeGuard([&] {
+        for (int i = 0; i < keys.size(); ++i) {
+            if (previous.at(i).isValid()) settings.setValue(keys.at(i), previous.at(i));
+            else settings.remove(keys.at(i));
+        }
+    });
+    for (const QString& key : keys) settings.setValue(key, QStringList{saved});
+
+    {
+        ProjectRegistry projects;
+        QCOMPARE(projects.count(), 0);   // nothing was read while it was built
+        projects.setSearchDirs({given});
+        QTRY_COMPARE(projects.count(), 1);
+        QCOMPARE(projects.projects().first().name, QStringLiteral("new"));
+    }
+    {
+        MediaRegistry media;
+        media.setProbeCachePathForTesting(dir.filePath(QStringLiteral("probe-cache.json")));
+        media.setProbeCommandForTesting(QString(), {}, 0);
+        QCOMPARE(media.count(), 0);
+        media.setSearchDirs({given});
+        QTRY_COMPARE(media.count(), 1);
+        QCOMPARE(media.media().first().name, QStringLiteral("new.wav"));
+    }
+}
+
+void MalloyModelTests::anOversizedProjectIsRefusedUnread() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    constexpr qint64 kCap = 32 * 1024 * 1024;   // ProjectDocument's limit
+
+    // A valid project padded with whitespace, which JSON allows after the
+    // value. Read whole it would load, so only the size check can refuse it.
+    SceneCollection source;
+    source.addScene(QStringLiteral("Padded"));
+    const QString path = dir.filePath(QStringLiteral("big.malloy.json"));
+    QString error;
+    QVERIFY2(ProjectDocument::saveToFile(source, path, &error), qPrintable(error));
+    auto padTo = [&path](qint64 size) {
+        QFile f(path);
+        if (!f.open(QIODevice::Append)) return false;
+        const qint64 need = size - f.size();
+        return need >= 0 && f.write(QByteArray(need, ' ')) == need;
+    };
+
+    // Exactly at the cap still opens.
+    QVERIFY(padTo(kCap));
+    {
+        SceneCollection atCap;
+        QVERIFY2(ProjectDocument::loadFromFile(atCap, path, &error), qPrintable(error));
+        QCOMPARE(atCap.sceneCount(), 1);
+        QCOMPARE(atCap.currentScene()->name(), QStringLiteral("Padded"));
+    }
+
+    // One byte over is refused with the reason, and the collection it would
+    // have replaced is left as it was.
+    QVERIFY(padTo(kCap + 1));
+    QCOMPARE(QFileInfo(path).size(), kCap + 1);
+    SceneCollection target;
+    target.addScene(QStringLiteral("Keep"));
+    QVERIFY(!ProjectDocument::loadFromFile(target, path, &error));
+    QVERIFY2(error.contains(QStringLiteral("too large")), qPrintable(error));
+    QCOMPARE(target.sceneCount(), 1);
+    QCOMPARE(target.currentScene()->name(), QStringLiteral("Keep"));
+}
+
+void MalloyModelTests::probeOutputIsBoundedBeforeItIsNarrowed() {
+    // ffprobe reports the duration as a string, as it does here.
+    auto durationOf = [](const QByteArray& duration) {
+        return MediaRegistry::parseProbeOutput(R"({"format":{"duration":)" + duration + "}}")
+            .durationSecs;
+    };
+    QCOMPARE(durationOf(R"("12.6")"), 13);
+    QCOMPARE(durationOf(R"("0.4")"), 0);
+    QCOMPARE(durationOf(R"("2147483646")"), 2147483646);
+
+    // What a broken or hostile file can claim. Any of these narrowed to int
+    // would be undefined; each has to come back as unknown instead.
+    for (const char* claim : {R"("nan")", R"("NaN")", R"("inf")", R"("-inf")", R"("1e300")",
+                              R"("-1e300")", R"("2147483647")", R"("-5")", R"("0")",
+                              R"("twelve")", R"("")"}) {
+        QVERIFY2(durationOf(claim) == 0, claim);
+    }
+
+    // The resolution is the first video stream's, and only when both sides
+    // are positive.
+    QCOMPARE(MediaRegistry::parseProbeOutput(
+                 R"({"streams":[{"codec_type":"audio","width":7,"height":7},)"
+                 R"({"codec_type":"video","width":1920,"height":1080},)"
+                 R"({"codec_type":"video","width":640,"height":480}]})").resolution,
+             QStringLiteral("1920×1080"));
+    QVERIFY(MediaRegistry::parseProbeOutput(
+                R"({"streams":[{"codec_type":"video","width":-1920,"height":1080}]})")
+                .resolution.isEmpty());
+
+    // Output that is not JSON at all reports nothing.
+    const MediaRegistry::ProbeReport garbage = MediaRegistry::parseProbeOutput("not json");
+    QCOMPARE(garbage.durationSecs, 0);
+    QVERIFY(garbage.resolution.isEmpty());
 }
 
 // Helper: create `name` in `dir` with `bytes` of content and an explicit
