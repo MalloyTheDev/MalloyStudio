@@ -41,7 +41,7 @@ QList<QualityPreset> kOutputPresets() {
 } // namespace
 
 OutputSettingsDialog::OutputSettingsDialog(const OutputSettings& s, QWidget* parent)
-    : QDialog(parent)
+    : QDialog(parent), m_base(s)
 {
     setWindowTitle(tr("Output Settings"));
     setMinimumWidth(400);
@@ -93,7 +93,10 @@ OutputSettingsDialog::OutputSettingsDialog(const OutputSettings& s, QWidget* par
 
     // ── Frame rate ───────────────────────────────────────────────────────────
     m_fps = new QSpinBox(this);
-    m_fps->setRange(1, 120);
+    // The range OutputSettings::normalized() allows. Narrower, the box could
+    // not show a rate chosen in Settings (144, or a custom one), clamped it on
+    // opening, and OK then saved the clamped value.
+    m_fps->setRange(1, 1000);
     m_fps->setValue(s.fps);
     m_fps->setSuffix(tr(" fps"));
     form->addRow(tr("Frame rate"), m_fps);
@@ -239,7 +242,10 @@ void OutputSettingsDialog::onCodecChanged(int index) {
 }
 
 OutputSettings OutputSettingsDialog::settings() const {
-    OutputSettings o;
+    // From what came in, not from defaults: a fresh OutputSettings reset the
+    // audio codec to AAC and the keyframe interval to automatic whenever this
+    // dialog was accepted, undoing choices made in Settings.
+    OutputSettings o = m_base;
     o.width            = m_width->value();
     o.height           = m_height->value();
     o.fps              = m_fps->value();
@@ -248,8 +254,9 @@ OutputSettings OutputSettingsDialog::settings() const {
     o.bitrateKbps      = m_bitrateKbps->value();
     o.preset           = m_preset->currentData().toString();
     o.audioBitratekbps = m_audioBitrate->value();
-    o.audioCodec          = QStringLiteral("aac");
     o.container           = m_container->currentData().toString();
     o.replayBufferSeconds = m_replayBuffer->value();
-    return o;
+    // Typed values are not held to the arrows' step: an odd width would reach
+    // ffmpeg's scale and yuv420p as given.
+    return o.normalized();
 }

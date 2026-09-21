@@ -239,6 +239,9 @@ qt_add_executable(MalloyStudioTests
     # is what keeps a recording alive while the window is minimized.
     src/ui/PreviewWidget.cpp
     src/ui/PreviewWidget.h
+    # The output dialog, whose settings() must hand back what it was given.
+    src/ui/OutputSettingsDialog.cpp
+    src/ui/OutputSettingsDialog.h
 )
 
 # Force console subsystem so CTest captures stdout test output

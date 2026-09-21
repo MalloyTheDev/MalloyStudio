@@ -41,6 +41,7 @@
 #include "ui/workspaces/EditorWorkspace.h"
 #include "ui/workspaces/TimelineEdits.h"
 #include "ui/shell/EditingFocus.h"
+#include "ui/OutputSettingsDialog.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -408,6 +409,7 @@ private slots:
     void closingDuringAReplaySaveFinishesItFirst();
     void theReplayBufferIsAFrameConsumer();
     void aFadeStartsFromTheComposedCanvas();
+    void theOutputDialogHandsBackWhatItWasGiven();
     void spinBoxesAndTextFieldsKeepTheirDigits();
     void editorClipRoundTripPreservesSourceReference();
     void editorLegacyClipLoadsAsUnlinked();
@@ -5879,6 +5881,31 @@ void MalloyModelTests::aFadeStartsFromTheComposedCanvas() {
     const QImage from = preview.renderCurrentScene();
     QCOMPARE(from.size(), QSize(MalloyCanvas::Width, MalloyCanvas::Height));
     QCOMPARE(from, preview.cachedComposedFrame());
+}
+
+void MalloyModelTests::theOutputDialogHandsBackWhatItWasGiven() {
+    OutputSettings in;
+    in.audioCodec  = QStringLiteral("libopus");   // chosen in Settings > Audio
+    in.keyframeSec = 2;                           // chosen in Settings > Video
+    in.fps         = 144;                         // offered by Settings, not by the old box
+    in.width       = 2560;
+    in.height      = 1440;
+
+    // Opened and accepted without touching anything.
+    OutputSettingsDialog dialog(in);
+    const OutputSettings out = dialog.settings();
+    QCOMPARE(out.audioCodec, QStringLiteral("libopus"));
+    QCOMPARE(out.keyframeSec, 2);
+    QCOMPARE(out.fps, 144);
+    QCOMPARE(out.width, 2560);
+    QCOMPARE(out.height, 1440);
+
+    // What comes back is normalised, so an odd typed size never reaches ffmpeg.
+    in.width = 1921;
+    in.height = 1081;
+    const OutputSettings odd = OutputSettingsDialog(in).settings();
+    QCOMPARE(odd.width % 2, 0);
+    QCOMPARE(odd.height % 2, 0);
 }
 
 void MalloyModelTests::mediaProbesAreRememberedNotRepeated() {

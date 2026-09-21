@@ -395,6 +395,10 @@ void MainWindow::setupMenus() {
 
     auto* outputSettingsAction = editMenu->addAction(tr("Output Settings…"));
     connect(outputSettingsAction, &QAction::triggered, this, [this] {
+        // From what is stored, not from what this window read at launch:
+        // Settings writes the same values, and a stale copy handed to the
+        // dialog was saved straight back over them.
+        m_outputSettings = OutputSettings::load();
         OutputSettingsDialog dlg(m_outputSettings, this);
         if (dlg.exec() == QDialog::Accepted) {
             m_outputSettings = dlg.settings();

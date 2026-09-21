@@ -61,4 +61,9 @@ private:
     // manual edits to any of those widgets bumps the combo back to "Custom".
     QComboBox* m_qualityPreset = nullptr;
     bool       m_applyingPreset = false;
+
+    // What the dialog was opened with. settings() starts from this and
+    // overwrites only what the dialog shows, so fields it has no control for
+    // (the audio codec, the keyframe interval) come back as they went in.
+    OutputSettings m_base;
 };
