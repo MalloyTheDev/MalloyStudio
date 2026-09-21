@@ -10,6 +10,12 @@ class QTimer;
 //
 // Emits pcmReady() chunks one at a time from a 50 Hz QTimer, matching the
 // live audio rate. Emits finished() when the queue is drained.
+//
+// Nothing is taken off the queue while nobody is connected to pcmReady(). The
+// encoder subscribes only once ffmpeg has opened the audio pipe, which is some
+// hundreds of milliseconds after start(); chunks emitted before then were lost,
+// and since ffmpeg times audio by its bytes, the clip's audio began that much
+// later in the buffer than its video did.
 class RingTimedPcmSource : public TimedPcmSource {
     Q_OBJECT
 public:

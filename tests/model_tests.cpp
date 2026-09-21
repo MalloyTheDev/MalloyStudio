@@ -389,6 +389,8 @@ private slots:
     void aCancelledSignInIgnoresALateCode();
     void aNetworkBlipWhilePollingDoesNotEndTheSignIn();
     void theChannelIdIsForgottenWhenTheAccountChanges();
+    void replayAudioWaitsForTheEncoder();
+    void closingDuringAReplaySaveFinishesItFirst();
     void theReplayBufferIsAFrameConsumer();
     void spinBoxesAndTextFieldsKeepTheirDigits();
     void editorClipRoundTripPreservesSourceReference();
@@ -5274,6 +5276,78 @@ void MalloyModelTests::theChannelIdIsForgottenWhenTheAccountChanges() {
     QTRY_COMPARE(calls, 4);
     QVERIFY(ok);
     QCOMPARE(id, QStringLiteral("222"));
+}
+
+void MalloyModelTests::replayAudioWaitsForTheEncoder() {
+    QQueue<TimedPcm> chunks;
+    for (int i = 0; i < 3; ++i)
+        chunks.enqueue(TimedPcm{QByteArray(3840, char('a' + i)), i * 20000});
+    RingTimedPcmSource source(chunks);
+    QSignalSpy finished(&source, &RingTimedPcmSource::finished);
+
+    // Started, as saving a replay does, well before the encoder subscribes.
+    source.start();
+    QTest::qWait(150);
+
+    QList<QByteArray> received;
+    QObject::connect(&source, &TimedPcmSource::pcmReady, &source,
+                     [&received](const QByteArray& pcm) { received.append(pcm); });
+    QTRY_COMPARE(finished.count(), 1);
+
+    // Every chunk, from the first, reaches the late subscriber in order.
+    QCOMPARE(received.size(), 3);
+    for (int i = 0; i < 3; ++i) QCOMPARE(received[i].at(0), char('a' + i));
+}
+
+void MalloyModelTests::closingDuringAReplaySaveFinishesItFirst() {
+    RecordingTestFrames frames;
+    RecordingTestAudio audio;
+    auto* controller = new MediaController(&frames, &audio);
+    const auto cleanup = qScopeGuard([&controller] { delete controller; });
+    if (!controller->ffmpegAvailable()) QSKIP("Real encoder lifecycle requires ffmpeg in PATH");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    // Three seconds of replay, five frames a second, with its audio.
+    QImage img(320, 180, QImage::Format_RGB32);
+    img.fill(QColor(40, 110, 180));
+    QByteArray jpeg;
+    QBuffer buf(&jpeg);
+    buf.open(QIODevice::WriteOnly);
+    QVERIFY(img.save(&buf, "JPEG"));
+    QQueue<ReplayFrame> ring;
+    for (int i = 0; i < 15; ++i) ring.enqueue(ReplayFrame{jpeg, i * 200000});
+    QQueue<TimedPcm> pcm;
+    for (int i = 0; i < 150; ++i) pcm.enqueue(TimedPcm{QByteArray(3840, '\0'), i * 20000});
+
+    const QString path = dir.filePath(QStringLiteral("replay.mp4"));
+    QString error;
+    QVERIFY2(controller->saveReplay(path, recordingTestSettings(), ring, 320, 180, pcm, &error),
+             qPrintable(error));
+
+    EncoderPipeline* replay = nullptr;
+    for (EncoderPipeline* p : controller->findChildren<EncoderPipeline*>())
+        if (p->isRunning()) replay = p;
+    QVERIFY(replay);
+    const QString ffmpeg = replay->ffmpegPath();
+    const QList<RingTimedPcmSource*> sources = controller->findChildren<RingTimedPcmSource*>();
+    QCOMPARE(sources.size(), 1);
+
+    QStringList order;
+    QObject::connect(replay, &EncoderPipeline::finished, replay,
+                     [&order] { order << QStringLiteral("replay finished"); });
+    QObject::connect(sources.first(), &QObject::destroyed, sources.first(),
+                     [&order] { order << QStringLiteral("audio source gone"); });
+
+    // The app closes part way through the save.
+    QTest::qWait(700);
+    delete std::exchange(controller, nullptr);
+
+    // The replay is finished while its audio source still exists, not after:
+    // its teardown disconnects from that source.
+    QCOMPARE(order, QStringList({QStringLiteral("replay finished"),
+                                 QStringLiteral("audio source gone")}));
+    QVERIFY(recordingDecodes(ffmpeg, path));
 }
 
 QTEST_MAIN(MalloyModelTests)

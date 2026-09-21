@@ -1,5 +1,6 @@
 #include "RingTimedPcmSource.h"
 
+#include <QMetaMethod>
 #include <QTimer>
 
 RingTimedPcmSource::RingTimedPcmSource(QQueue<TimedPcm> chunks, QObject* parent)
@@ -19,6 +20,7 @@ void RingTimedPcmSource::start() {
 }
 
 void RingTimedPcmSource::emitNextChunk() {
+    if (!isSignalConnected(QMetaMethod::fromSignal(&TimedPcmSource::pcmReady))) return;
     if (m_chunks.isEmpty()) {
         m_timer->stop();
         emit finished();

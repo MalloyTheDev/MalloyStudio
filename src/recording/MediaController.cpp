@@ -25,6 +25,15 @@ MediaController::MediaController(TimedFrameSource* frames,
 MediaController::~MediaController() {
     if (m_recorder && m_recorder->isRunning()) m_recorder->stop();
     if (m_streamer && m_streamer->isRunning()) m_streamer->stop();
+    // A replay still being written is finished too, here, while its sources
+    // exist. Left to the deletion of this object's children, its sources were
+    // deleted before it and its teardown then used the freed audio source; the
+    // file was finished, if at all, by luck.
+    for (EncoderPipeline* pipeline : findChildren<EncoderPipeline*>()) {
+        if (!pipeline->isRunning()) continue;
+        disconnect(pipeline, nullptr, this, nullptr);
+        pipeline->stop();
+    }
 }
 
 void MediaController::setCaptureStatsProvider(std::function<CaptureStats()> provider) {
@@ -235,8 +244,8 @@ bool MediaController::saveReplay(const QString&        path,
         return false;
     }
 
-    // Start the PCM pump after the pipeline is running so the audio pipe is
-    // ready to accept bytes.
+    // The pump holds its chunks until the encoder subscribes, which happens
+    // only once ffmpeg has opened the audio pipe; see RingTimedPcmSource.
     rAudio->start();
     return true;
 }
