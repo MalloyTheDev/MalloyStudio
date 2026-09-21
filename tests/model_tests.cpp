@@ -1016,12 +1016,19 @@ void MalloyModelTests::encoderRegistryAlwaysListsLibx264() {
     QVERIFY(args.contains(QStringLiteral("libx264")));
     QVERIFY(args.contains(QStringLiteral("-crf")));
 
-    // Software encoders hold quality either way, so the destination changes
-    // nothing for them. Stated as a test because it is a decision and not an
-    // oversight: CRF is already indifferent to the declared input rate.
+    // Software encoders hold quality either way: a stream keeps every argument
+    // a file gets, the same CRF target included, because CRF is indifferent to
+    // the declared input rate. What a stream adds is only a ceiling. This used
+    // to assert the two were identical, which is how the stream bitrate came
+    // never to reach a software encoder; see aSoftwareStreamIsCappedAtItsBitrate.
     const QStringList streamArgs = x264->buildArgs(OutputSettings{},
                                                    EncoderRegistry::Destination::Stream);
-    QCOMPARE(streamArgs, args);
+    for (const QString& a : args) QVERIFY2(streamArgs.contains(a), qPrintable(a));
+    QStringList added = streamArgs;
+    for (const QString& a : args) added.removeOne(a);
+    QCOMPARE(added.size(), 4);
+    QCOMPARE(added.at(0), QStringLiteral("-maxrate"));
+    QCOMPARE(added.at(2), QStringLiteral("-bufsize"));
 }
 
 void MalloyModelTests::streamSettingsRtmpUrlTemplatesExpandCorrectly() {
