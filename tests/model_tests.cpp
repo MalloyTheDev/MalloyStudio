@@ -377,6 +377,7 @@ private slots:
     void stagingASceneKeepsTheProgramCaptureRunning();
     void aFrameQueuedBeforeAStopIsDropped();
     void aLostDisplayCaptureIsTriedAgain();
+    void aCameraThatStopsIsTriedAgain();
     void projectMediaPathsMustBeLocalFiles();
     void encoderRedactsTheStreamKeyFromFfmpegOutput();
     void addingAConfiguredLayerIsOneUndoStep();
@@ -4014,6 +4015,44 @@ void MalloyModelTests::aLostDisplayCaptureIsTriedAgain() {
     QTest::qWait(1500);
     QCOMPARE(FakeCaptureSession::started.count(QStringLiteral("1:2")), 4);
     QCOMPARE(controller.monitorStatus(1, 2), QStringLiteral("Idle"));
+}
+
+void MalloyModelTests::aCameraThatStopsIsTriedAgain() {
+    FakeCaptureSession::started.clear();
+    FakeCaptureSession::stopped.clear();
+    FakeCaptureSession::created.clear();
+
+    SceneCollection scenes;
+    scenes.addScene(QStringLiteral("Scene"));
+    CaptureController controller(
+        &scenes,
+        [](int adapterIndex, int outputIndex, QObject* parent) {
+            return new FakeCaptureSession(adapterIndex, outputIndex, parent);
+        });
+    // Cameras are keyed "-1:-1" by the fake, which is only a label here.
+    controller.setCameraSessionFactoryForTesting([](const QString&, QObject* parent) {
+        return new FakeCaptureSession(-1, -1, parent);
+    });
+    const QString cam = QStringLiteral("-1:-1");
+    QVERIFY(scenes.addCameraToCurrent(QStringLiteral("Front Camera"),
+                                      QStringLiteral("test-camera-device"),
+                                      QStringLiteral("Front Camera")) != nullptr);
+    QCOMPARE(FakeCaptureSession::started.count(cam), 1);
+
+    // Unplugged, or taken by another application.
+    emit FakeCaptureSession::created.last()->captureError(QStringLiteral("Camera stopped"));
+    QCOMPARE(FakeCaptureSession::stopped.count(cam), 1);
+
+    // It is tried again by itself. Before, the session was dropped and
+    // nothing asked for the camera again until the scene was edited.
+    QTRY_COMPARE_WITH_TIMEOUT(FakeCaptureSession::started.count(cam), 2, 3000);
+
+    // Removed from the scene while a retry is pending: nothing restarts it.
+    emit FakeCaptureSession::created.last()->captureError(QStringLiteral("Camera stopped"));
+    scenes.selectCurrentItemAt(0);
+    scenes.removeCurrentItemAt(0);
+    QTest::qWait(1500);
+    QCOMPARE(FakeCaptureSession::started.count(cam), 2);
 }
 
 void MalloyModelTests::everyMicChangeIsAnnouncedStructurally() {

@@ -206,8 +206,18 @@ void CaptureController::reconcile() {
     for (const QString& key : activeCameraKeys) {
         if (!requiredCameras.contains(key)) stopCameraSession(key);
     }
+    for (const QString& key : m_blockedErrorKeys.values()) {
+        if (!key.startsWith(QLatin1String("camera:"))) continue;
+        if (!requiredCameras.contains(key.mid(7))) {
+            m_blockedErrorKeys.remove(key);
+            m_retryTokens.remove(key);
+            m_retryDelayMs.remove(key);
+        }
+    }
     for (const QString& deviceId : requiredCameras) {
-        if (!m_cameraSessions.contains(deviceId)) startCameraSession(deviceId);
+        if (m_cameraSessions.contains(deviceId)) continue;
+        if (m_blockedErrorKeys.contains(cameraKey(deviceId))) continue;   // waiting to retry
+        startCameraSession(deviceId);
     }
 
     const int total = m_sessions.size() + m_windowSessions.size() + m_cameraSessions.size();
@@ -218,6 +228,19 @@ void CaptureController::reconcile() {
             .arg(total)
             .arg(total == 1 ? QString() : QStringLiteral("s")));
     }
+}
+
+void CaptureController::scheduleRetry(const QString& key) {
+    m_blockedErrorKeys.insert(key);
+    const int delay = m_retryDelayMs.value(key, kFirstRetryMs);
+    m_retryDelayMs.insert(key, std::min(delay * 2, kMaxRetryMs));
+    const quint64 token = ++m_retrySerial;
+    m_retryTokens.insert(key, token);
+    QTimer::singleShot(delay, this, [this, key, token] {
+        if (m_retryTokens.value(key) != token) return;   // superseded or cancelled
+        m_retryTokens.remove(key);
+        if (m_blockedErrorKeys.remove(key)) reconcile();
+    });
 }
 
 void CaptureController::stopAll() {
@@ -250,19 +273,11 @@ void CaptureController::startSession(int adapterIndex, int outputIndex) {
     connect(session, &CaptureSession::captureError, this, [this, adapterIndex, outputIndex](const QString& message) {
         const QString key = keyFor(adapterIndex, outputIndex);
         m_blockedErrorKeys.insert(key);
-        // Blocked until the retry, which then unblocks it and reconciles; see
-        // m_retryDelayMs. Blocking it for good, as this did, left a recording
-        // or a stream without its screen from the first UAC prompt on, until
-        // the user happened to toggle the source.
-        const int delay = m_retryDelayMs.value(key, kFirstRetryMs);
-        m_retryDelayMs.insert(key, std::min(delay * 2, kMaxRetryMs));
-        const quint64 token = ++m_retrySerial;
-        m_retryTokens.insert(key, token);
-        QTimer::singleShot(delay, this, [this, key, token] {
-            if (m_retryTokens.value(key) != token) return;   // superseded or cancelled
-            m_retryTokens.remove(key);
-            if (m_blockedErrorKeys.remove(key)) reconcile();
-        });
+        // Blocked until the retry, which then unblocks it and reconciles.
+        // Blocking it for good, as this did, left a recording or a stream
+        // without its screen from the first UAC prompt on, until the user
+        // happened to toggle the source.
+        scheduleRetry(key);
         setMonitorStatus(key, QStringLiteral("Error: %1 (retrying)").arg(message));
         stopSession(key, false);
         reconcile();
@@ -340,10 +355,14 @@ void CaptureController::startCameraSession(const QString& deviceId) {
     m_cameraSessions.insert(deviceId, ActiveCameraSession{deviceId, session});
 
     connect(session, &CaptureSession::frameReady, this, [this, deviceId](QImage frame) {
+        m_retryDelayMs.remove(cameraKey(deviceId));   // working again
         emit cameraFrameReady(deviceId, std::move(frame));
     });
     connect(session, &CaptureSession::captureError, this, [this, deviceId](const QString& /*msg*/) {
-        stopCameraSession(deviceId);   // device error — drop it; reconcile may retry
+        // Dropped, and tried again later: unplugged and plugged back in, or
+        // released by another application, the camera returns by itself.
+        stopCameraSession(deviceId);
+        scheduleRetry(cameraKey(deviceId));
     });
 
     session->startCapture();

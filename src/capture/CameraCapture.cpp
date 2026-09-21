@@ -328,7 +328,19 @@ void CameraCapture::captureLoop(QString deviceId) {
         IMFSample* sample = nullptr;
         hr = reader->ReadSample(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM),
                                 0, nullptr, &streamFlags, &timestamp, &sample);
-        if (FAILED(hr) || (streamFlags & MF_SOURCE_READERF_ENDOFSTREAM)) break;
+        if (FAILED(hr) || (streamFlags & (MF_SOURCE_READERF_ENDOFSTREAM | MF_SOURCE_READERF_ERROR))) {
+            safeRelease(sample);
+            // Unplugged, taken by another application, or access revoked. It
+            // used to end here in silence: the session stayed, the preview kept
+            // its last frame, and nothing ever tried the camera again. Said
+            // unless this is a stop, so the controller drops and retries it.
+            if (m_running.load()) {
+                emit error(FAILED(hr)
+                    ? QStringLiteral("Camera stopped (0x%1)").arg(quint32(hr), 8, 16, QLatin1Char('0'))
+                    : QStringLiteral("Camera stopped"));
+            }
+            break;
+        }
         if (!sample) {
             // Format change or no data yet — avoid a busy spin.
             std::this_thread::sleep_for(std::chrono::milliseconds(5));

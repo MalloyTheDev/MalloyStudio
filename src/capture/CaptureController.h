@@ -107,6 +107,12 @@ public:
     static QString keyFor(int adapterIndex, int outputIndex);
     static QString keyForWindow(quintptr hwnd);
 
+    // Replaces how camera sessions are made. For tests, so none opens a real
+    // camera; set it before any camera source is added.
+    void setCameraSessionFactoryForTesting(CameraSessionFactory factory) {
+        m_cameraFactory = std::move(factory);
+    }
+
 public slots:
     void reconcile();
     void stopAll();
@@ -148,6 +154,10 @@ private:
     void stopWindowSession(const QString& key);
     void startCameraSession(const QString& deviceId);
     void stopCameraSession(const QString& deviceId);
+    // Blocks `key` and unblocks it again after the current backoff delay,
+    // reconciling then; see m_retryDelayMs.
+    void scheduleRetry(const QString& key);
+    static QString cameraKey(const QString& deviceId) { return QStringLiteral("camera:") + deviceId; }
     void setSummary(const QString& summary);
     void setMonitorStatus(const QString& key, const QString& status);
 
@@ -166,11 +176,13 @@ private:
     QHash<QString, QString> m_lastStatus;
     QSet<QString> m_blockedErrorKeys;
 
-    // A display capture that fails is tried again rather than left blocked:
-    // desktop duplication loses access every time the secure desktop shows
-    // (a UAC prompt, the lock screen, Ctrl+Alt+Del) or the display mode
-    // changes, and recreating it is the documented recovery. The delay
-    // doubles while it keeps failing and resets once a frame arrives.
+    // A display or camera capture that fails is tried again rather than left
+    // blocked. Desktop duplication loses access every time the secure desktop
+    // shows (a UAC prompt, the lock screen, Ctrl+Alt+Del) or the display mode
+    // changes, and recreating it is the documented recovery; a camera comes
+    // back when it is plugged in again or another application lets go of it.
+    // The delay doubles while it keeps failing and resets once a frame
+    // arrives. Keys are display keys and cameraKey() values.
     static constexpr int kFirstRetryMs = 500;
     static constexpr int kMaxRetryMs   = 10000;
     QHash<QString, int>     m_retryDelayMs;   // next delay per display key
