@@ -2,6 +2,7 @@
 #include "audio/AudioMix.h"
 #include "audio/Resampler.h"
 #include "audio/StereoDownmix.h"
+#include "capture/CameraCapture.h"
 #include "capture/CaptureBackend.h"
 #include "capture/CaptureController.h"
 #include "capture/WgcCapture.h"
@@ -292,6 +293,7 @@ private slots:
     // contributes to gatherVisibleAudioIds() the way MainWindow expects.
     void addAudioInputFromUiCreatesScopedSource();
     void addCameraCreatesScopedSourceAndRoundTrips();
+    void aCameraRunsItsBestNativeFormat();
     void editorClipRoundTripPreservesV4Fields();
     void editorClipFromLegacyV3JsonAppliesDefaults();
     void audioControllerEmitsInputControlChangedOnValueChange();
@@ -2182,6 +2184,83 @@ void MalloyModelTests::addCameraCreatesScopedSourceAndRoundTrips() {
     QCOMPARE(scenes.sourceCount(), 0);
     undo.redo();
     QCOMPARE(scenes.sourceCount(), 1);
+}
+
+void MalloyModelTests::aCameraRunsItsBestNativeFormat() {
+    using Format = CameraCapture::NativeFormat;
+    const quint32 uyvy = CameraCapture::fourcc('U', 'Y', 'V', 'Y');
+    const quint32 mjpg = CameraCapture::fourcc('M', 'J', 'P', 'G');
+    const quint32 yuy2 = CameraCapture::fourcc('Y', 'U', 'Y', '2');
+    const quint32 nv12 = CameraCapture::fourcc('N', 'V', '1', '2');
+
+    // What an Elgato Facecam lists, MJPG first: three sizes, each at 30 and
+    // at 60, in both subtypes. It must run at 60, at the largest size, and as
+    // UYVY, which is the same picture as MJPG without a JPEG decode per frame.
+    QList<Format> facecam;
+    for (const quint32 subtype : {mjpg, uyvy})
+        for (const QSize size : {QSize(960, 540), QSize(1280, 720), QSize(1920, 1080)})
+            for (const quint32 rate : {30u, 60u})
+                facecam.append({subtype, size.width(), size.height(), rate, 1});
+    const QList<int> ranked = CameraCapture::rankNativeFormats(facecam);
+    QCOMPARE(ranked.size(), facecam.size());
+    const Format best = facecam.at(ranked.first());
+    QCOMPARE(best.subtype, uyvy);
+    QCOMPARE(QSize(best.width, best.height), QSize(1920, 1080));
+    QCOMPARE(qRound(best.frameRate()), 60);
+    // Next is MJPG at the same size and rate, not a smaller frame.
+    const Format second = facecam.at(ranked.at(1));
+    QCOMPARE(second.subtype, mjpg);
+    QCOMPARE(QSize(second.width, second.height), QSize(1920, 1080));
+    QCOMPARE(qRound(second.frameRate()), 60);
+
+    // A USB 2 webcam: uncompressed only at a crawl, full rate only as MJPG.
+    // Smoothness wins over avoiding the decode.
+    const QList<Format> usb2 = {
+        {yuy2, 1920, 1080, 5, 1},
+        {yuy2, 1280, 720, 10, 1},
+        {mjpg, 1920, 1080, 30, 1},
+        {mjpg, 1280, 720, 30, 1},
+    };
+    QCOMPARE(CameraCapture::rankNativeFormats(usb2).first(), 2);
+
+    // 59.94 and 60 are the same rate, so the larger frame decides.
+    const QList<Format> ntsc = {
+        {nv12, 1280, 720, 60, 1},
+        {nv12, 1920, 1080, 60000, 1001},
+    };
+    QCOMPARE(CameraCapture::rankNativeFormats(ntsc).first(), 1);
+
+    // RGB32 needs no conversion at all. An unrecognised subtype may not
+    // convert, so it comes after even MJPG.
+    const QList<Format> subtypes = {
+        {0x12345678u, 1280, 720, 30, 1},
+        {mjpg, 1280, 720, 30, 1},
+        {nv12, 1280, 720, 30, 1},
+        {CameraCapture::kSubtypeRgb32, 1280, 720, 30, 1},
+    };
+    QCOMPARE(CameraCapture::rankNativeFormats(subtypes), (QList<int>{3, 2, 1, 0}));
+
+    // Exact ties keep the device's own order.
+    const QList<Format> twins = {{nv12, 640, 480, 30, 1}, {nv12, 640, 480, 30, 1}};
+    QCOMPARE(CameraCapture::rankNativeFormats(twins), (QList<int>{0, 1}));
+
+    // Nothing larger than 1080p and nothing without a size. A list holding
+    // only those leaves the device's default in place.
+    const QList<Format> oversize = {
+        {nv12, 3840, 2160, 60, 1},
+        {nv12, 0, 0, 60, 1},
+        {nv12, 1920, 1080, 30, 1},
+    };
+    QCOMPARE(CameraCapture::rankNativeFormats(oversize), (QList<int>{2}));
+    QVERIFY(CameraCapture::rankNativeFormats(QList<Format>{{nv12, 3840, 2160, 30, 1}}).isEmpty());
+    QVERIFY(CameraCapture::rankNativeFormats({}).isEmpty());
+
+    // The log names the format the device runs.
+    QCOMPARE(CameraCapture::describe(best), QStringLiteral("1920x1080 UYVY at 60.00 fps"));
+    QCOMPARE(CameraCapture::describe({CameraCapture::kSubtypeRgb32, 640, 480, 30000, 1001}),
+             QStringLiteral("640x480 RGB32 at 29.97 fps"));
+    QCOMPARE(CameraCapture::describe({1u, 640, 480, 0, 0}),
+             QStringLiteral("640x480 0x00000001 at 0.00 fps"));
 }
 
 void MalloyModelTests::addingAudioInputTriggersAudioInputsChanged() {

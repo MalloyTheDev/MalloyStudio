@@ -38,7 +38,7 @@ and records to MP4/MKV/MOV via **ffmpeg**.
 
 | Feature | Notes |
 |---|---|
-| Camera source | Media Foundation; opens the camera's highest-rate native format up to 1080p |
+| Camera source | Media Foundation; opens the camera's highest-rate native format up to 1080p, preferring uncompressed over MJPG, and logs the format it runs |
 | Windows.Graphics.Capture backend | Alternative to DXGI for display and window capture (`capture/backend` setting), for comparison |
 | Studio mode | Preview and program scenes, with the program scene's captures kept running while another is staged |
 | Editor timeline and render queue | Clips reference media files; renders run in the background and survive restarts |

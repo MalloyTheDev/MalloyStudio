@@ -47,6 +47,12 @@ enum class Stage {
     // Time inside the backend's own callback: the GPU copy, the map, and the
     // memcpy into a QImage.
     CaptureReadback,
+    // Wall clock between consecutive frames from a camera, taken as each one
+    // arrives. Its count per second is the rate the device is actually
+    // delivering, which composition counts cannot say: composition coalesces,
+    // so two arrivals in one event loop turn make one composition. With more
+    // than one camera running the counts add up.
+    CameraArrival,
     // From the backend handing a frame over to the consumer thread picking it
     // up. This is not work, it is waiting, and it measures how congested the
     // GUI thread is rather than anything about capture.
@@ -176,6 +182,7 @@ inline std::array<Stat, size_t(Stage::Count)>& window() {
 inline const char* name(Stage stage) {
     switch (stage) {
         case Stage::CaptureReadback:     return "CAPTURE READBACK";
+        case Stage::CameraArrival:       return "CAMERA ARRIVAL";
         case Stage::HandoffToGui:        return "HANDOFF TO GUI";
         case Stage::Composition:         return "COMPOSITION";
         case Stage::WidgetBlit:          return "WIDGET BLIT";

@@ -15,7 +15,8 @@
 // about 3.5 s on a machine with no camera attached, so the UI uses
 // cachedDevices() plus refreshDevicesAsync() instead of calling it directly.
 // A CameraCapture instance owns a single device: start() spawns a read thread
-// that converts each frame to an RGB QImage and emits frameReady(); stop() ends
+// that chooses one of the device's native formats (rankNativeFormats), has the
+// reader convert each frame to an RGB QImage and emits frameReady(); stop() ends
 // and joins it. Frames are emitted across the thread boundary via a queued
 // connection (QImage is implicitly shared + a registered metatype).
 class CameraCapture : public QObject {
@@ -53,6 +54,48 @@ public:
     // disconnects itself and the callback never fires.
     static void refreshDevicesAsync(QObject* context,
                                     std::function<void(QList<Device>)> done = {});
+
+    // One format a camera produces itself, as its source reader lists it.
+    //
+    // `subtype` is the first field of the Media Foundation subtype GUID, which
+    // for video is the FOURCC ('NV12', 'YUY2', 'MJPG') or, for the RGB types,
+    // a D3DFORMAT number. Zero stands for a subtype outside that family.
+    struct NativeFormat {
+        quint32 subtype = 0;
+        int width = 0;
+        int height = 0;
+        quint32 rateNumerator = 0;
+        quint32 rateDenominator = 0;
+
+        double frameRate() const {
+            return rateDenominator ? double(rateNumerator) / double(rateDenominator) : 0.0;
+        }
+    };
+
+    static constexpr quint32 fourcc(char a, char b, char c, char d) {
+        return quint32(quint8(a)) | (quint32(quint8(b)) << 8)
+             | (quint32(quint8(c)) << 16) | (quint32(quint8(d)) << 24);
+    }
+    // MFVideoFormat_RGB32 carries D3DFMT_X8R8G8B8 rather than a FOURCC.
+    static constexpr quint32 kSubtypeRgb32 = 22;
+
+    // The native formats worth running, best first, as indices into `formats`.
+    //
+    // Frame rate decides first, compared to the nearest whole frame so 59.94
+    // and 60 are the same choice, because lost smoothness is what a user sees.
+    // Then the larger frame. Then the subtype that costs least to turn into the
+    // RGB32 the reader hands over: RGB32 itself, then uncompressed YUV, then
+    // MJPG, which is a JPEG decode on every frame, then anything unrecognised.
+    // Then the device's own order.
+    //
+    // Frames larger than 1920x1080 are left out, so a capture card advertising
+    // something enormous does not set the cost of every composition, and so
+    // are frames with no size. An empty result means nothing listed is usable
+    // and the device's own default should stand.
+    static QList<int> rankNativeFormats(const QList<NativeFormat>& formats);
+
+    // "1920x1080 NV12 at 60.00 fps", for the log.
+    static QString describe(const NativeFormat& format);
 
     explicit CameraCapture(QObject* parent = nullptr);
     ~CameraCapture() override;

@@ -1,4 +1,8 @@
 #include "CameraCapture.h"
+#include "platform/FrameProfile.h"
+#include <algorithm>
+#include <cstring>
+#include <limits>
 #include <memory>
 #include <atomic>
 #include <mutex>
@@ -165,63 +169,126 @@ void CameraCapture::stop() {
 
 namespace {
 
-// Picks the camera's best native format and makes it current: highest frame
-// rate first, then largest frame within a sane cap.
-//
-// Native rather than converted, because this decides what the device produces.
-// The reader is still asked for RGB32 afterwards, which converts from whatever
-// is chosen here.
-void selectNativeMediaType(IMFSourceReader* reader) {
-    if (!reader) return;
+constexpr DWORD kVideoStream = static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
 
-    constexpr UINT32 kMaxWidth  = 1920;
-    constexpr UINT32 kMaxHeight = 1080;
-
-    IMFMediaType* best = nullptr;
-    double bestRate = -1.0;
-    UINT64 bestArea = 0;
-
-    for (DWORD i = 0;; ++i) {
-        IMFMediaType* candidate = nullptr;
-        const HRESULT hr = reader->GetNativeMediaType(
-            static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), i, &candidate);
-        if (FAILED(hr) || !candidate) break;   // MF_E_NO_MORE_TYPES ends the walk
-
-        UINT32 w = 0, h = 0;
-        UINT32 num = 0, den = 0;
-        double rate = 0.0;
-        if (SUCCEEDED(MFGetAttributeSize(candidate, MF_MT_FRAME_SIZE, &w, &h))
-            && w > 0 && h > 0 && w <= kMaxWidth && h <= kMaxHeight) {
-            if (SUCCEEDED(MFGetAttributeRatio(candidate, MF_MT_FRAME_RATE, &num, &den))
-                && den > 0) {
-                rate = double(num) / double(den);
-            }
-            const UINT64 area = UINT64(w) * UINT64(h);
-            // Rate first, then area. The comparison is on the rate rounded to a
-            // whole frame, because 60000/1001 and 60/1 are the same choice as
-            // far as this decision goes.
-            const double roundedRate = double(qRound(rate));
-            const double roundedBest = double(qRound(bestRate));
-            if (roundedRate > roundedBest
-                || (qFuzzyCompare(roundedRate + 1.0, roundedBest + 1.0) && area > bestArea)) {
-                safeRelease(best);
-                best = candidate;
-                best->AddRef();
-                bestRate = rate;
-                bestArea = area;
-            }
-        }
-        safeRelease(candidate);
+// Video subtypes are one GUID with the format in its first field. Anything not
+// built that way is reported as zero, which ranks as unrecognised.
+quint32 subtypeOf(const GUID& subtype) {
+    const GUID& base = MFVideoFormat_Base;
+    if (subtype.Data2 != base.Data2 || subtype.Data3 != base.Data3
+        || memcmp(subtype.Data4, base.Data4, sizeof(base.Data4)) != 0) {
+        return 0;
     }
+    return subtype.Data1;
+}
 
-    if (best) {
-        reader->SetCurrentMediaType(
-            static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), nullptr, best);
-        safeRelease(best);
+CameraCapture::NativeFormat formatOf(IMFMediaType* type) {
+    CameraCapture::NativeFormat format;
+    if (!type) return format;
+    GUID subtype = GUID_NULL;
+    if (SUCCEEDED(type->GetGUID(MF_MT_SUBTYPE, &subtype))) format.subtype = subtypeOf(subtype);
+    UINT32 w = 0, h = 0;
+    if (SUCCEEDED(MFGetAttributeSize(type, MF_MT_FRAME_SIZE, &w, &h))
+        && w <= UINT32(std::numeric_limits<int>::max())
+        && h <= UINT32(std::numeric_limits<int>::max())) {
+        format.width = int(w);
+        format.height = int(h);
+    }
+    UINT32 num = 0, den = 0;
+    if (SUCCEEDED(MFGetAttributeRatio(type, MF_MT_FRAME_RATE, &num, &den))) {
+        format.rateNumerator = num;
+        format.rateDenominator = den;
+    }
+    return format;
+}
+
+// Everything the camera lists, in the reader's own order: the order the
+// indices from rankNativeFormats refer to.
+QList<CameraCapture::NativeFormat> nativeFormats(IMFSourceReader* reader) {
+    QList<CameraCapture::NativeFormat> formats;
+    for (DWORD i = 0;; ++i) {
+        IMFMediaType* type = nullptr;
+        const HRESULT hr = reader->GetNativeMediaType(kVideoStream, i, &type);
+        if (FAILED(hr) || !type) break;   // MF_E_NO_MORE_TYPES ends the walk
+        formats.append(formatOf(type));
+        safeRelease(type);
+    }
+    return formats;
+}
+
+// What the reader's video processor has to do to make RGB32 of a subtype, in
+// preference order.
+int conversionCost(quint32 subtype) {
+    switch (subtype) {
+    case CameraCapture::kSubtypeRgb32:
+    case 21:   // D3DFMT_A8R8G8B8, MFVideoFormat_ARGB32
+        return 0;   // handed over as it is
+    case 20:   // D3DFMT_R8G8B8, MFVideoFormat_RGB24
+    case CameraCapture::fourcc('N', 'V', '1', '2'):
+    case CameraCapture::fourcc('Y', 'U', 'Y', '2'):
+    case CameraCapture::fourcc('U', 'Y', 'V', 'Y'):
+    case CameraCapture::fourcc('I', '4', '2', '0'):
+    case CameraCapture::fourcc('I', 'Y', 'U', 'V'):
+    case CameraCapture::fourcc('Y', 'V', '1', '2'):
+        return 1;   // a colour conversion
+    case CameraCapture::fourcc('M', 'J', 'P', 'G'):
+        return 2;   // a JPEG decode on every frame, then the conversion
+    default:
+        return 3;   // unrecognised: may need a decoder, or not convert at all
     }
 }
 
 }  // namespace
+
+QList<int> CameraCapture::rankNativeFormats(const QList<NativeFormat>& formats) {
+    constexpr int kMaxWidth  = 1920;
+    constexpr int kMaxHeight = 1080;
+
+    QList<int> ranked;
+    for (int i = 0; i < formats.size(); ++i) {
+        const NativeFormat& f = formats.at(i);
+        if (f.width > 0 && f.height > 0 && f.width <= kMaxWidth && f.height <= kMaxHeight)
+            ranked.append(i);
+    }
+    std::stable_sort(ranked.begin(), ranked.end(), [&formats](int a, int b) {
+        const NativeFormat& x = formats.at(a);
+        const NativeFormat& y = formats.at(b);
+        const qint64 rateX = qRound64(x.frameRate());
+        const qint64 rateY = qRound64(y.frameRate());
+        if (rateX != rateY) return rateX > rateY;
+        const qint64 areaX = qint64(x.width) * x.height;
+        const qint64 areaY = qint64(y.width) * y.height;
+        if (areaX != areaY) return areaX > areaY;
+        return conversionCost(x.subtype) < conversionCost(y.subtype);
+    });
+    return ranked;
+}
+
+QString CameraCapture::describe(const NativeFormat& format) {
+    QString subtype;
+    switch (format.subtype) {
+    case kSubtypeRgb32: subtype = QStringLiteral("RGB32");  break;
+    case 21:            subtype = QStringLiteral("ARGB32"); break;
+    case 20:            subtype = QStringLiteral("RGB24");  break;
+    default: {
+        bool printable = format.subtype != 0;
+        for (int shift = 0; shift < 32 && printable; shift += 8) {
+            const char c = char((format.subtype >> shift) & 0xFF);
+            printable = c >= 0x20 && c < 0x7F;
+        }
+        if (printable) {
+            for (int shift = 0; shift < 32; shift += 8)
+                subtype += QLatin1Char(char((format.subtype >> shift) & 0xFF));
+            subtype = subtype.trimmed();
+        } else {
+            subtype = QStringLiteral("0x%1").arg(format.subtype, 8, 16, QLatin1Char('0'));
+        }
+    }
+    }
+    return QStringLiteral("%1x%2 %3 at %4 fps")
+        .arg(format.width).arg(format.height).arg(subtype)
+        .arg(format.frameRate(), 0, 'f', 2);
+}
 
 void CameraCapture::captureLoop(QString deviceId) {
     // Own COM + MF on this worker thread.
@@ -266,18 +333,29 @@ void CameraCapture::captureLoop(QString deviceId) {
     //
     // A webcam advertises a list, and the first entry is not the best one. An
     // Elgato Facecam offers 960x540, 1280x720 and 1920x1080, each at 30 and at
-    // 60, and taking the default can leave a 60 fps camera running at 30. The
-    // rate is what is chosen for here, since dropped smoothness is what a user
-    // notices; among equal rates the larger frame wins, capped so a capture
-    // card claiming something enormous does not set the canvas cost.
+    // 60 and each as both UYVY and MJPG, and taking the default can leave a
+    // 60 fps camera running at 30, or decoding JPEG when it need not.
+    // rankNativeFormats holds the rule. The format sets size and rate: the
+    // RGB32 request below is a partial type, so the reader's conversion keeps
+    // both as chosen here.
     //
     // Failing to find one is not fatal: leaving the reader alone falls back to
     // exactly the previous behaviour, which worked.
-    selectNativeMediaType(reader);
+    const QList<NativeFormat> offered = nativeFormats(reader);
+    const QList<int> ranked = rankNativeFormats(offered);
+    int chosen = -1;
+    if (!ranked.isEmpty()) {
+        IMFMediaType* best = nullptr;
+        if (SUCCEEDED(reader->GetNativeMediaType(kVideoStream, DWORD(ranked.first()), &best))
+            && best) {
+            if (SUCCEEDED(reader->SetCurrentMediaType(kVideoStream, nullptr, best)))
+                chosen = ranked.first();
+            safeRelease(best);
+        }
+    }
 
     // Request RGB32 (BGRA in memory, matching QImage::Format_RGB32). The
-    // reader converts from whatever native format was chosen above; no camera
-    // here offers RGB32 itself.
+    // reader converts from whatever native format was chosen above.
     IMFMediaType* outType = nullptr;
     MFCreateMediaType(&outType);
     outType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
@@ -308,19 +386,31 @@ void CameraCapture::captureLoop(QString deviceId) {
 
     // What the camera actually agreed to, once. Until now nothing reported the
     // negotiated format, so a camera quietly running at half its advertised
-    // rate looked identical to one running properly.
+    // rate looked identical to one running properly. The native format is the
+    // one the device runs, which is what decides the rate and the cost; the
+    // RGB32 size is what arrives here.
     {
-        UINT32 rateNum = 0, rateDen = 0;
-        IMFMediaType* agreed = nullptr;
-        if (SUCCEEDED(reader->GetCurrentMediaType(
-                static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), &agreed))
-            && agreed) {
-            MFGetAttributeRatio(agreed, MF_MT_FRAME_RATE, &rateNum, &rateDen);
-            safeRelease(agreed);
+        NativeFormat running;
+        if (chosen >= 0) {
+            running = offered.at(chosen);
+        } else {
+            IMFMediaType* native = nullptr;
+            if (SUCCEEDED(reader->GetNativeMediaType(
+                    kVideoStream, DWORD(MF_SOURCE_READER_CURRENT_TYPE_INDEX), &native))
+                && native) {
+                running = formatOf(native);
+                safeRelease(native);
+            }
         }
-        qInfo("camera format: %ux%u @ %.2f fps", width, height,
-              rateDen ? double(rateNum) / double(rateDen) : 0.0);
+        qInfo("camera format: %s (%s of %lld offered), delivered as RGB32 %ux%u",
+              qPrintable(describe(running)),
+              chosen >= 0 ? "chosen" : "device default", qlonglong(offered.size()),
+              width, height);
     }
+
+    // Wall clock since the previous frame, for the CAMERA ARRIVAL stage.
+    // Invalid until the first frame, and only read while profiling.
+    QElapsedTimer sinceArrival;
 
     while (m_running.load()) {
         DWORD streamFlags = 0;
@@ -345,6 +435,16 @@ void CameraCapture::captureLoop(QString deviceId) {
             // Format change or no data yet — avoid a busy spin.
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
             continue;
+        }
+
+        // Every frame the device delivers, before anything decides whether it
+        // is wanted, so the count per second is the rate the camera is really
+        // running at rather than what composition made of it.
+        if (FrameProfile::enabled()) {
+            if (sinceArrival.isValid())
+                FrameProfile::record(FrameProfile::Stage::CameraArrival,
+                                     sinceArrival.nsecsElapsed());
+            sinceArrival.start();
         }
 
         if (!m_delivering.load(std::memory_order_relaxed)) {
@@ -374,20 +474,28 @@ void CameraCapture::captureLoop(QString deviceId) {
                     safeRelease(sample);
                     continue;
                 }
-                QImage frame(reinterpret_cast<const uchar*>(data),
-                             static_cast<int>(width), static_cast<int>(height),
-                             static_cast<int>(qAbs(stride)), QImage::Format_RGB32);
                 // Deep copy before unlocking; flip if the buffer is bottom-up
                 // (rare for RGB32 via the video processor, but handle it).
+                //
+                // Timed as CAPTURE READBACK, the copy into a QImage that the
+                // other backends time too. The reader's conversion to RGB32
+                // happens inside ReadSample and cannot be told apart from
+                // waiting for the frame, so it is not in this figure.
                 QImage out;
-                if (stride < 0) {
+                {
+                    FrameProfile::Scoped timing(FrameProfile::Stage::CaptureReadback);
+                    QImage frame(reinterpret_cast<const uchar*>(data),
+                                 static_cast<int>(width), static_cast<int>(height),
+                                 static_cast<int>(qAbs(stride)), QImage::Format_RGB32);
+                    if (stride < 0) {
 #if QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
-                    out = frame.flipped(Qt::Vertical);
+                        out = frame.flipped(Qt::Vertical);
 #else
-                    out = frame.mirrored(false, true);
+                        out = frame.mirrored(false, true);
 #endif
-                } else {
-                    out = frame.copy();
+                    } else {
+                        out = frame.copy();
+                    }
                 }
                 buffer->Unlock();
                 if (!out.isNull()) {
