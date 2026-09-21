@@ -131,8 +131,16 @@ void PreviewWidget::clearCameraFrame(QString deviceId) {
 }
 
 QImage PreviewWidget::renderCurrentScene() {
-    const QRect r = canvasRect();
-    return r.isEmpty() ? QImage{} : grab(r).toImage();
+    // The composed canvas, which is what is recorded and streamed, and not a
+    // screenshot of this widget. The screenshot was at the dock's size and
+    // carried the editor's own drawing, the border, the selection handles and
+    // the LIVE badge, and a fade blended all of that into the output.
+    if (m_contentSequence.load(std::memory_order_acquire) !=
+            m_composedSequence.load(std::memory_order_acquire)
+        || cachedComposedFrame().isNull()) {
+        composeNow();
+    }
+    return cachedComposedFrame();
 }
 
 void PreviewWidget::beginFadeTransition(QImage from, int durationMs) {

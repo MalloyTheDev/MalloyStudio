@@ -407,6 +407,7 @@ private slots:
     void replayAudioWaitsForTheEncoder();
     void closingDuringAReplaySaveFinishesItFirst();
     void theReplayBufferIsAFrameConsumer();
+    void aFadeStartsFromTheComposedCanvas();
     void spinBoxesAndTextFieldsKeepTheirDigits();
     void editorClipRoundTripPreservesSourceReference();
     void editorLegacyClipLoadsAsUnlinked();
@@ -5861,6 +5862,23 @@ void MalloyModelTests::aMicrophoneThatFailsIsStartedAgain() {
     c.reconcileInputs({});
     QTest::qWait(1200);
     QCOMPARE(workers.size(), 2);
+}
+
+void MalloyModelTests::aFadeStartsFromTheComposedCanvas() {
+    SceneCollection scenes;
+    scenes.addScene(QStringLiteral("Scene"));
+    QVERIFY(scenes.addNewSourceToCurrent(QStringLiteral("Block"), Source::Type::ColorBlock,
+                                         QString(), QColor(200, 30, 30)) != nullptr);
+    scenes.selectCurrentItemAt(0);   // selection handles would be drawn over it
+    PreviewWidget preview(&scenes, PreviewWidget::Role::Program);
+    preview.resize(640, 360);
+
+    // What a fade blends out of is exactly the frame the encoder consumes:
+    // canvas-native, with nothing the editor draws for itself. It was a grab
+    // of the widget, at the widget's size, with the border and the handles.
+    const QImage from = preview.renderCurrentScene();
+    QCOMPARE(from.size(), QSize(MalloyCanvas::Width, MalloyCanvas::Height));
+    QCOMPARE(from, preview.cachedComposedFrame());
 }
 
 void MalloyModelTests::mediaProbesAreRememberedNotRepeated() {
