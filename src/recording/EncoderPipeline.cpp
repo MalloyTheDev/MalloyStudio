@@ -8,6 +8,7 @@
 #include "recording/CancellablePipeIo.h"
 
 #include <QDateTime>
+#include <QDeadlineTimer>
 #include <QEventLoop>
 #include <QFileInfo>
 #include <QImage>
@@ -140,6 +141,29 @@ bool writeFrameToPipe(CancellablePipeIo& pipe, const QImage& frame) {
     return true;
 }
 
+// Waits, with the event loop running, until a pipe writer has exited or the
+// deadline has passed, and says whether it exited. The GUI thread stays
+// responsive for the same reason it does during the wait on ffmpeg in stop().
+bool awaitExit(QThread* writer, const QDeadlineTimer& deadline) {
+    if (!writer->isFinished() && !deadline.hasExpired()) {
+        QEventLoop wait;
+        QTimer poll;
+        QObject::connect(&poll, &QTimer::timeout, &wait, [&] {
+            if (writer->isFinished() || deadline.hasExpired()) wait.quit();
+        });
+        poll.start(5);
+        wait.exec();
+    }
+    return writer->isFinished();
+}
+
+void closePipe(void** pipe) {
+    if (*pipe) {
+        CloseHandle(static_cast<HANDLE>(*pipe));
+        *pipe = nullptr;
+    }
+}
+
 }  // namespace
 
 // Tiny worker that blocks on ConnectNamedPipe so the GUI thread doesn't
@@ -261,6 +285,15 @@ public:
         }
         m_queue.enqueue(pcm);
         m_wake.wakeOne();
+    }
+
+    // Accepts nothing more and exits once everything already queued has been
+    // written. Nothing is cancelled, so this can only end as quickly as the
+    // reader reads; requestStop is what bounds it.
+    void finish() {
+        QMutexLocker lock(&m_mutex);
+        m_stopping = true;
+        m_wake.wakeAll();
     }
 
     // Stop cancels current and future I/O, including before run() starts.
@@ -406,6 +439,13 @@ public:
     // completed write of real media, so PIPE WRITE owes it; it never passed
     // through the bounded admission this class offers, so ENC ACCEPT does not.
     int framesWritten() const { return m_written.load(std::memory_order_relaxed); }
+
+    // As AudioPipeWriter::finish: write what was accepted, then exit.
+    void finish() {
+        QMutexLocker lock(&m_mutex);
+        m_stopping = true;
+        m_wake.wakeAll();
+    }
 
     void requestStop() {
         m_io.requestStop();
@@ -901,46 +941,52 @@ void EncoderPipeline::stop() {
 
     if (m_audio) disconnect(m_audio, nullptr, this, nullptr);
 
-    // The acceptors retire first, and for a sharper reason than tidiness. One
-    // may be blocked in ConnectNamedPipe waiting for an ffmpeg that died during
-    // argument parsing, or part way through the priming write. DisconnectNamedPipe
-    // below would then wait on that write while the write waits for a reader:
-    // a deadlock, which is why every pipe worker's I/O is cancellable (see
-    // CancellablePipeIo).
-    // Cancelling their I/O is what makes these joins bounded, and joining them
-    // is what stops cleanup() closing a handle another thread is blocked on.
-    retirePipeWorkers();
+    // What was accepted before Stop belongs to the recording: the last frames
+    // handed over and the last moments of sound. Each side's writer gets to
+    // deliver what it holds, within one shared budget, before its I/O is
+    // cancelled and its pipe closed.
+    //
+    // Video goes first. ffmpeg holds back an input that runs ahead of the
+    // others, and audio that is ahead when Stop arrives is not read until the
+    // video input ends; draining it while the video pipe is still open would
+    // wait on a reader that is waiting on this.
+    //
+    // Retiring a side also retires its acceptor, which may still be blocked in
+    // ConnectNamedPipe for an ffmpeg that died during argument parsing, or part
+    // way through the priming write. Every pipe worker's I/O is cancellable
+    // (see CancellablePipeIo), which is what makes these joins bounded, and
+    // joining is what makes closing the handle afterwards safe.
+    //
+    // Closing, not disconnecting: DisconnectNamedPipe discards whatever the
+    // reader has not yet taken out of the pipe's buffer, up to a megabyte of
+    // sound or a whole frame of picture, while closing the handle alone leaves
+    // it to be read and then reports a clean end of file.
+    //
+    // FlushFileBuffers is deliberately not called. On a named pipe it blocks
+    // until the reader has taken everything, and an ffmpeg that has stopped
+    // reading would hang the GUI thread; the drain is the bounded form of the
+    // same wait.
+    const QDeadlineTimer drainBudget(kStopDrainMs);
+    if (m_videoWriter) {
+        m_videoWriter->finish();
+        if (!awaitExit(m_videoWriter, drainBudget))
+            qWarning("video pipe writer had not finished when the stop budget ran out; "
+                     "the frames it still held are discarded");
+    }
+    retireVideoWorkers();
+    closePipe(&m_videoPipe);
+    if (m_audioWriter) {
+        m_audioWriter->finish();
+        if (!awaitExit(m_audioWriter, drainBudget))
+            qWarning("audio pipe writer had not finished when the stop budget ran out; "
+                     "the sound it still held is discarded");
+    }
+    retireAudioWorkers();
+    closePipe(&m_audioPipe);
 
     // Neither media input uses stdin. Close the unused control channel too.
     if (m_ffmpeg && m_ffmpeg->state() == QProcess::Running) {
         m_ffmpeg->closeWriteChannel();
-    }
-
-    // Disconnect the audio pipe so ffmpeg sees EOF on the audio side too.
-    //
-    // We deliberately DO NOT call FlushFileBuffers here. On a named pipe
-    // FlushFileBuffers blocks until the *client* (ffmpeg) reads everything
-    // the server has queued — but if ffmpeg has already started tearing down
-    // its audio decoder during shutdown, it stops reading and the flush
-    // never returns, hanging the GUI thread indefinitely.
-    // Order matters. The writer may be blocked inside WriteFile waiting for a
-    // reader that is already shutting down, so ask it to stop, then break the
-    // pipe to make that call return, and only then join. Joining first hangs
-    // the GUI thread, which is the same failure this whole path exists to
-    // avoid and is why FlushFileBuffers is not called here either.
-    // Retire the writer completely before touching the pipe. Cancelling its
-    // in-flight write is what makes this join bounded; disconnecting first
-    // hangs, because the disconnect waits on the very write it would free.
-    // The video transport retires the same way and for the same reason: ask it
-    // to finish, cancel the write it may be blocked inside, then join with a
-    // bound. Frames still queued are abandoned deliberately rather than
-    // drained, because stopping should not wait on an encoder that has already
-    // stopped reading.
-    if (m_audioPipe) {
-        DisconnectNamedPipe(static_cast<HANDLE>(m_audioPipe));
-    }
-    if (m_videoPipe) {
-        DisconnectNamedPipe(static_cast<HANDLE>(m_videoPipe));
     }
 
     // Wait up to 5 s for ffmpeg to finalise the file, but keep the Qt event
@@ -1004,28 +1050,36 @@ void EncoderPipeline::stop() {
 }
 
 void EncoderPipeline::retirePipeWorkers() {
-    // Signal every worker before joining any of them. No pipe is disconnected
-    // or closed until all outstanding I/O has completed or been cancelled.
+    retireVideoWorkers();
+    retireAudioWorkers();
+}
+
+// Each side signals both of its workers before joining either. No pipe is
+// closed until all outstanding I/O on it has completed or been cancelled.
+void EncoderPipeline::retireVideoWorkers() {
     if (m_videoAcceptor) m_videoAcceptor->requestStop();
-    if (m_pipeAcceptor) m_pipeAcceptor->requestStop();
     if (m_videoWriter) m_videoWriter->requestStop();
-    if (m_audioWriter) m_audioWriter->requestStop();
     if (m_videoAcceptor) {
         m_videoAcceptor->wait();
         if (!m_videoWriter) m_framesPiped = m_videoAcceptor->framesWritten();
         delete m_videoAcceptor;
         m_videoAcceptor = nullptr;
     }
-    if (m_pipeAcceptor) {
-        m_pipeAcceptor->wait();
-        delete m_pipeAcceptor;
-        m_pipeAcceptor = nullptr;
-    }
     if (m_videoWriter) {
         m_videoWriter->wait();
         m_framesPiped = m_videoWriter->framesWritten();
         delete m_videoWriter;
         m_videoWriter = nullptr;
+    }
+}
+
+void EncoderPipeline::retireAudioWorkers() {
+    if (m_pipeAcceptor) m_pipeAcceptor->requestStop();
+    if (m_audioWriter) m_audioWriter->requestStop();
+    if (m_pipeAcceptor) {
+        m_pipeAcceptor->wait();
+        delete m_pipeAcceptor;
+        m_pipeAcceptor = nullptr;
     }
     if (m_audioWriter) {
         m_audioWriter->wait();

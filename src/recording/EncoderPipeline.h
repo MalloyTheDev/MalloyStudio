@@ -222,8 +222,15 @@ private slots:
     void onFfmpegStderrReady();
 
 private:
+    // How long Stop waits for the pipe writers to deliver what they already
+    // hold before cancelling them. Normally a few milliseconds; the bound is
+    // for an encoder that has stopped reading.
+    static constexpr int kStopDrainMs = 1000;
+
     void cleanup();
     void retirePipeWorkers();
+    void retireVideoWorkers();
+    void retireAudioWorkers();
     bool writeAudioBytes(const QByteArray& pcm);
     void appendStderrTail(const QString& chunk);
     void parseProgressLine(QStringView line);

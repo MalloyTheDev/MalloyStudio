@@ -217,6 +217,7 @@ private slots:
     void controllerCanReplacePipelineFromFinishedSignal();
     void aRecordingOfAStillSceneKeepsItsLengthAndAudio();
     void aRecordingKeepsItsColours();
+    void stoppingKeepsTheSoundAlreadyHandedOver();
     void killingAProcessEndsWhatItStarted();
     void audioControllerHasDefaultLoopbackInput();
     void audioControllerPersistsVolumeAndMute();
@@ -955,6 +956,46 @@ void MalloyModelTests::aRecordingKeepsItsColours() {
                  qPrintable(QStringLiteral("%1 came back as (%2, %3, %4)")
                                 .arg(source.name()).arg(r).arg(g).arg(b)));
     }
+}
+
+void MalloyModelTests::stoppingKeepsTheSoundAlreadyHandedOver() {
+    RecorderPipeline pipeline;
+    if (!pipeline.ffmpegAvailable()) QSKIP("Real encoder lifecycle requires ffmpeg in PATH");
+    const QString ffprobe = QStandardPaths::findExecutable(QStringLiteral("ffprobe"));
+    if (ffprobe.isEmpty()) QSKIP("ffprobe is needed to measure the result");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    RecordingTestFrames frames;
+    RecordingTestAudio audio;
+    EncoderPipeline::Target target;
+    target.output = recordingTestSettings();
+    target.destination = dir.filePath(QStringLiteral("tail.mp4"));
+    QString error;
+
+    QVERIFY2(pipeline.start(target, &frames, &audio, &error), qPrintable(error));
+    QTest::qWait(1500);
+
+    // Seven seconds of sound handed over in the instant before Stop. That is
+    // more than the audio pipe's megabyte of buffer, so part of it is still in
+    // the writer's queue when Stop arrives; and it runs ahead of the picture,
+    // so ffmpeg does not read any of it until the video input has ended.
+    for (int i = 0; i < 7 * 50; ++i) emit audio.pcmReady(QByteArray(3840, '\0'));
+    QCoreApplication::processEvents();
+    pipeline.stop();
+
+    // All of it is in the file: the sound runs seven seconds past the picture,
+    // less ffmpeg's start-up before it opened the audio pipe (0.2 to 0.6 s; see
+    // aRecordingOfAStillSceneKeepsItsLengthAndAudio). Discarding the writer's
+    // queue at Stop loses about a second and a half of it; so does draining
+    // the sound before the video pipe is closed, which waits out the budget on
+    // a reader that is holding the sound back; and disconnecting the pipe
+    // rather than closing it loses what was in the pipe's buffer.
+    const double video = streamSeconds(ffprobe, target.destination, QStringLiteral("v:0"));
+    const double sound = streamSeconds(ffprobe, target.destination, QStringLiteral("a:0"));
+    qInfo("stop tail: video %.2f s, audio %.2f s", video, sound);
+    QVERIFY2(video > 0.5, qPrintable(QStringLiteral("video %1 s").arg(video)));
+    QVERIFY2(sound - video > 6.0,
+             qPrintable(QStringLiteral("audio %1 s, video %2 s").arg(sound).arg(video)));
 }
 
 void MalloyModelTests::killingAProcessEndsWhatItStarted() {
