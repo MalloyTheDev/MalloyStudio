@@ -199,7 +199,15 @@ void DxgiCapture::run() {
             emit captureError(QStringLiteral("Access lost — monitor config changed"));
             break;
         }
-        if (FAILED(hr)) break;
+        if (FAILED(hr)) {
+            // A driver reset or a removed device. Said, so the controller stops
+            // the session and tries again; ending in silence left the source
+            // frozen on its last frame, still marked live, with nothing to
+            // bring it back.
+            emit captureError(QStringLiteral("AcquireNextFrame failed: 0x%1")
+                                  .arg(static_cast<quint32>(hr), 8, 16, QLatin1Char('0')));
+            break;
+        }
 
         // Only copy when a new desktop frame was actually presented, and only
         // when the result has somewhere to go.
