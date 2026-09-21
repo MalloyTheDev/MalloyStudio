@@ -1,5 +1,6 @@
 #include "project/MediaRegistry.h"
 #include "project/ByteSize.h"
+#include "platform/OffThread.h"
 #include "platform/ProcessTree.h"
 
 #include <QDir>
@@ -98,11 +99,6 @@ MediaRegistry::MediaRegistry(QObject* parent) : QObject(parent) {
     connect(m_coalesce, &QTimer::timeout, this, &MediaRegistry::changed);
 
     loadDirs();
-    for (auto loc : {QStandardPaths::MoviesLocation, QStandardPaths::PicturesLocation,
-                     QStandardPaths::MusicLocation}) {
-        const QString d = QStandardPaths::writableLocation(loc);
-        if (!d.isEmpty() && !m_dirs.contains(d)) m_dirs << d;
-    }
     loadProbeCache();
     // The first scan waits for the event loop rather than running inside the
     // constructor: it walks folders and starts probing, which is no part of
@@ -201,8 +197,7 @@ void MediaRegistry::saveProbeCache() const {
     // Only what the current scan holds, so the cache is bounded by the folders
     // being indexed rather than growing with every file ever seen.
     QJsonArray entries;
-    for (const MediaInfo& m : m_media) {
-        const QString key = QFileInfo(m.filePath).canonicalFilePath();
+    for (const QString& key : m_canonical) {
         const auto it = m_probeCache.constFind(key);
         if (it == m_probeCache.constEnd()) continue;
         entries.append(QJsonObject{
@@ -244,16 +239,53 @@ void MediaRegistry::setSearchDirs(const QStringList& dirs) {
 }
 
 void MediaRegistry::addSearchDir(const QString& dir) {
-    if (dir.isEmpty() || m_dirs.contains(dir)) { rescan(); return; }
-    m_dirs << dir;
+    if (dir.isEmpty()) return;
+    if (!m_dirs.contains(dir)) {
+        m_dirs << dir;
+        if (m_persist) saveDirs();
+    }
+    // Only this folder, where a recording was just saved. The others have not
+    // changed because of it, and one of them may be a share that takes a long
+    // time to answer.
+    scanFolders({dir});
+}
+
+void MediaRegistry::removeSearchDir(const QString& dir) {
+    if (m_dirs.removeAll(dir) == 0) return;
     if (m_persist) saveDirs();
-    rescan();
+    m_scans.remove(dir);
+    m_again.remove(dir);
+    rebuild();
+}
+
+QStringList MediaRegistry::unavailableDirs() const {
+    QStringList dirs;
+    for (const QString& dir : m_dirs) {
+        const auto it = m_scans.constFind(dir);
+        if (it != m_scans.constEnd() && !it->available) dirs << dir;
+    }
+    return dirs;
+}
+
+void MediaRegistry::setFolderScanHookForTesting(std::function<void(const QString&)> hook) {
+    m_scanHook = std::move(hook);
 }
 
 void MediaRegistry::loadDirs() {
     if (!m_persist) return;
     QSettings s;
-    m_dirs = s.value(QStringLiteral("media/searchDirs")).toStringList();
+    const QString key = QStringLiteral("media/searchDirs");
+    // A saved list is the user's own, defaults included, so a default folder
+    // they removed stays removed. Without one, common locations seed it.
+    if (s.contains(key)) {
+        m_dirs = s.value(key).toStringList();
+        return;
+    }
+    for (auto loc : {QStandardPaths::MoviesLocation, QStandardPaths::PicturesLocation,
+                     QStandardPaths::MusicLocation}) {
+        const QString d = QStandardPaths::writableLocation(loc);
+        if (!d.isEmpty() && !m_dirs.contains(d)) m_dirs << d;
+    }
 }
 
 void MediaRegistry::saveDirs() const {
@@ -269,41 +301,108 @@ int MediaRegistry::countOfKind(MediaInfo::Kind kind) const {
 
 void MediaRegistry::rescan() {
     m_scanned = true;
-    m_media.clear();
+    // Answers for folders no longer searched go now, rather than lingering
+    // until they would have been replaced.
+    bool dropped = false;
+    for (auto it = m_scans.begin(); it != m_scans.end();) {
+        if (m_dirs.contains(it.key())) {
+            ++it;
+        } else {
+            it = m_scans.erase(it);
+            dropped = true;
+        }
+    }
+    if (dropped) rebuild();
+    scanFolders(m_dirs);
+}
+
+void MediaRegistry::scanFolders(const QStringList& dirs) {
+    for (const QString& dir : dirs) {
+        if (m_inFlight.contains(dir)) {
+            m_again.insert(dir);
+            continue;
+        }
+        m_inFlight.insert(dir);
+        OffThread::run(this,
+            [dir, hook = m_scanHook] {
+                if (hook) hook(dir);
+                return scanFolder(dir);
+            },
+            [this, dir](const FolderScan& scan) { folderScanned(dir, scan); });
+    }
+}
+
+void MediaRegistry::folderScanned(const QString& dir, const FolderScan& scan) {
+    m_inFlight.remove(dir);
+    const bool searched = m_dirs.contains(dir);   // it may have been removed meanwhile
+    if (searched) m_scans.insert(dir, scan);
+    if (m_again.remove(dir) && searched) scanFolders({dir});
+    if (searched) rebuild();
+}
+
+MediaRegistry::FolderScan MediaRegistry::scanFolder(const QString& dir) {
+    FolderScan scan;
+    const QDir d(dir);
+    // On a share that has gone away, this is the call that waits.
+    if (dir.isEmpty() || !d.exists()) return scan;
+    scan.available = true;
 
     QStringList filters;
     for (const QStringList* set : {&videoExts(), &audioExts(), &imageExts()})
         for (const QString& e : *set) filters << QStringLiteral("*.%1").arg(e);
 
+    const auto entries = d.entryInfoList(filters, QDir::Files, QDir::Time);
+    for (const QFileInfo& fi : entries) {
+        FolderScan::Found f;
+        f.canonicalPath = fi.canonicalFilePath();
+        if (f.canonicalPath.isEmpty()) continue;
+        MediaInfo& m = f.info;
+        m.filePath  = fi.absoluteFilePath();
+        m.name      = fi.fileName();
+        m.ext       = fi.suffix().toLower();
+        m.kind      = MediaInfo::kindForExt(m.ext);
+        m.sizeBytes = fi.size();
+        m.modified  = fi.lastModified();
+        f.cloudOnly = isCloudOnly(f.canonicalPath);
+        scan.found.push_back(f);
+    }
+    return scan;
+}
+
+void MediaRegistry::rebuild() {
+    // One file reached through two folders (a junction, or a mapped drive and
+    // its UNC path) is listed once.
     QSet<QString> seen;
+    QVector<FolderScan::Found> rows;
     for (const QString& dir : m_dirs) {
-        QDir d(dir);
-        const auto entries = d.entryInfoList(filters, QDir::Files, QDir::Time);
-        for (const QFileInfo& fi : entries) {
-            const QString canon = fi.canonicalFilePath();
-            if (canon.isEmpty() || seen.contains(canon)) continue;
-            seen.insert(canon);
-            MediaInfo m;
-            m.filePath  = fi.absoluteFilePath();
-            m.name      = fi.fileName();
-            m.ext       = fi.suffix().toLower();
-            m.kind      = MediaInfo::kindForExt(m.ext);
-            m.sizeBytes = fi.size();
-            m.modified  = fi.lastModified();
-            const auto cached = m_probeCache.constFind(canon);
+        const auto it = m_scans.constFind(dir);
+        if (it == m_scans.constEnd()) continue;
+        for (const FolderScan::Found& f : it->found) {
+            if (seen.contains(f.canonicalPath)) continue;
+            seen.insert(f.canonicalPath);
+            FolderScan::Found row = f;
+            MediaInfo& m = row.info;
+            const auto cached = m_probeCache.constFind(f.canonicalPath);
             if (cached != m_probeCache.constEnd() && cached->sizeBytes == m.sizeBytes
                 && cached->modified == m.modified) {
                 m.durationSecs = cached->durationSecs;
                 m.resolution   = cached->resolution;
                 m.probed       = true;
-            } else if (isCloudOnly(canon)) {
+            } else if (f.cloudOnly) {
                 m.probed = true;   // listed, never opened; see isCloudOnly
             }
-            m_media.push_back(m);
+            rows.push_back(row);
         }
     }
-    std::sort(m_media.begin(), m_media.end(),
-              [](const MediaInfo& a, const MediaInfo& b) { return a.modified > b.modified; });
+    std::sort(rows.begin(), rows.end(), [](const FolderScan::Found& a, const FolderScan::Found& b) {
+        return a.info.modified > b.info.modified;
+    });
+    m_media.clear();
+    m_canonical.clear();
+    for (const FolderScan::Found& row : rows) {
+        m_media.push_back(row.info);
+        m_canonical.push_back(row.canonicalPath);
+    }
     emit changed();
 
     // Kick off async metadata probing for this scan generation. Stop any
@@ -322,7 +421,7 @@ void MediaRegistry::finishProbe(int generation, int idx) {
         m.probed = true;   // even on failure: don't retry
         // Failures are remembered too, so a file ffprobe cannot read is not
         // opened again at every launch.
-        const QString key = QFileInfo(m.filePath).canonicalFilePath();
+        const QString key = m_canonical.value(idx);
         if (!key.isEmpty()) {
             m_probeCache.insert(key, ProbeRecord{m.sizeBytes, m.modified, m.durationSecs, m.resolution});
             m_probeCacheDirty = true;

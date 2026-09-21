@@ -9,11 +9,13 @@
 #include "recording/RenderQueue.h"
 
 #include <QComboBox>
+#include <QDir>
 #include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QScrollArea>
@@ -69,6 +71,43 @@ QPushButton* ghost(const QString& text, const QString& icon = QString()) {
                              : new QPushButton(Icons::icon(icon, Theme::TextDim, 12), QStringLiteral(" ") + text);
     Theme::setVariant(b, QStringLiteral("ghost"));
     return b;
+}
+
+// The folders a library is gathered from. One the last scan could not reach
+// (a network share that is offline, a drive that is unplugged) is counted on
+// the button and marked in its menu, and any folder can be removed there, so
+// a share that has gone for good stops being looked for.
+template <typename Registry>
+QPushButton* foldersButton(Registry* registry) {
+    auto* button = ghost(QObject::tr("Folders"), QStringLiteral("folder"));
+    auto* menu = new QMenu(button);
+    button->setMenu(menu);
+    QObject::connect(menu, &QMenu::aboutToShow, menu, [registry, menu] {
+        // Rebuilt at each opening, from the folders as they are now. The
+        // submenus are its children, which clear() alone would leave behind.
+        qDeleteAll(menu->findChildren<QMenu*>(Qt::FindDirectChildrenOnly));
+        menu->clear();
+        const QStringList unavailable = registry->unavailableDirs();
+        for (const QString& dir : registry->searchDirs()) {
+            QString label = QDir::toNativeSeparators(dir);
+            if (unavailable.contains(dir)) label += QObject::tr("  (unavailable)");
+            QMenu* folder = menu->addMenu(label);
+            folder->addAction(QObject::tr("Remove from library"), menu,
+                              [registry, dir] { registry->removeSearchDir(dir); });
+        }
+        if (!menu->isEmpty()) menu->addSeparator();
+        menu->addAction(QObject::tr("Look in these folders again"), menu,
+                        [registry] { registry->rescan(); });
+    });
+    auto refresh = [registry, button] {
+        const int missing = registry->unavailableDirs().size();
+        button->setText(missing > 0
+                            ? QObject::tr(" Folders · %n unavailable", nullptr, missing)
+                            : QObject::tr(" Folders"));
+    };
+    QObject::connect(registry, &Registry::changed, button, refresh);
+    refresh();
+    return button;
 }
 
 } // namespace
@@ -255,6 +294,7 @@ MediaWorkspace::MediaWorkspace(MediaRegistry* registry, QWidget* parent)
     m_countLabel = lbl(QString(), QStringLiteral("mute"), 11, false, true);
     tb->addWidget(m_countLabel);
     tb->addStretch();
+    if (m_registry) tb->addWidget(foldersButton(m_registry));
     tb->addWidget(new QPushButton(Icons::icon(QStringLiteral("upload"), Theme::Text, 12), tr(" Import")));
     mv->addWidget(toolbar);
     auto* div = new QFrame; div->setObjectName(QStringLiteral("divider")); div->setFixedHeight(1);
@@ -360,6 +400,7 @@ ProjectsWorkspace::ProjectsWorkspace(ProjectRegistry* registry, QWidget* parent)
     m_countLabel = lbl(QString(), QStringLiteral("mute"), 11, false, true);
     tb->addWidget(m_countLabel);
     tb->addStretch();
+    if (m_registry) tb->addWidget(foldersButton(m_registry));
     auto* neu = new QPushButton(Icons::icon(QStringLiteral("plus"), Theme::BgBase, 12), tr(" New project"));
     Theme::setVariant(neu, QStringLiteral("primary"));
     connect(neu, &QPushButton::clicked, this, &ProjectsWorkspace::newRequested);

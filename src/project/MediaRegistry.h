@@ -5,13 +5,22 @@
 // gives size/type/modified immediately; duration + resolution are filled in
 // asynchronously via ffprobe (one subprocess per file), so the table stays
 // responsive and degrades gracefully when ffprobe isn't installed.
+//
+// The folders themselves are listed off the GUI thread, each on its own, and
+// changed() follows each answer. A folder can be on a network share that has
+// gone away, where listing it waits for the redirector's timeout; that folder
+// then answers late or as unavailable, and holds up neither the window nor the
+// other folders.
 
 #include <QDateTime>
 #include <QHash>
 #include <QObject>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 #include <QVector>
+
+#include <functional>
 
 class QProcess;
 class QTimer;
@@ -45,14 +54,19 @@ public:
     ~MediaRegistry() override;
 
     void setSearchDirs(const QStringList& dirs);   // tests: settings-free
-    void addSearchDir(const QString& dir);         // persists + rescans
+    void addSearchDir(const QString& dir);         // persists; lists that folder again
+    void removeSearchDir(const QString& dir);      // persists; its files leave at once
     QStringList searchDirs() const { return m_dirs; }
+    // Folders whose latest listing found them missing or unreachable. They
+    // contribute nothing until a later listing finds them.
+    QStringList unavailableDirs() const;
 
     const QVector<MediaInfo>& media() const { return m_media; }
     int count() const { return m_media.size(); }
     int countOfKind(MediaInfo::Kind kind) const;
 
-    void rescan();
+    void rescan();                                 // every folder, off the GUI thread
+    bool scanning() const { return !m_inFlight.isEmpty(); }
 
     // Whether a file's data is somewhere else and reading it would fetch it:
     // a OneDrive or other cloud placeholder, or a file marked offline. Such a
@@ -77,12 +91,28 @@ public:
     // Where probe results are kept between launches.
     void setProbeCachePathForTesting(const QString& path);
     int  probesStarted() const { return m_probesStarted; }
-    bool probing() const { return m_proc != nullptr; }
+    // A folder listing or a probe is still under way: the list can change.
+    bool probing() const { return m_proc != nullptr || scanning(); }
+    // Called on the listing thread with each folder, just before it is listed.
+    void setFolderScanHookForTesting(std::function<void(const QString&)> hook);
 
 signals:
     void changed();
 
 private:
+    struct FolderScan {
+        struct Found {
+            QString   canonicalPath;
+            MediaInfo info;
+            bool      cloudOnly = false;
+        };
+        bool           available = false;
+        QVector<Found> found;
+    };
+    static FolderScan scanFolder(const QString& dir);   // runs off the GUI thread
+    void scanFolders(const QStringList& dirs);
+    void folderScanned(const QString& dir, const FolderScan& scan);
+    void rebuild();   // m_media from the folders' answers; restarts probing
     void loadDirs();
     void saveDirs() const;
     void probeNext(int generation);   // async ffprobe walk
@@ -95,6 +125,16 @@ private:
 
     QStringList m_dirs;
     QVector<MediaInfo> m_media;
+    // Canonical path of each entry of m_media, found while listing so the GUI
+    // thread never has to ask the file system for it.
+    QVector<QString> m_canonical;
+    QHash<QString, FolderScan> m_scans;   // latest answer for each folder
+    // One listing per folder at a time. A folder asked for again while its
+    // listing is out is listed once more when that answers, so a stalled share
+    // collects one waiting thread rather than one per recording.
+    QSet<QString> m_inFlight;
+    QSet<QString> m_again;
+    std::function<void(const QString&)> m_scanHook;
     bool m_persist = true;
 
     // Absolute path to ffprobe, empty when it was not found. Resolved once at

@@ -11,6 +11,7 @@
 #include "capture/WasapiCapture.h"
 #include "capture/WorkerRetirement.h"
 #include "platform/FrameProfile.h"
+#include "platform/OffThread.h"
 #include "ui/PreviewWidget.h"
 #include "ui/InspectorPanel.h"
 #include "ui/AudioMixerPanel.h"
@@ -386,6 +387,18 @@ private slots:
     // bounded before it is narrowed to int.
     void anOversizedProjectIsRefusedUnread();
     void probeOutputIsBoundedBeforeItIsNarrowed();
+    // Blocking work handed to another thread answers on the caller's thread,
+    // and not at all once the caller is gone.
+    void offThreadWorkAnswersOnTheCallersThread();
+    // Folders are listed off the GUI thread. One that stalls, as a vanished
+    // network share does, holds up neither the window nor the other folders,
+    // and collects one waiting listing rather than one per request.
+    void aStalledFolderHoldsUpNothingElse();
+    // A folder that is missing or unreachable is reported and contributes
+    // nothing; any folder can be removed, and a removed default stays removed.
+    void unavailableFoldersAreReportedAndCanBeRemoved();
+    // Saving a project or a recording lists that one folder again.
+    void savingIntoAFolderListsOnlyThatFolder();
     // Recent recordings: the dashboard panel lists real capture files, so the
     // scan must filter by extension, order newest first, honour the limit and
     // tolerate a missing folder.
@@ -3484,6 +3497,7 @@ void MalloyModelTests::projectRegistryScansMalloyFiles() {
 
     ProjectRegistry reg;
     reg.setSearchDirs({dir.path()});
+    QTRY_VERIFY(!reg.scanning());
     QCOMPARE(reg.count(), 2);
 
     QStringList names;
@@ -3518,6 +3532,7 @@ void MalloyModelTests::mediaRegistryClassifiesByExtension() {
     reg.setProbeCachePathForTesting(dir.filePath(QStringLiteral("probe-cache.json")));
     reg.setProbeCommandForTesting(QString(), {}, 0);   // no ffprobe; not what this tests
     reg.setSearchDirs({dir.path()});
+    QTRY_VERIFY(!reg.probing());
     QCOMPARE(reg.count(), 3);
     QCOMPARE(reg.countOfKind(MediaInfo::Video), 1);
     QCOMPARE(reg.countOfKind(MediaInfo::Audio), 1);
@@ -3541,8 +3556,7 @@ void MalloyModelTests::librarySidebarsFollowTheirRegistries() {
         return QString();
     };
 
-    ClipsRegistry clips;
-    clips.setStorePath(dir.filePath(QStringLiteral("clips.json")));
+    ClipsRegistry clips(dir.filePath(QStringLiteral("clips.json")));
     ClipsWorkspace clipsView(&clips);
     QCOMPARE(countBeside(&clipsView, QStringLiteral("All clips")), QStringLiteral("0"));
     ClipInfo saved;
@@ -3571,14 +3585,16 @@ void MalloyModelTests::librarySidebarsFollowTheirRegistries() {
     media.setProbeCommandForTesting(dir.filePath(QStringLiteral("no-such-prober.exe")), {}, 10000);
     MediaWorkspace mediaView(&media);
     QCOMPARE(countBeside(&mediaView, QStringLiteral("All media")), QStringLiteral("0"));
+    // Folders are listed off the GUI thread, so the counts follow once the
+    // listing has answered.
     media.setSearchDirs({movies});
-    QCOMPARE(countBeside(&mediaView, QStringLiteral("All media")), QStringLiteral("3"));
+    QTRY_COMPARE(countBeside(&mediaView, QStringLiteral("All media")), QStringLiteral("3"));
     QCOMPARE(countBeside(&mediaView, QStringLiteral("Video")), QStringLiteral("1"));
     QCOMPARE(countBeside(&mediaView, QStringLiteral("Audio")), QStringLiteral("1"));
     QCOMPARE(countBeside(&mediaView, QStringLiteral("Image")), QStringLiteral("1"));
     // A finished recording adds its folder.
     media.addSearchDir(recordings);
-    QCOMPARE(countBeside(&mediaView, QStringLiteral("All media")), QStringLiteral("4"));
+    QTRY_COMPARE(countBeside(&mediaView, QStringLiteral("All media")), QStringLiteral("4"));
     QCOMPARE(countBeside(&mediaView, QStringLiteral("Video")), QStringLiteral("2"));
     QTRY_VERIFY(!media.probing());
 }
@@ -3824,8 +3840,10 @@ void MalloyModelTests::registriesDegradeGracefullyOnBadInput() {
     {
         ProjectRegistry reg;
         reg.setSearchDirs({dir.filePath(QStringLiteral("nope_projects"))});
+        QTRY_VERIFY(!reg.scanning());
         QCOMPARE(reg.count(), 0);
         reg.setSearchDirs({});
+        QTRY_VERIFY(!reg.scanning());
         QCOMPARE(reg.count(), 0);
     }
 
@@ -3837,8 +3855,10 @@ void MalloyModelTests::registriesDegradeGracefullyOnBadInput() {
         reg.setProbeCachePathForTesting(dir.filePath(QStringLiteral("probe-cache.json")));
         reg.setProbeCommandForTesting(QString(), {}, 0);
         reg.setSearchDirs({emptyDir});
+        QTRY_VERIFY(!reg.probing());
         QCOMPARE(reg.count(), 0);
         reg.setSearchDirs({dir.filePath(QStringLiteral("nonexistent_media"))});
+        QTRY_VERIFY(!reg.probing());
         QCOMPARE(reg.count(), 0);
     }
 }
@@ -3964,6 +3984,280 @@ void MalloyModelTests::probeOutputIsBoundedBeforeItIsNarrowed() {
     const MediaRegistry::ProbeReport garbage = MediaRegistry::parseProbeOutput("not json");
     QCOMPARE(garbage.durationSecs, 0);
     QVERIFY(garbage.resolution.isEmpty());
+}
+
+void MalloyModelTests::offThreadWorkAnswersOnTheCallersThread() {
+    QObject context;
+    std::atomic<QThread*> worker{nullptr};
+    QThread* answeredOn = nullptr;
+    int answer = 0;
+    OffThread::run(&context, [&worker] {
+        worker = QThread::currentThread();
+        return 42;
+    }, [&](int value) {
+        answeredOn = QThread::currentThread();
+        answer = value;
+    });
+    QCOMPARE(answer, 0);   // the answer is posted, never given inline
+    QTRY_COMPARE(answer, 42);
+    QVERIFY(worker.load() != nullptr);
+    QVERIFY(worker.load() != QThread::currentThread());
+    QCOMPARE(answeredOn, QThread::currentThread());
+
+    // Work that outlives its context is dropped, not delivered to an object
+    // that no longer exists.
+    auto started = std::make_shared<QSemaphore>();
+    auto release = std::make_shared<QSemaphore>();
+    auto finished = std::make_shared<QSemaphore>();
+    bool delivered = false;
+    {
+        QObject gone;
+        OffThread::run(&gone, [started, release, finished] {
+            started->release();
+            release->tryAcquire(1, 5000);
+            finished->release();
+            return 1;
+        }, [&delivered](int) { delivered = true; });
+        QVERIFY(started->tryAcquire(1, 5000));
+    }
+    release->release();
+    QVERIFY(finished->tryAcquire(1, 5000));
+    QTest::qWait(100);   // room for a queued answer to arrive, were one sent
+    QVERIFY(!delivered);
+}
+
+namespace {
+// Stands in for a folder on a network share that has gone away: listing it
+// blocks until the test lets it go, as a real one blocks until the
+// redirector's timeout. Every listing is recorded, with whether any ran on the
+// GUI thread.
+struct FolderGate {
+    QString    stalled;
+    QThread*   gui = QThread::currentThread();
+    QSemaphore open;
+    QMutex     mutex;
+    QStringList listed;
+    bool       listedOnGuiThread = false;
+
+    QStringList listings() {
+        QMutexLocker lock(&mutex);
+        return listed;
+    }
+    void forget() {
+        QMutexLocker lock(&mutex);
+        listed.clear();
+    }
+};
+
+std::function<void(const QString&)> gateHook(const std::shared_ptr<FolderGate>& gate) {
+    return [gate](const QString& folder) {
+        {
+            QMutexLocker lock(&gate->mutex);
+            gate->listed << folder;
+            if (QThread::currentThread() == gate->gui) gate->listedOnGuiThread = true;
+        }
+        // Bounded, so a failing test cannot leave a thread blocked for good.
+        if (folder == gate->stalled) gate->open.tryAcquire(1, 5000);
+    };
+}
+
+bool writeSmallFile(const QString& path, const QByteArray& content = "x") {
+    QFile f(path);
+    return f.open(QIODevice::WriteOnly) && f.write(content) == content.size();
+}
+} // namespace
+
+void MalloyModelTests::aStalledFolderHoldsUpNothingElse() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString stalled = dir.filePath(QStringLiteral("stalled"));
+    const QString ready = dir.filePath(QStringLiteral("ready"));
+    QVERIFY(QDir().mkpath(stalled));
+    QVERIFY(QDir().mkpath(ready));
+    QVERIFY(writeSmallFile(QDir(stalled).filePath(QStringLiteral("late.malloy.json")), "{}"));
+    QVERIFY(writeSmallFile(QDir(ready).filePath(QStringLiteral("prompt.malloy.json")), "{}"));
+    QVERIFY(writeSmallFile(QDir(stalled).filePath(QStringLiteral("late.wav"))));
+    QVERIFY(writeSmallFile(QDir(ready).filePath(QStringLiteral("prompt.png"))));
+
+    auto gate = std::make_shared<FolderGate>();
+    gate->stalled = stalled;
+    const auto unblock = qScopeGuard([gate] { gate->open.release(100); });
+
+    {
+        ProjectRegistry reg;
+        reg.setFolderScanHookForTesting(gateHook(gate));
+        reg.setSearchDirs({stalled, ready});
+        // The folder that answers is listed while the other is still stalled,
+        // which is not yet a reason to call it unavailable.
+        QTRY_COMPARE(reg.count(), 1);
+        QCOMPARE(reg.projects().first().name, QStringLiteral("prompt"));
+        QVERIFY(reg.scanning());
+        QVERIFY(reg.unavailableDirs().isEmpty());
+
+        // Asked for again while it stalls, it is listed once more when it
+        // answers, not once per request.
+        reg.rescan();
+        reg.rescan();
+        gate->open.release();
+        QTRY_COMPARE(gate->listings().count(stalled), 2);
+        gate->open.release();
+        QTRY_VERIFY(!reg.scanning());
+        QCOMPARE(gate->listings().count(stalled), 2);
+        QCOMPARE(reg.count(), 2);
+    }
+    {
+        gate->forget();
+        MediaRegistry reg;
+        reg.setProbeCachePathForTesting(dir.filePath(QStringLiteral("probe-cache.json")));
+        reg.setProbeCommandForTesting(QString(), {}, 0);
+        reg.setFolderScanHookForTesting(gateHook(gate));
+        reg.setSearchDirs({stalled, ready});
+        QTRY_COMPARE(reg.count(), 1);
+        QCOMPARE(reg.media().first().name, QStringLiteral("prompt.png"));
+        QVERIFY(reg.probing());
+
+        // A rescan and a recording finished into it while it stalls.
+        reg.rescan();
+        reg.addSearchDir(stalled);
+        gate->open.release();
+        QTRY_COMPARE(gate->listings().count(stalled), 2);
+        gate->open.release();
+        QTRY_VERIFY(!reg.probing());
+        QCOMPARE(gate->listings().count(stalled), 2);
+        QCOMPARE(reg.count(), 2);
+    }
+    QVERIFY(!gate->listedOnGuiThread);
+}
+
+void MalloyModelTests::unavailableFoldersAreReportedAndCanBeRemoved() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString present = dir.filePath(QStringLiteral("present"));
+    const QString missing = dir.filePath(QStringLiteral("missing"));
+    QVERIFY(QDir().mkpath(present));
+    QVERIFY(writeSmallFile(QDir(present).filePath(QStringLiteral("here.malloy.json")), "{}"));
+    QVERIFY(writeSmallFile(QDir(present).filePath(QStringLiteral("here.wav"))));
+
+    {
+        ProjectRegistry reg;
+        reg.setSearchDirs({present, missing});
+        QTRY_VERIFY(!reg.scanning());
+        QCOMPARE(reg.unavailableDirs(), QStringList{missing});
+        QCOMPARE(reg.count(), 1);
+
+        // The folder comes back, and the next scan finds it.
+        QVERIFY(QDir().mkpath(missing));
+        QVERIFY(writeSmallFile(QDir(missing).filePath(QStringLiteral("back.malloy.json")), "{}"));
+        reg.rescan();
+        QTRY_VERIFY(!reg.scanning());
+        QVERIFY(reg.unavailableDirs().isEmpty());
+        QCOMPARE(reg.count(), 2);
+
+        // Removing a folder takes its projects with it at once.
+        reg.removeSearchDir(missing);
+        QCOMPARE(reg.searchDirs(), QStringList{present});
+        QCOMPARE(reg.count(), 1);
+        QVERIFY(QDir(missing).removeRecursively());
+    }
+    {
+        MediaRegistry reg;
+        reg.setProbeCachePathForTesting(dir.filePath(QStringLiteral("probe-cache.json")));
+        reg.setProbeCommandForTesting(QString(), {}, 0);
+        reg.setSearchDirs({present, missing});
+        QTRY_VERIFY(!reg.probing());
+        QCOMPARE(reg.unavailableDirs(), QStringList{missing});
+        QCOMPARE(reg.count(), 1);
+        reg.removeSearchDir(missing);
+        QCOMPARE(reg.searchDirs(), QStringList{present});
+        QVERIFY(reg.unavailableDirs().isEmpty());
+        QCOMPARE(reg.count(), 1);
+    }
+
+    // A removed folder stays removed after a restart, even one the registry
+    // would otherwise start with. The registries here are gone before the
+    // event loop runs, so they never list anything.
+    QSettings settings;
+    const QStringList keys{QStringLiteral("projects/searchDirs"), QStringLiteral("media/searchDirs")};
+    QVariantList previous;
+    for (const QString& key : keys) previous << settings.value(key);
+    const auto restore = qScopeGuard([&] {
+        for (int i = 0; i < keys.size(); ++i) {
+            if (previous.at(i).isValid()) settings.setValue(keys.at(i), previous.at(i));
+            else settings.remove(keys.at(i));
+        }
+    });
+    for (const QString& key : keys) settings.setValue(key, QStringList{present, missing});
+    {
+        ProjectRegistry projects;
+        MediaRegistry media;
+        QCOMPARE(projects.searchDirs(), (QStringList{present, missing}));
+        QCOMPARE(media.searchDirs(), (QStringList{present, missing}));
+        projects.removeSearchDir(missing);
+        media.removeSearchDir(missing);
+    }
+    for (const QString& key : keys)
+        QCOMPARE(settings.value(key).toStringList(), QStringList{present});
+    ProjectRegistry projects;
+    MediaRegistry media;
+    QCOMPARE(projects.searchDirs(), QStringList{present});
+    QCOMPARE(media.searchDirs(), QStringList{present});
+}
+
+void MalloyModelTests::savingIntoAFolderListsOnlyThatFolder() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString a = dir.filePath(QStringLiteral("a"));
+    const QString b = dir.filePath(QStringLiteral("b"));
+    const QString c = dir.filePath(QStringLiteral("c"));
+    for (const QString& d : {a, b, c}) QVERIFY(QDir().mkpath(d));
+    QVERIFY(writeSmallFile(QDir(a).filePath(QStringLiteral("one.malloy.json")), "{}"));
+    QVERIFY(writeSmallFile(QDir(b).filePath(QStringLiteral("two.malloy.json")), "{}"));
+    QVERIFY(writeSmallFile(QDir(a).filePath(QStringLiteral("one.wav"))));
+    QVERIFY(writeSmallFile(QDir(b).filePath(QStringLiteral("two.wav"))));
+    auto gate = std::make_shared<FolderGate>();
+
+    {
+        ProjectRegistry reg;
+        reg.setFolderScanHookForTesting(gateHook(gate));
+        reg.setSearchDirs({a, b});
+        QTRY_VERIFY(!reg.scanning());
+        QCOMPARE(reg.count(), 2);
+
+        // A project saved into a folder already searched.
+        gate->forget();
+        QVERIFY(writeSmallFile(QDir(b).filePath(QStringLiteral("three.malloy.json")), "{}"));
+        reg.addSearchDir(b);
+        QTRY_VERIFY(!reg.scanning());
+        QCOMPARE(gate->listings(), QStringList{b});
+        QCOMPARE(reg.count(), 3);
+
+        // And into a new one, which joins the search on its own.
+        QVERIFY(writeSmallFile(QDir(c).filePath(QStringLiteral("four.malloy.json")), "{}"));
+        reg.addSearchDir(c);
+        QTRY_VERIFY(!reg.scanning());
+        QCOMPARE(gate->listings(), (QStringList{b, c}));
+        QCOMPARE(reg.searchDirs(), (QStringList{a, b, c}));
+        QCOMPARE(reg.count(), 4);
+    }
+    {
+        gate->forget();
+        MediaRegistry reg;
+        reg.setProbeCachePathForTesting(dir.filePath(QStringLiteral("probe-cache.json")));
+        reg.setProbeCommandForTesting(QString(), {}, 0);
+        reg.setFolderScanHookForTesting(gateHook(gate));
+        reg.setSearchDirs({a, b});
+        QTRY_VERIFY(!reg.probing());
+        QCOMPARE(reg.count(), 2);
+
+        // A recording finished into a folder already searched.
+        gate->forget();
+        QVERIFY(writeSmallFile(QDir(b).filePath(QStringLiteral("recording.mp4"))));
+        reg.addSearchDir(b);
+        QTRY_VERIFY(!reg.probing());
+        QCOMPARE(gate->listings(), QStringList{b});
+        QCOMPARE(reg.count(), 3);
+    }
+    QVERIFY(!gate->listedOnGuiThread);
 }
 
 // Helper: create `name` in `dir` with `bytes` of content and an explicit

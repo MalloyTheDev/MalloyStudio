@@ -4,6 +4,7 @@
 #include "model/Scene.h"
 #include "model/SceneCollection.h"
 #include "model/Source.h"
+#include "platform/OffThread.h"
 #include "project/ByteSize.h"
 #include "project/ClipsRegistry.h"
 #include "project/ProjectRegistry.h"
@@ -909,15 +910,34 @@ void Dashboard::refreshSystemStatus() {
                           encoder != nullptr});
     }
 
-    // Storage: free space on the volume holding the recording folder.
+    // Storage: free space on the volume holding the recording folder. Asked
+    // off the GUI thread, since on a network volume that has gone away the
+    // query waits for the redirector's timeout. The panel shows the latest
+    // answer for this folder and is redrawn when a new one arrives.
     {
         const QString dir = RecentRecordings::outputDir();
-        const QStorageInfo storage(dir);
+        if (!m_storageQueryPending) {
+            m_storageQueryPending = true;
+            OffThread::run(this, [dir] { return QStorageInfo(dir); },
+                           [this, dir](const QStorageInfo& storage) {
+                m_storage = storage;
+                m_storageDir = dir;
+                // Left outstanding while the panel is redrawn, so the redraw
+                // shows this answer rather than asking again; unless the
+                // folder changed meanwhile, when the redraw asks about it.
+                const bool current = dir == RecentRecordings::outputDir();
+                m_storageQueryPending = current;
+                refreshSystemStatus();
+                if (current) m_storageQueryPending = false;
+            });
+        }
         StatusCheck c{QStringLiteral("disk"), tr("Storage"), tr("Folder unavailable"), false};
-        if (storage.isValid() && storage.isReady()) {
-            const qint64 available = storage.bytesAvailable();
+        if (m_storageDir != dir) {
+            c.value = tr("Checking…");
+        } else if (m_storage.isValid() && m_storage.isReady()) {
+            const qint64 available = m_storage.bytesAvailable();
             c.value = tr("%1 free · %2").arg(formatByteSize(available),
-                                             QDir::toNativeSeparators(storage.rootPath()));
+                                             QDir::toNativeSeparators(m_storage.rootPath()));
             c.ok = available >= kLowDiskBytes;
         }
         checks.push_back(c);

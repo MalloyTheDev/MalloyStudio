@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QHash>
+#include <QStorageInfo>
 #include <QString>
 #include <QWidget>
 
@@ -136,4 +137,9 @@ private:
     QGridLayout*  m_clipsLayout = nullptr;
     QGridLayout*  m_statusLayout = nullptr;
     QLabel*       m_statusMeta = nullptr;
+    // Free space on the recording volume, asked off the GUI thread; see
+    // refreshSystemStatus.
+    QStorageInfo  m_storage;
+    QString       m_storageDir;           // the folder m_storage answers for
+    bool          m_storageQueryPending = false;
 };

@@ -93,6 +93,7 @@ private:
     QLabel* m_cpu = nullptr;
     QLabel* m_ram = nullptr;
     QLabel* m_disk = nullptr;
+    bool    m_diskQueryPending = false;   // a free-space query has not answered yet
     QLabel* m_fps = nullptr;
     QLabel* m_bitrate = nullptr;
     QWidget* m_dropStat = nullptr;   // hidden until frames are actually lost

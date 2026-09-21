@@ -1,4 +1,5 @@
 #include "ui/shell/StudioStatusBar.h"
+#include "platform/OffThread.h"
 #include "project/ByteSize.h"
 #include "project/RecentRecordings.h"
 #include "ui/Theme.h"
@@ -225,15 +226,29 @@ void StudioStatusBar::tickStats() {
     // The volume recordings are written to, which is the one the user runs out
     // of room on. The same volume SystemProbe reports in the settings page, so
     // the two figures agree.
+    //
+    // Asked off the GUI thread: on a network volume that has gone away the
+    // query waits for the redirector's timeout, and this runs every second.
+    // One that has not answered by the next tick reads as unknown, and no
+    // second one is started behind it.
     if (m_disk) {
-        const QStorageInfo storage(RecentRecordings::outputDir());
-        if (storage.isValid() && storage.isReady() && storage.bytesTotal() > 0) {
-            const qint64 free = storage.bytesAvailable();
-            const int usedPct = int(100.0 * double(storage.bytesTotal() - free)
-                                            / double(storage.bytesTotal()) + 0.5);
-            m_disk->setText(tr("%1% · %2 free").arg(usedPct).arg(formatByteSize(free)));
-        } else {
+        if (m_diskQueryPending) {
             m_disk->setText(kNoValue);
+        } else {
+            m_diskQueryPending = true;
+            OffThread::run(this, [dir = RecentRecordings::outputDir()] { return QStorageInfo(dir); },
+                           [this](const QStorageInfo& storage) {
+                m_diskQueryPending = false;
+                if (!m_disk) return;
+                if (storage.isValid() && storage.isReady() && storage.bytesTotal() > 0) {
+                    const qint64 free = storage.bytesAvailable();
+                    const int usedPct = int(100.0 * double(storage.bytesTotal() - free)
+                                                    / double(storage.bytesTotal()) + 0.5);
+                    m_disk->setText(tr("%1% · %2 free").arg(usedPct).arg(formatByteSize(free)));
+                } else {
+                    m_disk->setText(kNoValue);
+                }
+            });
         }
     }
 }
