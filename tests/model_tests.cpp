@@ -252,6 +252,9 @@ private slots:
     void fileDevicesAreHeldBeforeTheLoadIsAnnounced();
     void userChosenSharePathSurvivesUndo();
     void everyMicChangeIsAnnouncedStructurally();
+    void undoInStudioModeLeavesTheProgramOnAir();
+    void removingAScenePreservesWhatIsOnAir();
+    void stagingASceneKeepsTheProgramCaptureRunning();
     void projectMediaPathsMustBeLocalFiles();
     void encoderRedactsTheStreamKeyFromFfmpegOutput();
     void addingAConfiguredLayerIsOneUndoStep();
@@ -3450,6 +3453,122 @@ void MalloyModelTests::fileDevicesAreHeldBeforeTheLoadIsAnnounced() {
     QVERIFY2(heldWhenAnnounced,
              "a file's devices must already be held when the load is first announced");
     QVERIFY(opened.deviceConsentPending());
+}
+
+void MalloyModelTests::undoInStudioModeLeavesTheProgramOnAir() {
+    SceneCollection scenes;
+    QUndoStack undo;
+    scenes.setUndoStack(&undo);
+    scenes.addScene(QStringLiteral("Live"));
+    scenes.addNewSourceToCurrent(QStringLiteral("Title"), Source::Type::Text,
+                                 QStringLiteral("on air"));
+    scenes.addScene(QStringLiteral("Staged"));
+    scenes.addNewSourceToCurrent(QStringLiteral("Title"), Source::Type::Text,
+                                 QStringLiteral("not ready"));
+    scenes.setCurrentIndex(0);
+
+    scenes.setStudioMode(true);
+    scenes.setCurrentIndex(1);                  // stage the unfinished scene
+    QCOMPARE(scenes.programIndex(), 0);
+    QCOMPARE(scenes.previewIndex(), 1);
+    undo.clear();
+
+    // An edit to the staged scene, then undo it. The restore used to reset
+    // studio mode and cut the staged scene to air, silently.
+    bool leftStudio = false;
+    QObject::connect(&scenes, &SceneCollection::studioModeChanged, &scenes,
+                     [&leftStudio](bool on) { if (!on) leftStudio = true; });
+    scenes.setCurrentItemLocked(0, true);
+    undo.undo();
+
+    QVERIFY2(scenes.studioMode(), "undo must not leave studio mode");
+    QVERIFY(!leftStudio);
+    QCOMPARE(scenes.programIndex(), 0);
+    QCOMPARE(scenes.programScene()->name(), QStringLiteral("Live"));
+    QCOMPARE(scenes.previewIndex(), scenes.currentIndex());
+
+    undo.redo();
+    QVERIFY(scenes.studioMode());
+    QCOMPARE(scenes.programScene()->name(), QStringLiteral("Live"));
+
+    // A new project does leave studio mode, and says so.
+    scenes.clear();
+    QVERIFY(!scenes.studioMode());
+    QVERIFY(leftStudio);
+}
+
+void MalloyModelTests::removingAScenePreservesWhatIsOnAir() {
+    SceneCollection scenes;
+    scenes.addScene(QStringLiteral("A"));
+    scenes.addScene(QStringLiteral("B"));
+    scenes.addScene(QStringLiteral("C"));
+
+    // Live mode, the on-air scene removed: program must land on a real scene,
+    // and on the same one the user is now looking at.
+    scenes.setCurrentIndex(2);
+    QCOMPARE(scenes.programIndex(), 2);
+    scenes.removeSceneAt(2);
+    QVERIFY2(scenes.programScene() != nullptr, "the recorded output must not point at nothing");
+    QCOMPARE(scenes.programIndex(), scenes.currentIndex());
+    QCOMPARE(scenes.programScene()->name(), QStringLiteral("B"));
+
+    // Live mode, a scene below the on-air one removed: the same scene stays on
+    // air, at its new index, rather than whatever slid into its old slot.
+    scenes.addScene(QStringLiteral("C"));
+    scenes.setCurrentIndex(1);                   // B on air
+    QCOMPARE(scenes.programScene()->name(), QStringLiteral("B"));
+    scenes.removeSceneAt(0);                     // remove A
+    QCOMPARE(scenes.programScene()->name(), QStringLiteral("B"));
+
+    // Studio mode: removing a staged scene leaves the program alone.
+    SceneCollection studio;
+    studio.addScene(QStringLiteral("A"));
+    studio.addScene(QStringLiteral("B"));
+    studio.addScene(QStringLiteral("C"));
+    studio.setCurrentIndex(2);                   // C on air
+    studio.setStudioMode(true);
+    studio.setCurrentIndex(0);                   // stage A
+    studio.removeSceneAt(0);
+    QCOMPARE(studio.programScene()->name(), QStringLiteral("C"));
+    QCOMPARE(studio.previewIndex(), studio.currentIndex());
+}
+
+void MalloyModelTests::stagingASceneKeepsTheProgramCaptureRunning() {
+    FakeCaptureSession::started.clear();
+    FakeCaptureSession::stopped.clear();
+    FakeCaptureSession::created.clear();
+
+    SceneCollection scenes;
+    scenes.addScene(QStringLiteral("On air"));
+    scenes.addNewSourceToCurrent(QStringLiteral("Display"), Source::Type::DisplayCapture,
+                                 QString(), QColor(), 1, 2);
+    scenes.addScene(QStringLiteral("Next"));
+    scenes.addNewSourceToCurrent(QStringLiteral("Title"), Source::Type::Text,
+                                 QStringLiteral("coming up"));
+    scenes.setCurrentIndex(0);
+
+    CaptureController controller(
+        &scenes,
+        [](int adapterIndex, int outputIndex, QObject* parent) {
+            return new FakeCaptureSession(adapterIndex, outputIndex, parent);
+        });
+    QCOMPARE(FakeCaptureSession::started.count(QStringLiteral("1:2")), 1);
+
+    // Studio mode, then stage a scene with no display source. The on-air scene
+    // still needs its capture; reconciling against the staged scene alone used
+    // to stop it, and the recording lost its screen.
+    scenes.setStudioMode(true);
+    scenes.setCurrentIndex(1);
+    QCOMPARE(scenes.programIndex(), 0);
+    QVERIFY2(FakeCaptureSession::stopped.count(QStringLiteral("1:2")) == 0,
+             "staging a scene must not stop the program scene's capture");
+    QCOMPARE(controller.activeSessionCount(), 1);
+
+    // Leaving studio mode puts the current scene on air; its lack of a display
+    // source now does stop the capture.
+    scenes.setStudioMode(false);
+    QCOMPARE(FakeCaptureSession::stopped.count(QStringLiteral("1:2")), 1);
+    QCOMPARE(controller.activeSessionCount(), 0);
 }
 
 void MalloyModelTests::everyMicChangeIsAnnouncedStructurally() {

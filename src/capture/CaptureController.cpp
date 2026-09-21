@@ -97,6 +97,10 @@ CaptureController::CaptureController(SceneCollection* scenes, SessionFactory fac
     connect(m_scenes, &SceneCollection::sourceChanged, this, [this](int){ reconcile(); });
     connect(m_scenes, &SceneCollection::sourcesChanged, this, &CaptureController::reconcile);
     connect(m_scenes, &SceneCollection::collectionReset, this, &CaptureController::reconcile);
+    // What is on air can change without current changing: a transition, or
+    // leaving studio mode.
+    connect(m_scenes, &SceneCollection::programChanged, this, [this](int) { reconcile(); });
+    connect(m_scenes, &SceneCollection::studioModeChanged, this, [this](bool) { reconcile(); });
     reconcile();
 }
 
@@ -125,7 +129,19 @@ void CaptureController::reconcile() {
     // that source. Skipping it here rather than adding it to the required set
     // also stops it if a previous project had it running, so the hold cannot be
     // escaped by loading a hostile project over a live scene.
-    if (Scene* scene = m_scenes ? m_scenes->currentScene() : nullptr) {
+    // The scenes whose sources must run: the current one, and in studio mode
+    // also the program scene, which is on air and is what gets recorded and
+    // streamed. Reconciling against current alone meant staging a scene in
+    // studio mode stopped every capture the live output depended on. Outside
+    // studio mode the two are the same scene.
+    QList<Scene*> liveScenes;
+    if (m_scenes) {
+        if (Scene* current = m_scenes->currentScene()) liveScenes << current;
+        Scene* program = m_scenes->programScene();
+        if (program && !liveScenes.contains(program)) liveScenes << program;
+    }
+
+    for (Scene* scene : liveScenes) {
         for (int i = 0; i < scene->itemCount(); ++i) {
             SceneItem* item = scene->itemAt(i);
             Source* source = m_scenes->sourceForItem(item);

@@ -12,6 +12,7 @@
 #include <QSet>
 #include <QUndoCommand>
 #include <QUndoStack>
+#include <algorithm>
 #include <utility>
 
 namespace {
@@ -284,6 +285,11 @@ QJsonObject SceneCollection::toJson() const {
 
 bool SceneCollection::loadFromJson(const QJsonObject& root, QString* error,
                                    LoadOrigin origin) {
+    // What is on air before this load, which a restore must not change.
+    const bool wasStudio  = m_studioMode;
+    const int  oldProgram = m_programIndex;
+    const int  oldPreview = m_previewIndex;
+
     const QString app = root.value(QStringLiteral("app")).toString(QStringLiteral("MalloyStudio"));
     if (app != QStringLiteral("MalloyStudio")) {
         if (error) *error = QStringLiteral("This is not a MalloyStudio project.");
@@ -455,10 +461,26 @@ bool SceneCollection::loadFromJson(const QJsonObject& root, QString* error,
     const int requestedCurrent = root.value(QStringLiteral("currentScene")).toInt(m_scenes.isEmpty() ? -1 : 0);
     if (!m_scenes.isEmpty())
         m_currentIndex = qBound(0, requestedCurrent, static_cast<int>(m_scenes.size()) - 1);
-    // Program and preview start on the same scene; studio mode defaults off.
-    m_programIndex = m_currentIndex;
-    m_previewIndex = m_currentIndex;
-    m_studioMode   = false;
+    // Studio mode, program and preview are session state rather than document
+    // state: the snapshot does not store them, and an undo restores the
+    // document, not what is on air. Resetting them here on every restore meant
+    // an undo in studio mode silently left studio mode and cut the staged,
+    // unfinished scene to air with no transition. A restore now keeps them,
+    // clamped to the scenes that exist afterwards. A file load starts afresh,
+    // and so does a new project, which leaves studio mode before it gets here.
+    const int sceneCount = static_cast<int>(m_scenes.size());
+    const auto clampScene = [sceneCount](int i) {
+        return sceneCount == 0 ? -1 : std::clamp(i, 0, sceneCount - 1);
+    };
+    if (origin == LoadOrigin::Internal && wasStudio) {
+        m_studioMode   = true;
+        m_programIndex = clampScene(oldProgram);
+        m_previewIndex = m_currentIndex;          // staged is whatever is current
+    } else {
+        m_studioMode   = false;
+        m_programIndex = m_currentIndex;
+        m_previewIndex = m_currentIndex;
+    }
 
     m_nextSceneNumber = static_cast<int>(m_scenes.size()) + 1;
     collectUnusedSources();
@@ -489,13 +511,18 @@ bool SceneCollection::loadFromJson(const QJsonObject& root, QString* error,
     emit itemsChanged();
     emit itemSelectionChanged(currentItemIndex());
     if (holdChanged) emit deviceConsentChanged();
+    // Announced rather than changed silently, so the staged pane, the studio
+    // mode action and everything rendering the program scene follow.
+    if (m_studioMode != wasStudio)    emit studioModeChanged(m_studioMode);
+    if (m_programIndex != oldProgram) emit programChanged(m_programIndex);
+    if (m_previewIndex != oldPreview) emit previewChanged(m_previewIndex);
 
     if (error) error->clear();
     return true;
 }
 
 void SceneCollection::clear() {
-    m_studioMode = false;
+    setStudioMode(false);
     QJsonObject empty{
         {QStringLiteral("app"), QStringLiteral("MalloyStudio")},
         {QStringLiteral("version"), 2},
@@ -540,23 +567,45 @@ Scene* SceneCollection::ensureCurrentScene() {
 void SceneCollection::removeSceneAt(int index) {
     if (index < 0 || index >= m_scenes.size()) return;
     const QJsonObject before = snapshot();
+    const int oldProgram = m_programIndex;
+    const int oldPreview = m_previewIndex;
     Scene* s = m_scenes.takeAt(index);
     delete s;
     collectUnusedSources();
     emit sceneRemoved(index);
 
+    // Program and preview are indices into the list just shortened, so they
+    // are repaired along with current. Left alone, removing the on-air scene
+    // pointed the recorded output at nothing, and removing a scene below it
+    // quietly put a different scene on air.
     if (m_scenes.isEmpty()) {
         m_currentIndex = -1;
+        m_programIndex = -1;
+        m_previewIndex = -1;
         emit currentChanged(-1);
         emit itemsChanged();
         emit itemSelectionChanged(-1);
     } else {
         const int newIndex = qMin(index, static_cast<int>(m_scenes.size()) - 1);
         m_currentIndex = newIndex;
+        if (m_studioMode) {
+            // Staged follows current, as setCurrentIndex does. The program keeps
+            // its scene where that scene survives, and falls back to the new
+            // current one only when it was the scene removed.
+            m_previewIndex = newIndex;
+            m_programIndex = oldProgram == index ? newIndex
+                           : oldProgram > index  ? oldProgram - 1
+                                                 : oldProgram;
+        } else {
+            m_programIndex = newIndex;
+            m_previewIndex = newIndex;
+        }
         emit currentChanged(newIndex);
         emit itemsChanged();
         emit itemSelectionChanged(currentItemIndex());
     }
+    if (m_programIndex != oldProgram) emit programChanged(m_programIndex);
+    if (m_previewIndex != oldPreview) emit previewChanged(m_previewIndex);
     recordCommand(QStringLiteral("Remove Scene"), before);
 }
 
