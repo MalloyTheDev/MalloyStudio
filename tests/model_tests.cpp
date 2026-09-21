@@ -5,6 +5,7 @@
 #include "capture/CameraCapture.h"
 #include "capture/CaptureBackend.h"
 #include "capture/CaptureController.h"
+#include "capture/DxgiCapture.h"
 #include "capture/WgcCapture.h"
 #include "capture/WindowCapture.h"
 #include "capture/WasapiCapture.h"
@@ -423,6 +424,7 @@ private slots:
     void stagingASceneKeepsTheProgramCaptureRunning();
     void aFrameQueuedBeforeAStopIsDropped();
     void aLostDisplayCaptureIsTriedAgain();
+    void aRotatedMonitorIsCapturedUpright();
     void aCameraThatStopsIsTriedAgain();
     void aCameraWaitingToRetryIsLeftToItsBackoff();
     void aWindowCaptureThatFailsIsTriedAgain();
@@ -5079,6 +5081,67 @@ void MalloyModelTests::aLostDisplayCaptureIsTriedAgain() {
     QTest::qWait(1500);
     QCOMPARE(FakeCaptureSession::started.count(QStringLiteral("1:2")), 4);
     QCOMPARE(controller.monitorStatus(1, 2), QStringLiteral("Idle"));
+}
+
+void MalloyModelTests::aRotatedMonitorIsCapturedUpright() {
+    // DXGI_MODE_ROTATION values, written out because this file keeps DXGI out.
+    constexpr int kUnspecified = 0, kIdentity = 1, kRotate90 = 2, kRotate180 = 3,
+                  kRotate270 = 4;
+    QCOMPARE(DxgiCapture::clockwiseDegreesFor(kUnspecified), 0);
+    QCOMPARE(DxgiCapture::clockwiseDegreesFor(kIdentity), 0);
+    QCOMPARE(DxgiCapture::clockwiseDegreesFor(kRotate90), 90);
+    QCOMPARE(DxgiCapture::clockwiseDegreesFor(kRotate180), 180);
+    QCOMPARE(DxgiCapture::clockwiseDegreesFor(kRotate270), 270);
+    QCOMPARE(DxgiCapture::clockwiseDegreesFor(99), 0);
+
+    // A landscape scan-out, three wide and two high, each corner marked. A
+    // monitor turned to portrait duplicates like this with the desktop on its
+    // side, and was handed on that way.
+    const QRgb tl = qRgb(255, 0, 0), tr = qRgb(0, 255, 0);
+    const QRgb bl = qRgb(0, 0, 255), br = qRgb(255, 255, 0);
+    QImage scanout(3, 2, QImage::Format_ARGB32);
+    scanout.fill(Qt::black);
+    scanout.setPixel(0, 0, tl);
+    scanout.setPixel(2, 0, tr);
+    scanout.setPixel(0, 1, bl);
+    scanout.setPixel(2, 1, br);
+
+    // ROTATE90: a quarter turn clockwise, so the frame is portrait and a
+    // scan-out point (x, y) lands at (1 - y, x).
+    const QImage quarter = DxgiCapture::upright(
+        scanout, DxgiCapture::clockwiseDegreesFor(kRotate90));
+    QCOMPARE(quarter.size(), QSize(2, 3));
+    QCOMPARE(quarter.format(), QImage::Format_ARGB32);
+    QCOMPARE(quarter.pixel(1, 0), tl);
+    QCOMPARE(quarter.pixel(1, 2), tr);
+    QCOMPARE(quarter.pixel(0, 0), bl);
+    QCOMPARE(quarter.pixel(0, 2), br);
+
+    // ROTATE180: upside down, same size.
+    const QImage half = DxgiCapture::upright(
+        scanout, DxgiCapture::clockwiseDegreesFor(kRotate180));
+    QCOMPARE(half.size(), QSize(3, 2));
+    QCOMPARE(half.format(), QImage::Format_ARGB32);
+    QCOMPARE(half.pixel(2, 1), tl);
+    QCOMPARE(half.pixel(0, 1), tr);
+    QCOMPARE(half.pixel(2, 0), bl);
+    QCOMPARE(half.pixel(0, 0), br);
+
+    // ROTATE270: a quarter turn the other way, (x, y) to (y, 2 - x).
+    const QImage threeQuarter = DxgiCapture::upright(
+        scanout, DxgiCapture::clockwiseDegreesFor(kRotate270));
+    QCOMPARE(threeQuarter.size(), QSize(2, 3));
+    QCOMPARE(threeQuarter.format(), QImage::Format_ARGB32);
+    QCOMPARE(threeQuarter.pixel(0, 2), tl);
+    QCOMPARE(threeQuarter.pixel(0, 0), tr);
+    QCOMPARE(threeQuarter.pixel(1, 2), bl);
+    QCOMPARE(threeQuarter.pixel(1, 0), br);
+
+    // An upright monitor's frame is passed through untouched.
+    const QImage same = DxgiCapture::upright(
+        scanout, DxgiCapture::clockwiseDegreesFor(kIdentity));
+    QCOMPARE(same, scanout);
+    QVERIFY(DxgiCapture::upright(QImage(), 90).isNull());
 }
 
 void MalloyModelTests::aCameraThatStopsIsTriedAgain() {

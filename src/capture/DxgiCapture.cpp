@@ -2,6 +2,8 @@
 #include "MonitorInfo.h"
 #include "platform/FrameProfile.h"
 
+#include <QTransform>
+
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <d3d11.h>
@@ -48,6 +50,32 @@ QList<MonitorInfo> enumerateMonitors() {
 
 DxgiCapture::DxgiCapture(int adapterIndex, int outputIndex, QObject* parent)
     : QThread(parent), m_adapterIndex(adapterIndex), m_outputIndex(outputIndex) {}
+
+// ROTATE90 is a quarter turn clockwise: a scanned-out point (x, y) lands at
+// (scan-out height - 1 - y, x) on the desktop. That is the mapping Microsoft's
+// Desktop Duplication sample applies for it, and the angle OBS's duplicator
+// rotates by; ROTATE270 is the same turn the other way.
+int DxgiCapture::clockwiseDegreesFor(int dxgiRotation) {
+    switch (dxgiRotation) {
+    case DXGI_MODE_ROTATION_ROTATE90:  return 90;
+    case DXGI_MODE_ROTATION_ROTATE180: return 180;
+    case DXGI_MODE_ROTATION_ROTATE270: return 270;
+    default:                           return 0;
+    }
+}
+
+QImage DxgiCapture::upright(const QImage& scanout, int clockwiseDegrees) {
+    switch (clockwiseDegrees) {
+    case 90:
+    case 180:
+    case 270:
+        // Qt's y axis points down, so a positive angle turns clockwise, and a
+        // whole quarter turn is an exact pixel copy rather than a resample.
+        return scanout.transformed(QTransform().rotate(clockwiseDegrees));
+    default:
+        return scanout;
+    }
+}
 
 DxgiCapture::~DxgiCapture() {
     requestStop();
@@ -164,6 +192,12 @@ void DxgiCapture::run() {
     dup->GetDesc(&dupDesc);
     const int W = static_cast<int>(dupDesc.ModeDesc.Width);
     const int H = static_cast<int>(dupDesc.ModeDesc.Height);
+    // The mode, and so the staging texture, is the panel's scan-out; the
+    // desktop may be turned relative to it. Changing the rotation loses access
+    // to the duplication, so the value holds for this worker's whole life.
+    const int turn = clockwiseDegreesFor(static_cast<int>(dupDesc.Rotation));
+    if (turn != 0)
+        qInfo("display capture: output rotated %d degrees; frames are turned upright", turn);
 
     D3D11_TEXTURE2D_DESC stageDesc = {};
     stageDesc.Width            = static_cast<UINT>(W);
@@ -263,6 +297,9 @@ void DxgiCapture::run() {
                     }
                     context->Unmap(staging, 0);
                 }
+                // Inside the timed span: on a rotated monitor the turn is part
+                // of what producing a frame costs here.
+                if (turn != 0 && !frame.isNull()) frame = upright(frame, turn);
             }
 
             if (!frame.isNull()) {

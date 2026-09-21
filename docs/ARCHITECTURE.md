@@ -149,8 +149,10 @@ Uses **DXGI Desktop Duplication** (`IDXGIOutputDuplication`):
 1. `AcquireNextFrame(timeout=33ms)`
 2. `QueryInterface<IDXGIResource>` → `ID3D11Texture2D`
 3. `CopyResource` into a staging texture, `Map(D3D11_MAP_READ)`
-4. Copy into a `QImage(Format_ARGB32)` and emit `frameReady`, unless two frames are
-   already in flight, in which case the newest is dropped and counted.
+4. Copy into a `QImage(Format_ARGB32)`, turned upright when `DXGI_OUTDUPL_DESC.Rotation`
+   says the monitor is rotated (the duplication is the panel's unrotated scan-out), and
+   emit `frameReady`, unless two frames are already in flight, in which case the newest
+   is dropped and counted.
 
 `DXGI_ERROR_ACCESS_LOST` (a UAC prompt, the lock screen, a display mode change) ends the
 worker with `captureError`; the controller recreates it (see below).

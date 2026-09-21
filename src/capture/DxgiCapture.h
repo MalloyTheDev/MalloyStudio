@@ -54,6 +54,21 @@ public:
         return out;
     }
 
+    // Desktop Duplication hands back the output as the panel scans it out,
+    // not as the desktop is laid out: a monitor turned to portrait in Display
+    // settings still duplicates as a landscape texture with the picture on its
+    // side. Each frame is turned upright before it leaves the backend, so the
+    // size every consumer sees is the desktop's.
+    //
+    // How far to turn a scanned-out frame clockwise for a DXGI_MODE_ROTATION
+    // value, as DXGI_OUTDUPL_DESC::Rotation reports it. An integer, to keep
+    // DXGI out of this header. UNSPECIFIED, IDENTITY and anything unknown are 0.
+    static int clockwiseDegreesFor(int dxgiRotation);
+
+    // `scanout` turned clockwise by 90, 180 or 270 degrees, in the same pixel
+    // format. Any other angle returns it unchanged.
+    static QImage upright(const QImage& scanout, int clockwiseDegrees);
+
 signals:
     void frameReady(QImage frame);
     void captureError(QString message);
