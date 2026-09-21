@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QPointer>
 #include <QWidget>
 
 class QCheckBox;
@@ -16,6 +17,7 @@ class QStackedWidget;
 class AudioController;
 class CaptureController;
 class SceneCollection;
+class SceneItem;
 
 class InspectorPanel : public QWidget {
     Q_OBJECT
@@ -48,6 +50,9 @@ private:
     CaptureController* m_captureController = nullptr;
     AudioController*   m_audio = nullptr;
     bool m_updating = false;
+    // The layer the fields were last filled from, so rebuild() can tell a
+    // change to that layer from a different layer being shown.
+    QPointer<SceneItem> m_shownItem;
 
     // Header
     QLabel*  m_title = nullptr;

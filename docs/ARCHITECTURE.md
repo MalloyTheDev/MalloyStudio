@@ -377,6 +377,10 @@ Shows properties for the currently selected scene item. Sections:
 1. **Header** — source name + type label
 2. **Toggles** — Visible / Locked
 3. **Transform** — X, Y, W, H spinboxes + Fit / Fill / Center / Reset buttons
+   (a typed number is applied on Enter or on leaving the field; the arrows and
+   the wheel apply each step. `rebuild()` rewrites a field only when the layer
+   shown changes or the model disagrees with it, so a field being typed in
+   keeps its caret and its partial entry)
 4. **Source-specific** — rendered inside a `QStackedWidget` keyed by source type:
    - Text → `QLineEdit`
    - ColorBlock → color picker button

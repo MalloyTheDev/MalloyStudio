@@ -100,6 +100,12 @@ InspectorPanel::InspectorPanel(SceneCollection* scenes,
     m_y = makeSpin(inner, MalloyCanvas::Height);
     m_w = makeSpin(inner, MalloyCanvas::Width);
     m_h = makeSpin(inner, MalloyCanvas::Height);
+    // A typed number is applied when it is finished, on Enter or on leaving
+    // the field, not digit by digit. Each partial number used to reach the
+    // layer, where the first digit of 800 was clamped to the minimum size and
+    // written back into the field mid-entry, so the value committed was 1060.
+    // The arrows and the wheel still apply each step as it happens.
+    for (QDoubleSpinBox* spin : {m_x, m_y, m_w, m_h}) spin->setKeyboardTracking(false);
     auto* transformGrid = new QGridLayout();
     transformGrid->addWidget(new QLabel(tr("X"), inner), 0, 0);
     transformGrid->addWidget(m_x, 0, 1);
@@ -521,16 +527,34 @@ void InspectorPanel::rebuild() {
         return;
     }
 
+    // The fields someone types into are written only when they would show
+    // something else: another layer, or a model that no longer agrees with
+    // them. Typing changes the model and the change comes straight back here,
+    // and rewriting the field then moved the caret to the end (QLineEdit does
+    // that even for identical text). A spin box's value() is the last value
+    // applied rather than what is half typed in it, so an unrelated change to
+    // the same layer leaves that entry alone, while a different layer, whose
+    // numbers may well be the same, does not inherit it.
+    const bool sameLayer = m_shownItem == item;
+    m_shownItem = item;
+    const auto showNumber = [sameLayer](QDoubleSpinBox* spin, qreal value) {
+        if (!sameLayer || spin->textFromValue(spin->value()) != spin->textFromValue(value))
+            spin->setValue(value);
+    };
+    const auto showText = [sameLayer](QLineEdit* edit, const QString& text) {
+        if (!sameLayer || edit->text() != text) edit->setText(text);
+    };
+
     const QRectF r = item->transform();
     m_title->setText(source->name());
     m_type->setText(Source::typeToString(source->type()));
     m_visible->setChecked(item->isVisible());
     m_locked->setChecked(item->isLocked());
-    m_x->setValue(r.x());
-    m_y->setValue(r.y());
-    m_w->setValue(r.width());
-    m_h->setValue(r.height());
-    m_text->setText(source->text());
+    showNumber(m_x, r.x());
+    showNumber(m_y, r.y());
+    showNumber(m_w, r.width());
+    showNumber(m_h, r.height());
+    showText(m_text, source->text());
 
     const bool isText    = source->type() == Source::Type::Text;
     const bool isColor   = source->type() == Source::Type::ColorBlock;
@@ -626,7 +650,7 @@ void InspectorPanel::rebuild() {
     if (isBrowser) {
         QSignalBlocker sb1(m_browserUrlEdit);
         QSignalBlocker sb2(m_browserRefreshHz);
-        m_browserUrlEdit->setText(source->browserUrl());
+        showText(m_browserUrlEdit, source->browserUrl());
         m_browserRefreshHz->setValue(source->browserRefreshHz());
     }
 
@@ -908,6 +932,7 @@ void InspectorPanel::chooseColor() {
 // holding the last layer's position, text, window or file, they read as that
 // layer still being there after it had been deleted or deselected.
 void InspectorPanel::showNoLayer(const QString& title) {
+    m_shownItem = nullptr;
     m_title->setText(title);
     m_type->clear();
     m_visible->setChecked(false);

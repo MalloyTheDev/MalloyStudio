@@ -486,6 +486,8 @@ private slots:
     // A filter slider shows the stored value, and moving one of its neighbours
     // leaves that value alone.
     void theInspectorShowsTheFilterValueThatIsStored();
+    void typingInTheInspectorKeepsTheCaret();
+    void aTransformIsAppliedWhenItHasBeenTyped();
     void projectMediaPathsMustBeLocalFiles();
     void encoderRedactsTheStreamKeyFromFfmpegOutput();
     void addingAConfiguredLayerIsOneUndoStep();
@@ -6877,6 +6879,102 @@ void MalloyModelTests::theInspectorShowsTheFilterValueThatIsStored() {
     QVERIFY2(wrong.isEmpty(), qPrintable(wrong));
     wrong = misshown(keySliders.at(1), [&](float v) { key->setSmoothness(v); });
     QVERIFY2(wrong.isEmpty(), qPrintable(wrong));
+}
+
+void MalloyModelTests::typingInTheInspectorKeepsTheCaret() {
+    SceneCollection scenes;
+    scenes.addScene(QStringLiteral("Scene"));
+    InspectorPanel inspector(&scenes, nullptr, nullptr);
+    const auto shownField = [&](const QString& text) -> QLineEdit* {
+        for (QLineEdit* edit : inspector.findChildren<QLineEdit*>())
+            if (edit->text() == text && edit->isVisibleTo(&inspector)) return edit;
+        return nullptr;
+    };
+
+    // Each keystroke reaches the source, the change is announced, and the
+    // inspector used to answer by setting the field's text again, which puts
+    // the caret at the end: "XY" typed after "Hello" came out as
+    // "HelloX worldY".
+    QVERIFY(scenes.addNewSourceToCurrent(QStringLiteral("Caption"), Source::Type::Text,
+                                         QStringLiteral("Hello world")) != nullptr);
+    QLineEdit* text = shownField(QStringLiteral("Hello world"));
+    QVERIFY(text != nullptr);
+    text->setCursorPosition(5);
+    QTest::keyClicks(text, QStringLiteral("XY"));
+    QCOMPARE(text->text(), QStringLiteral("HelloXY world"));
+    QCOMPARE(text->cursorPosition(), 7);
+    QCOMPARE(scenes.sourceForItem(scenes.currentItem())->text(), QStringLiteral("HelloXY world"));
+
+    // The browser address, the same way.
+    QVERIFY(scenes.addNewSourceToCurrent(QStringLiteral("Page"), Source::Type::Browser) != nullptr);
+    scenes.setCurrentSourceBrowserUrl(0, QStringLiteral("https://example.com/"));
+    QLineEdit* url = shownField(QStringLiteral("https://example.com/"));
+    QVERIFY(url != nullptr);
+    url->setCursorPosition(8);
+    QTest::keyClicks(url, QStringLiteral("www."));
+    QCOMPARE(url->text(), QStringLiteral("https://www.example.com/"));
+    QCOMPARE(url->cursorPosition(), 12);
+    QCOMPARE(scenes.sourceForItem(scenes.currentItem())->browserUrl(),
+             QStringLiteral("https://www.example.com/"));
+}
+
+void MalloyModelTests::aTransformIsAppliedWhenItHasBeenTyped() {
+    SceneCollection scenes;
+    scenes.addScene(QStringLiteral("Scene"));
+    InspectorPanel inspector(&scenes, nullptr, nullptr);
+    SceneItem* card = scenes.addNewSourceToCurrent(QStringLiteral("Card"), Source::Type::ColorBlock);
+    QVERIFY(card != nullptr);
+    scenes.setCurrentItemTransform(0, QRectF(40, 50, 800, 600));
+    SceneItem* logo = scenes.addNewSourceToCurrent(QStringLiteral("Logo"), Source::Type::ColorBlock);
+    QVERIFY(logo != nullptr);
+    scenes.setCurrentItemTransform(0, QRectF(10, 20, 1200, 700));
+    QCOMPARE(scenes.currentItem(), logo);
+
+    // The transform fields, told apart by what they hold; the filter pages'
+    // spin boxes are hidden while no filter is selected.
+    const auto shownSpin = [&](double value) -> QDoubleSpinBox* {
+        for (QDoubleSpinBox* spin : inspector.findChildren<QDoubleSpinBox*>())
+            if (spin->isVisibleTo(&inspector) && spin->value() == value) return spin;
+        return nullptr;
+    };
+    QDoubleSpinBox* x = shownSpin(10);
+    QDoubleSpinBox* width = shownSpin(1200);
+    QVERIFY(x != nullptr);
+    QVERIFY(width != nullptr);
+
+    // 800 typed over 1200. The first digit used to be applied at once,
+    // clamped to the 16 px minimum and written back into the field, so the
+    // digits after it landed behind the "1" of "16" and 1060 was committed.
+    width->selectAll();
+    QTest::keyClicks(width, QStringLiteral("80"));
+    QCOMPARE(width->text(), QStringLiteral("80"));
+    QCOMPARE(logo->transform().width(), 1200.0);
+
+    // Something else about the layer changes meanwhile: its field follows,
+    // and the one being typed in keeps what has been typed so far.
+    scenes.setCurrentItemTransform(0, QRectF(30, 20, 1200, 700));
+    QCOMPARE(x->value(), 30.0);
+    QCOMPARE(width->text(), QStringLiteral("80"));
+
+    QTest::keyClicks(width, QStringLiteral("0"));
+    QTest::keyClick(width, Qt::Key_Return);
+    QCOMPARE(logo->transform().width(), 800.0);
+    QCOMPARE(width->text(), QStringLiteral("800"));
+
+    // A number half typed for one layer is not left behind for the next,
+    // even when the two are the same width, where it would otherwise be
+    // committed to a layer it was never typed for.
+    scenes.selectCurrentItemAt(1);
+    QCOMPARE(scenes.currentItem(), card);
+    QCOMPARE(width->text(), QStringLiteral("800"));
+    width->selectAll();
+    QTest::keyClicks(width, QStringLiteral("50"));
+    scenes.selectCurrentItemAt(0);
+    QCOMPARE(scenes.currentItem(), logo);
+    QCOMPARE(width->text(), QStringLiteral("800"));
+    QTest::keyClick(width, Qt::Key_Return);
+    QCOMPARE(logo->transform().width(), 800.0);
+    QCOMPARE(card->transform().width(), 800.0);
 }
 
 void MalloyModelTests::everyMicChangeIsAnnouncedStructurally() {
