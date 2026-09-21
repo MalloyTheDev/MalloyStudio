@@ -912,6 +912,11 @@ void MainWindow::connectModelSignals() {
         m_clipsRegistry->registerFile(path, project, m_outputSettings.replayBufferSeconds);
         flash(tr("Replay saved: %1").arg(QFileInfo(path).fileName()), 5000);
     });
+    // Queued, so a failure to record the clip is shown after the handler
+    // above announces the replay, rather than being replaced by it.
+    connect(m_clipsRegistry, &ClipsRegistry::saveFailed, this, [this](const QString& reason) {
+        flash(tr("The clip list could not be saved: %1").arg(reason), 8000);
+    }, Qt::QueuedConnection);
 }
 
 bool MainWindow::maybeSave() {

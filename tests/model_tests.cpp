@@ -81,6 +81,7 @@
 #include <QStackedWidget>
 #include <QDropEvent>
 #include <QMimeData>
+#include <QLockFile>
 #include <QWidget>
 #include <QBuffer>
 #include <QTemporaryDir>
@@ -348,6 +349,13 @@ private slots:
     // Clips registry: metadata persists to JSON and survives a reload, and
     // favorites toggle. Backs the Clips workspace.
     void clipsRegistryRoundTrips();
+    // A clip store that cannot be read is never written over: a damaged one
+    // is moved aside intact, and one that cannot be opened is left alone
+    // while the clip is kept for the next save.
+    void anUnreadableClipStoreIsNeverWrittenOver();
+    // Two registries on one store, as two windows are: each save keeps what
+    // the other wrote, and a save the lock holds off is reported, not lost.
+    void twoClipRegistriesShareOneStore();
     // Project registry: scans a dir for *.malloy.json, ignores other files,
     // and parses scene counts. Backs the Projects workspace.
     void projectRegistryScansMalloyFiles();
@@ -3288,6 +3296,178 @@ void MalloyModelTests::clipsRegistryRoundTrips() {
     QCOMPARE(first.durationText(), QStringLiteral("0:30"));
 }
 
+// Declared here rather than by including windows.h into a file this size.
+extern "C" __declspec(dllimport) void* __stdcall CreateFileW(const wchar_t*, unsigned long,
+                                                             unsigned long, void*, unsigned long,
+                                                             unsigned long, void*);
+extern "C" __declspec(dllimport) int __stdcall CloseHandle(void*);
+extern "C" __declspec(dllimport) int __stdcall ConvertStringSecurityDescriptorToSecurityDescriptorW(
+    const wchar_t*, unsigned long, void**, unsigned long*);
+extern "C" __declspec(dllimport) int __stdcall SetFileSecurityW(const wchar_t*, unsigned long, void*);
+extern "C" __declspec(dllimport) void* __stdcall LocalFree(void*);
+
+void MalloyModelTests::anUnreadableClipStoreIsNeverWrittenOver() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString store = dir.filePath(QStringLiteral("clips.json"));
+    auto contents = [](const QString& path) {
+        QFile f(path);
+        return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
+    };
+    auto overwrite = [](const QString& path, const QByteArray& bytes) {
+        QFile f(path);
+        return f.open(QIODevice::WriteOnly | QIODevice::Truncate) && f.write(bytes) == bytes.size();
+    };
+    auto clip = [](const QString& name) {
+        ClipInfo c;
+        c.name = name;
+        return c;
+    };
+
+    // (1) A damaged store reads as empty, and the next save moves it aside
+    //     intact instead of replacing it with the one new clip.
+    const QByteArray damaged = R"([{"id":"a","name":"Earlier clip"}, trunc)";
+    QVERIFY(overwrite(store, damaged));
+    QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral("could not read")));
+    ClipsRegistry reg(store);
+    QCOMPARE(reg.count(), 0);
+    QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral("was damaged")));
+    reg.addClip(clip(QStringLiteral("New")));
+    QCOMPARE(contents(store + QStringLiteral(".bad")), damaged);
+    {
+        ClipsRegistry reread(store);
+        QCOMPARE(reread.count(), 1);
+        QCOMPARE(reread.clips().first().name, QStringLiteral("New"));
+    }
+
+    // A second damaged store does not take the place of the first.
+    const QByteArray damagedAgain = "{ not json";
+    QVERIFY(overwrite(store, damagedAgain));
+    QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral("was damaged")));
+    reg.addClip(clip(QStringLiteral("Newer")));
+    QCOMPARE(contents(store + QStringLiteral(".bad")), damaged);
+    QCOMPARE(contents(store + QStringLiteral(".bad.1")), damagedAgain);
+    {
+        ClipsRegistry reread(store);
+        QCOMPARE(reread.count(), 2);
+    }
+
+    const auto nativeStore = QDir::toNativeSeparators(store);
+    const auto* storeW = reinterpret_cast<const wchar_t*>(nativeStore.utf16());
+    QSignalSpy failed(&reg, &ClipsRegistry::saveFailed);
+
+    // (2) A store that cannot be read at all, here because its permissions
+    //     deny reading while still allowing it to be replaced. What it holds
+    //     is unknown, so it is left alone: the save is refused and reported.
+    {
+        const QByteArray before = contents(store);
+        auto setAcl = [storeW](const wchar_t* sddl) {
+            constexpr unsigned long kSddlRevision1 = 1, kDaclSecurityInformation = 4;
+            void* sd = nullptr;
+            if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, kSddlRevision1, &sd,
+                                                                      nullptr))
+                return false;
+            const bool set = SetFileSecurityW(storeW, kDaclSecurityInformation, sd) != 0;
+            LocalFree(sd);
+            return set;
+        };
+        // Everyone is refused FILE_READ_DATA and allowed everything else.
+        QVERIFY(setAcl(L"D:P(D;;0x1;;;WD)(A;;FA;;;WD)"));
+        auto readable = qScopeGuard([&setAcl] { setAcl(L"D:P(A;;FA;;;WD)"); });
+        QVERIFY(!QFile(store).open(QIODevice::ReadOnly));
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral("could not save")));
+        reg.addClip(clip(QStringLiteral("While unreadable")));
+        QCOMPARE(failed.count(), 1);
+        QCOMPARE(reg.count(), 3);
+        readable.dismiss();
+        QVERIFY(setAcl(L"D:P(A;;FA;;;WD)"));
+        QCOMPARE(contents(store), before);
+    }
+
+    // (3) A store another program holds open. It can be read but not
+    //     replaced, so the write itself fails. That is reported too, and the
+    //     clips are kept for the next save rather than dropped.
+    {
+        const QByteArray before = contents(store);
+        constexpr unsigned long kGenericRead = 0x80000000, kShareRead = 1, kOpenExisting = 3;
+        void* held = CreateFileW(storeW, kGenericRead, kShareRead, nullptr, kOpenExisting, 0,
+                                 nullptr);
+        QVERIFY(held != reinterpret_cast<void*>(-1));
+        auto release = qScopeGuard([held] { CloseHandle(held); });
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral("could not save")));
+        reg.addClip(clip(QStringLiteral("While held")));
+        QCOMPARE(failed.count(), 2);
+        QCOMPARE(reg.count(), 4);
+        release.dismiss();
+        CloseHandle(held);
+        QCOMPARE(contents(store), before);
+    }
+
+    QVERIFY(reg.save());
+    ClipsRegistry reread(store);
+    QCOMPARE(reread.count(), 4);
+    QCOMPARE(reread.clips().at(0).name, QStringLiteral("While held"));
+    QCOMPARE(reread.clips().at(1).name, QStringLiteral("While unreadable"));
+}
+
+void MalloyModelTests::twoClipRegistriesShareOneStore() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString store = dir.filePath(QStringLiteral("clips.json"));
+    auto clip = [](const QString& name) {
+        ClipInfo c;
+        c.name = name;
+        return c;
+    };
+
+    // Both read the store before either writes, as two windows do at startup.
+    ClipsRegistry a(store);
+    ClipsRegistry b(store);
+    a.addClip(clip(QStringLiteral("From A")));
+    b.addClip(clip(QStringLiteral("From B")));   // b never read A's clip
+
+    // B's save kept A's clip, and B now lists it too.
+    QCOMPARE(b.count(), 2);
+    QCOMPARE(b.clips().at(0).name, QStringLiteral("From B"));
+    QCOMPARE(b.clips().at(1).name, QStringLiteral("From A"));
+    {
+        ClipsRegistry reread(store);
+        QCOMPARE(reread.count(), 2);
+    }
+
+    // An edit made from a stale copy changes only the clip it names. A has
+    // not seen B's clip, and B's copy of A's clip is not a favorite.
+    const QString fromA = a.clips().first().id;
+    const QString fromB = b.clips().first().id;
+    a.setFavorite(fromA, true);
+    b.setFavorite(fromB, true);
+    {
+        ClipsRegistry reread(store);
+        QCOMPARE(reread.count(), 2);
+        for (const ClipInfo& c : reread.clips())
+            QVERIFY2(c.favorite, qPrintable(c.name));
+    }
+
+    // A save the lock holds off is reported, and the clip stays listed and
+    // goes out with the next save instead of being lost.
+    QLockFile lock(store + QStringLiteral(".lock"));
+    QVERIFY(lock.tryLock(0));
+    QSignalSpy failed(&a, &ClipsRegistry::saveFailed);
+    QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral("could not save")));
+    a.addClip(clip(QStringLiteral("While locked")));
+    QCOMPARE(failed.count(), 1);
+    QCOMPARE(a.count(), 3);
+    lock.unlock();
+    {
+        ClipsRegistry reread(store);
+        QCOMPARE(reread.count(), 2);
+    }
+    QVERIFY(a.save());
+    ClipsRegistry reread(store);
+    QCOMPARE(reread.count(), 3);
+    QCOMPARE(reread.clips().first().name, QStringLiteral("While locked"));
+}
+
 void MalloyModelTests::projectRegistryScansMalloyFiles() {
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
@@ -3635,6 +3815,7 @@ void MalloyModelTests::registriesDegradeGracefullyOnBadInput() {
         QVERIFY(f.open(QIODevice::WriteOnly));
         f.write("{ this is not valid json ]]]");
         f.close();
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral("could not read")));
         ClipsRegistry reg(corrupt);
         QCOMPARE(reg.count(), 0);
     }
