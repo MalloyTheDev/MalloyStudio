@@ -18,7 +18,7 @@ and records to MP4/MKV via **ffmpeg**.
 | Cut / Fade scene transitions | v3 |
 | Image, Text, Color Block, Browser sources | v3 |
 | WASAPI desktop-audio capture & Audio Mixer | v4 |
-| Real MP4 recording (ffmpeg stdin + named-pipe audio) | v4 |
+| MP4 recording (ffmpeg, video and audio over restricted named pipes) | v4 |
 | Window Capture (PrintWindow / BitBlt per HWND) | v5 |
 | Source Filters (Crop, Opacity, Color Correction) | v5 |
 | Per-source microphone input (model layer) | v5 |
@@ -34,6 +34,21 @@ and records to MP4/MKV via **ffmpeg**.
 | **Per-source mute hotkeys** | **v7** |
 | **ffmpeg stderr in error dialogs** | **v7** |
 
+### Since v7
+
+| Feature | Notes |
+|---|---|
+| Camera source | Media Foundation; opens the camera's highest-rate native format up to 1080p |
+| Windows.Graphics.Capture backend | Alternative to DXGI for display and window capture (`capture/backend` setting), for comparison |
+| Studio mode | Preview and program scenes, with the program scene's captures kept running while another is staged |
+| Editor timeline and render queue | Clips reference media files; renders run in the background and survive restarts |
+| Twitch sign-in | Device-code sign-in fetches the stream key and pushes title and category on Go Live |
+| Stream key relay | Opt-in: ffmpeg publishes to a local relay so the key never appears on its command line; rtmps is carried over TLS |
+| Replay saves in real time | A saved replay plays at the speed it was captured, with its audio from the first moment |
+| Device consent on project load | Cameras, microphones, displays and windows named by an opened project stay off until allowed |
+| Untrusted project input | Media paths must be local drive-absolute paths; files over 32 MB, out-of-range ids and values are refused |
+| Capture recovery | Display, camera and microphone capture restart by themselves after a UAC prompt, a lock screen or an unplugged device |
+
 ---
 
 ## Prerequisites
@@ -44,6 +59,7 @@ and records to MP4/MKV via **ffmpeg**.
 | Qt 6.5 or later | Widgets module; MinGW-w64 or MSVC 2022 toolchain |
 | CMake 3.21+ | Included with Qt installer |
 | **ffmpeg.exe** on `PATH` | `winget install Gyan.FFmpeg` or the full build from ffmpeg.org |
+| ffprobe.exe on `PATH` (optional) | Ships with ffmpeg; used to read media durations and sizes for the Media library |
 | Ninja | Bundled with CMake; or install via `winget install Ninja-build.Ninja` |
 
 > The project is Windows-only. DXGI, WASAPI, PrintWindow, and named-pipe audio
@@ -75,7 +91,9 @@ cmake -S . -B build -G Ninja
 ### Output
 
 - `build\MalloyStudio.exe` — main application
-- `build\MalloyStudioTests.exe` — unit test binary (run via `ctest --test-dir build`)
+- Five test executables, run together by `ctest --test-dir build`: `MalloyStudioTests`
+  (the model, capture, audio, encoder and UI rules), `MalloyPipeIoTests`,
+  `MalloyCaptureLifetimeTests`, `MalloyOutputSettingsTests` and `MalloyCaptureHandoffTests`
 
 ---
 
@@ -83,7 +101,7 @@ cmake -S . -B build -G Ninja
 
 Launch `MalloyStudio.exe`. On first run the window is 1280×720; docks can be
 rearranged and the layout is persisted in `QSettings` (Windows Registry under
-`HKCU\Software\MalloyStudio`).
+`HKCU\Software\MalloyStudio\MalloyStudio`).
 
 If ffmpeg is not on `PATH`, the Record button is disabled with an explanatory
 tooltip; all other features work normally.
@@ -94,55 +112,40 @@ tooltip; all other features work normally.
 
 ```
 src/
-├── main.cpp                    Entry point — dark palette + MainWindow
-├── MainWindow.{h,cpp}          Top-level window, menus, signal wiring
-│
-├── model/
-│   ├── Canvas.h                Canvas constants (1920×1080) + layout helpers
-│   ├── Source.{h,cpp}          Named, typed source (DisplayCapture → AudioInput)
-│   ├── SceneItem.{h,cpp}       Per-layer item: transform + filter chain
-│   ├── FilterEffect.{h,cpp}    Filter base + CropFilter, OpacityFilter, ColorCorrectionFilter
-│   ├── Scene.{h,cpp}           Ordered list of SceneItems, selection tracking
-│   └── SceneCollection.{h,cpp} Full model: sources, scenes, undo, JSON I/O
-│
-├── capture/
-│   ├── DxgiCapture.{h,cpp}     DXGI Desktop Duplication worker thread
-│   ├── WindowCapture.{h,cpp}   PrintWindow/BitBlt window-capture worker thread
-│   ├── WindowCaptureSession.{h,cpp}  CaptureSession wrapper for WindowCapture
-│   ├── WasapiCapture.{h,cpp}   WASAPI audio worker thread (loopback + input)
-│   ├── MonitorInfo.h            DXGI adapter/output enumeration helper
-│   └── CaptureController.{h,cpp}  Reconciles active capture sessions to scene state
-│
-├── audio/
-│   ├── AudioInput.h             POD: id, name, deviceId, volume, muted, peaks
-│   └── AudioController.{h,cpp}  Owns WASAPI workers; per-source reconcile; VU bus
-│
-├── recording/
-│   ├── OutputSettings.h         QSettings-backed encoder config (fps/crf/codec…)
-│   └── Recorder.{h,cpp}         ffmpeg subprocess + video stdin + audio named pipe
-│
-├── project/
-│   └── ProjectDocument.{h,cpp}  Load/save .malloy.json via QSaveFile
-│
-└── ui/
-    ├── PreviewWidget.{h,cpp}    Compositing canvas, drag-resize, transitions
-    ├── InspectorPanel.{h,cpp}   Per-item transform, source props, filter chain UI
-    ├── ScenesPanel.{h,cpp}      Scene list with Add/Remove/Rename
-    ├── SourcesPanel.{h,cpp}     Source library with type-based Add menu
-    ├── AudioMixerPanel.{h,cpp}  Per-input VU strip + volume + mute
-    ├── ControlsBar.{h,cpp}      Transition picker + Record button + elapsed timer
-    ├── VuMeter.{h,cpp}          Stereo peak bargraph widget
-    ├── MonitorPickerDialog.{h,cpp}  DXGI output picker for DisplayCapture
-    ├── WindowPickerDialog.{h,cpp}   EnumWindows-based window picker for WindowCapture
-    └── OutputSettingsDialog.{h,cpp} Encoder settings form (fps/crf/codec/bitrate…)
+├── main.cpp, MainWindow.{h,cpp}   Entry point; top-level window and signal wiring
+├── model/        Canvas, Source, SceneItem, FilterEffect, Scene, SceneCollection
+│                 (sources, scenes, undo snapshots, JSON I/O, device consent hold)
+├── capture/      CaptureController and sessions: DXGI and WGC display capture,
+│                 PrintWindow and WGC window capture, Media Foundation camera,
+│                 WASAPI audio workers, worker retirement, frame handoff
+├── audio/        AudioController (inputs, 50 Hz program-bus mixer), AudioMix, Resampler
+├── media/        TimedSource: the frame and PCM source interfaces the encoder reads
+├── recording/    EncoderPipeline (ffmpeg over named pipes), Recorder and Streaming
+│                 pipelines, MediaController, EncoderRegistry, OutputSettings,
+│                 StreamSettings, RtmpKeyRelay, replay ring sources, RenderQueue,
+│                 RenderPipeline, TimelineGraphBuilder
+├── platform/     TwitchAuth, TwitchApi, CredentialStore, SmartConfig, MachineLoad,
+│                 FrameProfile
+├── project/      ProjectDocument, MediaPathPolicy, MediaRegistry, ProjectRegistry,
+│                 ClipsRegistry, RecentRecordings
+├── input/        HotkeyManager (global hotkeys)
+└── ui/           PreviewWidget, InspectorPanel, ScenesPanel, SourcesPanel,
+                  AudioMixerPanel, ControlsBar, dialogs; shell/ (AppShell, icon rail,
+                  status bar); workspaces/ (Recording, Streaming, Editor, Settings,
+                  Media and project libraries); dashboard/; components/
 
 tests/
-└── model_tests.cpp             QtTest suite (12 tests, run via ctest)
+├── model_tests.cpp             QtTest suite for the model, capture, audio, encoder and UI rules
+├── pipe_io_tests.cpp           Cancellable named-pipe I/O
+├── capture_lifetime_tests.cpp  Capture callback gate lifetime
+├── output_settings_tests.cpp   Output settings persistence
+└── capture_handoff_tests.cpp   Bounded frame handoff
 
 docs/
 ├── ARCHITECTURE.md             Subsystem deep-dive and design decisions
 ├── PROJECT_FORMAT.md           .malloy.json schema reference
-└── CHANGELOG.md                Per-version feature list
+├── CHANGELOG.md                Per-version feature list
+└── adr/                        Architecture decision records
 ```
 
 ---
@@ -153,20 +156,19 @@ docs/
 ctest --test-dir build --output-on-failure
 ```
 
-The suite mocks `CaptureSession` to avoid needing real hardware and verifies:
+The suites use fake capture sessions and audio workers, so they need no capture
+hardware. Tests that run a real encode skip themselves when ffmpeg is not on `PATH`. They cover, among other things:
 
-- Source sharing, GC, and JSON round-trips
-- v1 → v2 project migration
-- Undo/redo + edit-session coalescing
-- CaptureController display-session reconciliation
-- Filter chain serialization round-trip
-- OutputSettings QSettings round-trip
-- AudioController per-source reconciliation
-- Recorder construction without ffmpeg
+- Source sharing, JSON round-trips, v1 to v2 migration and the load-time checks
+- Undo/redo, edit sessions and what stays on air across them
+- Capture reconciliation, retry after failure, and worker thread retirement
+- The audio mixer, input restarts and value bounds
+- Encoder arguments, cadence and timestamps, and real short encodes
+- The stream key relay, Twitch sign-in against a local stand-in, and the render queue
 
 ---
 
-## Known limitations (v7)
+## Known limitations
 
 - **Window capture** captures the client area only; title bar chrome is excluded.
 - **DRM-protected windows** (Netflix, Prime Video in browsers) capture as a black frame — Windows OS limitation, same as OBS.
@@ -174,7 +176,7 @@ The suite mocks `CaptureSession` to avoid needing real hardware and verifies:
 - **Browser source** is a placeholder (renders a grey box); WebEngineView integration is still deferred.
 - **Desktop Audio as a scene source** is not yet available — `AudioController` auto-creates a `loopback:default` mixer strip so desktop audio always reaches recordings, but adding it as a scene-level source needs a JSON schema bump (deferred to v8).
 - **Push-to-talk** for microphones requires a low-level keyboard hook (out of scope).
-- Audio sample-rate conversion is not implemented — devices that deliver at rates other than 48 kHz will produce a one-time warning and may drift.
+- Desktop audio keeps capturing the playback device that was the default when its capture started; changing the default device while running is not followed yet.
 
 ---
 
