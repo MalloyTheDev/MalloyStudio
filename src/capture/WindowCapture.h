@@ -40,7 +40,10 @@ protected:
 
 private:
     quintptr          m_hwnd;
-    std::atomic<bool> m_running{false};
+    // Armed from construction rather than set when run() begins, so a stop
+    // requested between start() and the thread's first instruction is not
+    // overwritten. Each object runs once.
+    std::atomic<bool> m_running{true};
     std::atomic<bool> m_delivering{true};
     CaptureFrameHandoff m_handoff;
 };

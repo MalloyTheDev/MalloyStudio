@@ -59,7 +59,8 @@ void DxgiCapture::requestStop() {
 }
 
 void DxgiCapture::run() {
-    m_running.store(true, std::memory_order_relaxed);
+    // Stopped before it began: do not create a duplication only to drop it.
+    if (!m_running.load(std::memory_order_relaxed)) return;
 
     // --- Create DXGI factory and select the right adapter ---
     IDXGIFactory1* factory = nullptr;

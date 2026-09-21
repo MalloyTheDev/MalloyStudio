@@ -3,6 +3,7 @@
 #include "DxgiCapture.h"
 #include "WgcCaptureSession.h"
 #include "WindowCaptureSession.h"
+#include "WorkerRetirement.h"
 #include "CameraCaptureSession.h"
 #include "model/Scene.h"
 #include "model/SceneCollection.h"
@@ -44,10 +45,7 @@ void DxgiCaptureSession::startCapture() {
 void DxgiCaptureSession::stopCapture() {
     if (!m_capture) return;
     disconnect(m_capture, nullptr, this, nullptr);
-    m_capture->requestStop();
-    m_capture->wait(4000);
-    m_retired = m_capture->stats();
-    delete m_capture;
+    retireWorker(m_capture, 4000, [this](const DxgiCapture& c) { m_retired = c.stats(); });
     m_capture = nullptr;
 }
 

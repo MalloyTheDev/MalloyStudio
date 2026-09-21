@@ -1,4 +1,5 @@
 #include "WindowCaptureSession.h"
+#include "WorkerRetirement.h"
 
 WindowCaptureSession::WindowCaptureSession(quintptr hwnd, QObject* parent)
     : CaptureSession(parent), m_hwnd(hwnd) {}
@@ -29,10 +30,7 @@ void WindowCaptureSession::stopCapture() {
     if (!m_capture) return;
     ++m_generation;
     disconnect(m_capture, nullptr, this, nullptr);
-    m_capture->requestStop();
-    m_capture->wait(4000);
-    m_retired = m_capture->stats();
-    delete m_capture;
+    retireWorker(m_capture, 4000, [this](const WindowCapture& c) { m_retired = c.stats(); });
     m_capture = nullptr;
 }
 

@@ -21,8 +21,6 @@ void WindowCapture::requestStop() {
 }
 
 void WindowCapture::run() {
-    m_running.store(true, std::memory_order_relaxed);
-
     HWND hwnd = reinterpret_cast<HWND>(m_hwnd);
 
     while (m_running.load(std::memory_order_relaxed)) {
@@ -33,6 +31,14 @@ void WindowCapture::run() {
         }
 
         if (!m_delivering.load(std::memory_order_relaxed)) {
+            msleep(kFrameMs);
+            continue;
+        }
+
+        // PrintWindow is serviced by the application that owns the window, so
+        // asking a hung one blocks this thread until it recovers, and a stop
+        // requested meanwhile cannot be honoured. Hold the last frame instead.
+        if (IsHungAppWindow(hwnd)) {
             msleep(kFrameMs);
             continue;
         }

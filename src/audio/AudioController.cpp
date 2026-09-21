@@ -1,6 +1,7 @@
 #include "AudioController.h"
 #include "audio/AudioMix.h"
 #include "capture/WasapiCapture.h"
+#include "capture/WorkerRetirement.h"
 
 #include <QDateTime>
 #include <QHash>
@@ -70,12 +71,8 @@ AudioController::AudioController(QObject* parent) : TimedPcmSource(parent) {
 
 AudioController::~AudioController() {
     m_mixerTimer->stop();
-    for (WasapiCapture* w : std::as_const(m_workers)) {
-        if (!w) continue;
-        w->requestStop();
-        w->wait(4000);
-        delete w;
-    }
+    for (WasapiCapture* w : std::as_const(m_workers))
+        retireWorker(w, 4000);
 }
 
 // ---------------------------------------------------------------------------
@@ -268,9 +265,9 @@ void AudioController::stopWorkerAt(int index) {
     if (index < 0 || index >= m_workers.size()) return;
     WasapiCapture* w = m_workers[index];
     if (!w) return;
-    w->requestStop();
-    w->wait(4000);
-    delete w;
+    // A device that hangs in its driver can keep the worker from stopping;
+    // it is cut loose then rather than destroyed while running.
+    retireWorker(w, 4000);
     m_workers[index] = nullptr;
 }
 

@@ -77,7 +77,8 @@ void WasapiCapture::requestStop() {
 }
 
 void WasapiCapture::run() {
-    m_running.store(true, std::memory_order_relaxed);
+    // Stopped before it began: do not open the device only to close it.
+    if (!m_running.load(std::memory_order_relaxed)) return;
 
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     const bool comOwned = SUCCEEDED(hr); // RPC_E_CHANGED_MODE means thread is already STA — uncommon for QThread

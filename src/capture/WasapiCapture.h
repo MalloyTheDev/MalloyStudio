@@ -43,5 +43,8 @@ protected:
 private:
     QString           m_deviceId;
     bool              m_loopback = true;
-    std::atomic<bool> m_running{false};
+    // Armed from construction rather than set when run() begins, so a stop
+    // requested between start() and the thread's first instruction is not
+    // overwritten. Each object runs once.
+    std::atomic<bool> m_running{true};
 };

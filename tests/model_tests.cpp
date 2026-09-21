@@ -4,6 +4,8 @@
 #include "capture/CaptureBackend.h"
 #include "capture/CaptureController.h"
 #include "capture/WgcCapture.h"
+#include "capture/WindowCapture.h"
+#include "capture/WorkerRetirement.h"
 #include "platform/FrameProfile.h"
 #include "ui/PreviewWidget.h"
 #include "input/HotkeyManager.h"
@@ -53,6 +55,8 @@
 #include <QTemporaryDir>
 #include <QDoubleSpinBox>
 #include <QPushButton>
+#include <QScopeGuard>
+#include <QSemaphore>
 #include <QSpinBox>
 #include <limits>
 #include <QTimer>
@@ -92,6 +96,22 @@ private:
 QStringList FakeCaptureSession::started;
 QStringList FakeCaptureSession::stopped;
 QList<FakeCaptureSession*> FakeCaptureSession::created;
+
+// A worker that takes no notice of a request to stop until it is let go. It
+// stands in for one blocked in a call that someone else services, such as
+// PrintWindow on a window whose application has stopped responding.
+class StuckWorker final : public QThread {
+public:
+    void requestStop() { stopRequests.fetch_add(1); }
+    void release() { m_release.release(); }
+    std::atomic<int> stopRequests{0};
+
+protected:
+    void run() override { m_release.acquire(); }
+
+private:
+    QSemaphore m_release;
+};
 
 class MalloyModelTests : public QObject {
     Q_OBJECT
@@ -277,6 +297,8 @@ private slots:
     void clipsLongerThanTheTimelineArePlacedNotAborted();
     void undoKeepsTheLiveCaptureFrameOnAir();
     void aSavedReplayPlaysInRealTime();
+    void aWorkerThatWillNotStopIsCutLooseNotDestroyed();
+    void aStopRequestedBeforeTheWorkerRunsIsKept();
     void theReplayBufferIsAFrameConsumer();
     void spinBoxesAndTextFieldsKeepTheirDigits();
     void editorClipRoundTripPreservesSourceReference();
@@ -4927,6 +4949,67 @@ void MalloyModelTests::captureDemandFollowsConsumers() {
     QVERIFY(!preview.consumersPresent());
     QCOMPARE(demand.count(), 1);
     QCOMPARE(demand.takeFirst().at(0).toBool(), false);
+}
+
+void MalloyModelTests::aWorkerThatWillNotStopIsCutLooseNotDestroyed() {
+    // A worker that stops in time is simply deleted, and the last look at it
+    // happens first, while it is still there to be read.
+    {
+        auto* quick = new StuckWorker;
+        quick->release();
+        quick->start();
+        QPointer<StuckWorker> gone(quick);
+        int lookedAt = 0;
+        QVERIFY(retireWorker(quick, 5000, [&](const StuckWorker&) { ++lookedAt; }));
+        QVERIFY(!gone);
+        QCOMPARE(lookedAt, 1);
+    }
+
+    // One that does not stop must not be destroyed: Qt aborts the whole
+    // process when a running QThread is deleted, which is what removing a
+    // hung window's source used to do.
+    QObject owner;
+    auto* stuck = new StuckWorker;
+    stuck->setParent(&owner);
+    QPointer<StuckWorker> alive(stuck);
+    const QMetaObject::Connection listener =
+        QObject::connect(stuck, &QThread::started, &owner, [] {});
+    stuck->start();
+    const auto letGo = qScopeGuard([&] { if (alive) alive->release(); });
+
+    int lookedAt = 0;
+    QVERIFY(!retireWorker(stuck, 50, [&](const StuckWorker&) { ++lookedAt; }));
+    QCOMPARE(lookedAt, 1);
+    QVERIFY(alive);
+    QVERIFY(alive->isRunning());
+    QCOMPARE(alive->stopRequests.load(), 1);
+
+    // Nothing it does from here reaches its old listeners, and its old owner
+    // no longer owns it, so the owner going away cannot delete it either.
+    // disconnect() reports false for a connection that is already gone.
+    QVERIFY(!QObject::disconnect(listener));
+    QVERIFY(alive->parent() == nullptr);
+
+    // When its thread finally ends it deletes itself.
+    alive->release();
+    QTRY_VERIFY_WITH_TIMEOUT(!alive, 5000);
+}
+
+void MalloyModelTests::aStopRequestedBeforeTheWorkerRunsIsKept() {
+    // A stop that lands between start() and the thread's first instruction
+    // used to be overwritten when run() set the running flag, so the worker
+    // went on to do its work and the stop waited out its timeout. A null
+    // window is used because the worker notices at once that it is gone and
+    // says so: if the stop was lost, it reports a closed window; if kept, it
+    // does nothing at all.
+    WindowCapture worker(0);
+    std::atomic<int> closed{0};
+    QObject::connect(&worker, &WindowCapture::windowClosed, &worker,
+                     [&] { closed.fetch_add(1); }, Qt::DirectConnection);
+    worker.requestStop();
+    worker.start();
+    QVERIFY(worker.wait(5000));
+    QCOMPARE(closed.load(), 0);
 }
 
 QTEST_MAIN(MalloyModelTests)

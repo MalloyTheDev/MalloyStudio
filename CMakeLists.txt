@@ -41,6 +41,7 @@ set(MALLOY_CORE_SOURCES
     src/capture/CameraCapture.h
     src/capture/CameraCaptureSession.cpp
     src/capture/CameraCaptureSession.h
+    src/capture/WorkerRetirement.h
     src/audio/AudioController.cpp
     src/audio/AudioController.h
     src/audio/AudioInput.h
