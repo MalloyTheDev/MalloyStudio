@@ -1,6 +1,7 @@
 #include "audio/AudioController.h"
 #include "audio/AudioMix.h"
 #include "audio/Resampler.h"
+#include "audio/StereoDownmix.h"
 #include "capture/CaptureBackend.h"
 #include "capture/CaptureController.h"
 #include "capture/WgcCapture.h"
@@ -428,6 +429,8 @@ private slots:
     void resamplerPreservesPitchAcrossRates();
     void pcmFifoKeepsTheSampleStreamContinuous();
     void mixerKeepsStereoSeparation();
+    void aSurroundDeviceIsFoldedIntoStereo();
+    void deviceSampleFormatsAreReadOrRefused();
     void blurHandlesImagesSmallerThanItsRadius();
     void timelineGraphPlacesTrimsAndScalesClips();
     void timelineGraphMixesAudioAndKeepsPathsOutOfTheGraph();
@@ -3987,6 +3990,230 @@ void MalloyModelTests::mixerKeepsStereoSeparation() {
     QCOMPARE(small.size(), size_t(2));
     QCOMPARE(small[0], 1000);
     QCOMPARE(small[1], -2000);
+}
+
+namespace {
+// One sample stored as a device stores it: little-endian, at full scale.
+void appendDeviceSample(QByteArray& out, SampleEncoding encoding, float v) {
+    switch (encoding) {
+    case SampleEncoding::Float32:
+        out.append(reinterpret_cast<const char*>(&v), sizeof v);
+        break;
+    case SampleEncoding::Int16: {
+        const qint16 s = qint16(std::lround(v * 32767.0f));
+        out.append(reinterpret_cast<const char*>(&s), sizeof s);
+        break;
+    }
+    case SampleEncoding::Int24Packed: {
+        const qint32 s = qint32(std::lround(double(v) * 8388607.0));
+        out.append(char(s & 0xff));
+        out.append(char((s >> 8) & 0xff));
+        out.append(char((s >> 16) & 0xff));
+        break;
+    }
+    case SampleEncoding::Int32: {
+        const qint32 s = qint32(std::llround(double(v) * 2147483647.0));
+        out.append(reinterpret_cast<const char*>(&s), sizeof s);
+        break;
+    }
+    case SampleEncoding::UInt8:
+        out.append(char(quint8(std::lround(128.0f + v * 127.0f))));
+        break;
+    case SampleEncoding::Unsupported:
+        break;
+    }
+}
+
+int blockAlignFor(SampleEncoding encoding, int channels) {
+    DeviceSampleFormat f;
+    f.encoding = encoding;
+    f.channels = channels;
+    return f.bytesPerFrame();
+}
+}  // namespace
+
+void MalloyModelTests::aSurroundDeviceIsFoldedIntoStereo() {
+    // Speaker bits as dwChannelMask numbers them.
+    constexpr quint32 FL = 0x1, FR = 0x2, FC = 0x4, LFE = 0x8, BL = 0x10, BR = 0x20,
+                      SL = 0x200, SR = 0x400;
+    constexpr float k = 0.70710678f;   // -3 dB
+
+    struct Layout {
+        const char*   name;
+        quint32       mask;
+        QList<float>  channels;   // one frame, in mask bit order
+        float         left;       // what the pair should carry
+        float         right;
+    };
+    const QList<Layout> layouts = {
+        // Stereo passes straight through.
+        {"stereo", FL | FR, {0.25f, -0.5f}, 0.25f, -0.5f},
+        // 5.1 as Windows names it (back surrounds) and as most receivers
+        // report it (side surrounds). Centre into both sides at -3 dB, each
+        // surround into its own side at -3 dB, and LFE left out.
+        {"5.1", FL | FR | FC | LFE | BL | BR, {0.1f, -0.2f, 0.3f, 0.9f, 0.15f, -0.25f},
+         0.1f + k * 0.3f + k * 0.15f, -0.2f + k * 0.3f - k * 0.25f},
+        {"5.1 side", FL | FR | FC | LFE | SL | SR, {0.1f, -0.2f, 0.3f, 0.9f, 0.15f, -0.25f},
+         0.1f + k * 0.3f + k * 0.15f, -0.2f + k * 0.3f - k * 0.25f},
+        {"7.1", FL | FR | FC | LFE | BL | BR | SL | SR,
+         {0.1f, -0.1f, 0.2f, 0.9f, 0.05f, -0.05f, 0.3f, -0.3f},
+         0.1f + k * (0.2f + 0.05f + 0.3f), -0.1f + k * (0.2f - 0.05f - 0.3f)},
+        // Dialogue alone, on the centre channel: the case the old capture lost
+        // entirely.
+        {"5.1 dialogue", FL | FR | FC | LFE | BL | BR, {0, 0, 0.5f, 0, 0, 0}, k * 0.5f, k * 0.5f},
+        // Rumble alone reaches neither side.
+        {"7.1 LFE", FL | FR | FC | LFE | BL | BR | SL | SR, {0, 0, 0, 0.8f, 0, 0, 0, 0}, 0, 0},
+        // A surround stays on its own side.
+        {"7.1 side left", FL | FR | FC | LFE | BL | BR | SL | SR, {0, 0, 0, 0, 0, 0, 0.6f, 0},
+         k * 0.6f, 0},
+        // Everything at full scale clips at full scale rather than wrapping.
+        {"5.1 overload", FL | FR | FC | LFE | BL | BR, {1, 1, 1, 1, 1, 1}, 1.0f, 1.0f},
+    };
+    const QList<SampleEncoding> encodings = {SampleEncoding::Float32, SampleEncoding::Int16,
+                                             SampleEncoding::Int32, SampleEncoding::Int24Packed};
+    const auto expected = [](float v) {
+        return std::clamp(int(std::lround(v * 32768.0f)), -32768, 32767);
+    };
+
+    for (const SampleEncoding encoding : encodings) {
+        for (const Layout& layout : layouts) {
+            const int channels = int(layout.channels.size());
+            const DeviceSampleFormat format = describeDeviceFormat(
+                encoding == SampleEncoding::Float32 ? SampleType::Float : SampleType::Pcm,
+                blockAlignFor(encoding, channels) / channels * 8,
+                blockAlignFor(encoding, channels), channels, layout.mask);
+            const QByteArray what = QByteArray(layout.name) + " as encoding "
+                                    + QByteArray::number(int(encoding));
+            QVERIFY2(format.supported(), what.constData());
+            QCOMPARE(int(format.encoding), int(encoding));
+
+            // Two frames, the second the negative of the first, so a stride
+            // that is wrong by a channel shows up in the second.
+            QByteArray packet;
+            for (float v : layout.channels) appendDeviceSample(packet, encoding, v);
+            for (float v : layout.channels) appendDeviceSample(packet, encoding, -v);
+            QCOMPARE(packet.size(), 2 * format.bytesPerFrame());
+
+            std::vector<qint16> out(4, qint16(12345));
+            const StereoPeaks peaks = downmixToStereo(format, packet.constData(), 2, out.data());
+
+            // Within two steps of 16-bit rounding, whatever the source depth.
+            const int wantL = expected(layout.left);
+            const int wantR = expected(layout.right);
+            QVERIFY2(std::abs(out[0] - wantL) <= 2,
+                     qPrintable(QStringLiteral("%1: left %2, expected %3")
+                                    .arg(QString::fromLatin1(what)).arg(out[0]).arg(wantL)));
+            QVERIFY2(std::abs(out[1] - wantR) <= 2,
+                     qPrintable(QStringLiteral("%1: right %2, expected %3")
+                                    .arg(QString::fromLatin1(what)).arg(out[1]).arg(wantR)));
+            QVERIFY2(std::abs(out[2] - expected(-layout.left)) <= 2, what.constData());
+            QVERIFY2(std::abs(out[3] - expected(-layout.right)) <= 2, what.constData());
+
+            // The meters read the pair that is recorded.
+            QVERIFY2(std::abs(peaks.left - std::min(1.0f, std::abs(layout.left))) < 1e-3f,
+                     what.constData());
+            QVERIFY2(std::abs(peaks.right - std::min(1.0f, std::abs(layout.right))) < 1e-3f,
+                     what.constData());
+        }
+    }
+}
+
+void MalloyModelTests::deviceSampleFormatsAreReadOrRefused() {
+    // What a shared-mode mix format usually is.
+    QCOMPARE(int(describeDeviceFormat(SampleType::Float, 32, 8, 2, 0x3).encoding),
+             int(SampleEncoding::Float32));
+    // Packed 24-bit, and 24 valid bits in a 32-bit container.
+    QCOMPARE(int(describeDeviceFormat(SampleType::Pcm, 24, 6, 2, 0x3).encoding),
+             int(SampleEncoding::Int24Packed));
+    QCOMPARE(int(describeDeviceFormat(SampleType::Pcm, 32, 8, 2, 0x3).encoding),
+             int(SampleEncoding::Int32));
+    QCOMPARE(int(describeDeviceFormat(SampleType::Pcm, 16, 4, 2, 0x3).encoding),
+             int(SampleEncoding::Int16));
+    QCOMPARE(int(describeDeviceFormat(SampleType::Pcm, 8, 2, 2, 0x3).encoding),
+             int(SampleEncoding::UInt8));
+
+    // Refused rather than read as something they are not: 64-bit float, a
+    // container size PCM does not have, a compressed or companded tag, no
+    // channels, and a block alignment the samples would not fit.
+    QVERIFY(!describeDeviceFormat(SampleType::Float, 64, 16, 2, 0x3).supported());
+    QVERIFY(!describeDeviceFormat(SampleType::Pcm, 20, 6, 2, 0x3).supported());
+    QVERIFY(!describeDeviceFormat(SampleType::Other, 16, 4, 2, 0x3).supported());
+    QVERIFY(!describeDeviceFormat(SampleType::Pcm, 16, 0, 0, 0).supported());
+    QVERIFY(!describeDeviceFormat(SampleType::Pcm, 16, 2, 2, 0x3).supported());
+
+    // An unsupported format writes nothing and reports no level.
+    {
+        const DeviceSampleFormat refused = describeDeviceFormat(SampleType::Float, 64, 16, 2, 0x3);
+        const QByteArray loud(16, char(0x7f));
+        std::vector<qint16> out(2, qint16(777));
+        const StereoPeaks peaks = downmixToStereo(refused, loud.constData(), 1, out.data());
+        QCOMPARE(out[0], qint16(777));
+        QCOMPARE(out[1], qint16(777));
+        QCOMPARE(peaks.left, 0.0f);
+    }
+
+    // Packed 24-bit samples are read, sign and all. They used to be silence.
+    {
+        const DeviceSampleFormat f = describeDeviceFormat(SampleType::Pcm, 24, 6, 2, 0x3);
+        const char bytes[] = {
+            char(0x56), char(0x34), char(0x12),   // 0x123456
+            char(0x00), char(0x00), char(0x80),   // most negative
+            char(0xff), char(0xff), char(0x7f),   // most positive
+            char(0x00), char(0x00), char(0x00),   // silence
+        };
+        std::vector<qint16> out(4, 0);
+        downmixToStereo(f, bytes, 2, out.data());
+        QCOMPARE(out[0], qint16(0x1234));     // 0x123456 >> 8, rounded
+        QCOMPARE(out[1], qint16(-32768));
+        QCOMPARE(out[2], qint16(32767));
+        QCOMPARE(out[3], qint16(0));
+    }
+
+    // 8-bit PCM is unsigned, with 128 as silence.
+    {
+        const DeviceSampleFormat f = describeDeviceFormat(SampleType::Pcm, 8, 2, 2, 0x3);
+        const unsigned char bytes[] = {128, 0};
+        std::vector<qint16> out(2, 1);
+        downmixToStereo(f, bytes, 1, out.data());
+        QCOMPARE(out[0], qint16(0));
+        QCOMPARE(out[1], qint16(-32768));
+    }
+
+    // Mono is on both sides at full level, whatever speaker its mask names;
+    // a microphone must not come out 3 dB down for being called centre.
+    {
+        const DeviceSampleFormat f = describeDeviceFormat(SampleType::Pcm, 16, 2, 1, 0x4);
+        const qint16 in[] = {-12000};
+        std::vector<qint16> out(2, 0);
+        downmixToStereo(f, in, 1, out.data());
+        QCOMPARE(out[0], qint16(-12000));
+        QCOMPARE(out[1], qint16(-12000));
+    }
+
+    // A device that names no speaker positions, as a multichannel interface
+    // does, keeps its first pair as left and right rather than having other
+    // inputs folded in as if they were surrounds. So does one whose mask has
+    // no position this knows.
+    for (const quint32 mask : {0x0u, 0x80000000u}) {
+        const DeviceSampleFormat f = describeDeviceFormat(SampleType::Pcm, 16, 8, 4, mask);
+        const qint16 in[] = {1000, -2000, 30000, 30000};
+        std::vector<qint16> out(2, 0);
+        downmixToStereo(f, in, 1, out.data());
+        QCOMPARE(out[0], qint16(1000));
+        QCOMPARE(out[1], qint16(-2000));
+    }
+
+    // A float sample that is not a number is silence, not full scale.
+    {
+        const DeviceSampleFormat f = describeDeviceFormat(SampleType::Float, 32, 8, 2, 0x3);
+        const float in[] = {std::numeric_limits<float>::quiet_NaN(),
+                            std::numeric_limits<float>::infinity()};
+        std::vector<qint16> out(2, 1);
+        const StereoPeaks peaks = downmixToStereo(f, in, 1, out.data());
+        QCOMPARE(out[0], qint16(0));
+        QCOMPARE(out[1], qint16(0));
+        QCOMPARE(peaks.left, 0.0f);
+    }
 }
 
 void MalloyModelTests::projectDisplayNameStripsCompoundExtension() {

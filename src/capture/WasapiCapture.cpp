@@ -1,5 +1,6 @@
 #include "WasapiCapture.h"
 #include "audio/Resampler.h"
+#include "audio/StereoDownmix.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -21,6 +22,14 @@ constexpr GUID kIeeeFloatSubtype = {
 inline bool isIeeeFloatSubtype(const GUID& g) {
     return std::memcmp(&g, &kIeeeFloatSubtype, sizeof(GUID)) == 0;
 }
+// KSDATAFORMAT_SUBTYPE_PCM, for the same reason.
+constexpr GUID kPcmSubtype = {
+    0x00000001, 0x0000, 0x0010,
+    {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}
+};
+inline bool isPcmSubtype(const GUID& g) {
+    return std::memcmp(&g, &kPcmSubtype, sizeof(GUID)) == 0;
+}
 }
 
 #include <algorithm>
@@ -33,34 +42,24 @@ namespace {
 // REFTIME = 100-ns units. 200 ms buffer is conservative + low-latency enough.
 constexpr REFERENCE_TIME kBufferDuration = 2'000'000; // 200 ms
 
-// Convert a single sample of arbitrary device format into signed 16-bit.
-// Returns the absolute value in 0..1 for VU computation as well.
-struct ConvertedSample {
-    qint16 s;
-    float  abs01;
-};
-
-inline qint16 clamp16(int v) {
-    if (v >  32767) return  32767;
-    if (v < -32768) return -32768;
-    return static_cast<qint16>(v);
-}
-
-inline ConvertedSample fromFloat32(const float* src) {
-    const float f = *src;
-    const float clamped = std::max(-1.0f, std::min(1.0f, f));
-    return { clamp16(static_cast<int>(clamped * 32767.0f)),
-             std::min(1.0f, std::fabs(clamped)) };
-}
-
-inline ConvertedSample fromInt16(const qint16* src) {
-    return { *src, std::fabs(static_cast<float>(*src)) / 32768.0f };
-}
-
-inline ConvertedSample fromInt32(const qint32* src) {
-    const qint32 v = *src;
-    return { static_cast<qint16>(v >> 16),
-             std::fabs(static_cast<float>(v)) / 2147483648.0f };
+// The parts of a device's format that decide how its samples are read.
+DeviceSampleFormat sampleFormatOf(const WAVEFORMATEX& wf) {
+    SampleType type = SampleType::Other;
+    quint32 mask = 0;
+    if (wf.wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
+        // Only a format that is as long as it claims to be is read as one.
+        if (wf.cbSize >= sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)) {
+            const auto& ext = reinterpret_cast<const WAVEFORMATEXTENSIBLE&>(wf);
+            if (isIeeeFloatSubtype(ext.SubFormat)) type = SampleType::Float;
+            else if (isPcmSubtype(ext.SubFormat)) type = SampleType::Pcm;
+            mask = ext.dwChannelMask;
+        }
+    } else if (wf.wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
+        type = SampleType::Float;
+    } else if (wf.wFormatTag == WAVE_FORMAT_PCM) {
+        type = SampleType::Pcm;
+    }
+    return describeDeviceFormat(type, wf.wBitsPerSample, wf.nBlockAlign, wf.nChannels, mask);
 }
 
 } // namespace
@@ -120,6 +119,21 @@ void WasapiCapture::run() {
         return;
     }
 
+    // Refused before the stream starts, and said: a format this cannot read
+    // used to be captured as silence while the input looked connected.
+    const DeviceSampleFormat format = sampleFormatOf(*mixFormat);
+    if (!format.supported()) {
+        const QString what = QStringLiteral("WASAPI: unsupported sample format "
+                                            "(tag 0x%1, %2 bits, %3 channels)")
+                                 .arg(uint(mixFormat->wFormatTag), 4, 16, QLatin1Char('0'))
+                                 .arg(uint(mixFormat->wBitsPerSample))
+                                 .arg(uint(mixFormat->nChannels));
+        CoTaskMemFree(mixFormat);
+        client->Release();
+        fail(what);
+        return;
+    }
+
     const DWORD flags = (m_loopback ? AUDCLNT_STREAMFLAGS_LOOPBACK : 0u)
                       | AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
 
@@ -153,15 +167,7 @@ void WasapiCapture::run() {
         return;
     }
 
-    // Detect format up front so the hot loop can stay branch-light.
-    const int  deviceChannels   = mixFormat->nChannels;
-    const int  deviceSampleRate = mixFormat->nSamplesPerSec;
-    const bool deviceIsFloat    = (mixFormat->wFormatTag == WAVE_FORMAT_IEEE_FLOAT)
-                               || (mixFormat->wFormatTag == WAVE_FORMAT_EXTENSIBLE
-                                   && isIeeeFloatSubtype(
-                                       reinterpret_cast<WAVEFORMATEXTENSIBLE*>(mixFormat)->SubFormat));
-    const int  deviceBytesPerSample = mixFormat->wBitsPerSample / 8;
-    const int  deviceFrameBytes     = deviceBytesPerSample * deviceChannels;
+    const int deviceSampleRate = mixFormat->nSamplesPerSec;
 
     // 48 kHz canonical; pull-rate resample by integer ratio if device sample
     // rate is the common 44.1/48/96 kHz. For v4 we assume devices are 48 kHz
@@ -259,36 +265,12 @@ void WasapiCapture::run() {
             if (silent) {
                 std::memset(outBuf.data(), 0, outBuf.size() * sizeof(qint16));
             } else {
-                // Per-frame: pick L (channel 0) and R (channel 1, or duplicate L for mono).
-                const BYTE* src = data;
-                for (UINT32 f = 0; f < frames; ++f) {
-                    ConvertedSample l{0,0}, r{0,0};
-                    const BYTE* chBase = src + static_cast<size_t>(f) * deviceFrameBytes;
-
-                    if (deviceIsFloat) {
-                        l = fromFloat32(reinterpret_cast<const float*>(chBase));
-                        r = deviceChannels >= 2
-                            ? fromFloat32(reinterpret_cast<const float*>(chBase + sizeof(float)))
-                            : l;
-                    } else if (deviceBytesPerSample == 2) {
-                        l = fromInt16(reinterpret_cast<const qint16*>(chBase));
-                        r = deviceChannels >= 2
-                            ? fromInt16(reinterpret_cast<const qint16*>(chBase + sizeof(qint16)))
-                            : l;
-                    } else if (deviceBytesPerSample == 4) {
-                        l = fromInt32(reinterpret_cast<const qint32*>(chBase));
-                        r = deviceChannels >= 2
-                            ? fromInt32(reinterpret_cast<const qint32*>(chBase + sizeof(qint32)))
-                            : l;
-                    } else {
-                        l = r = {0, 0.0f};
-                    }
-
-                    outBuf[static_cast<size_t>(f) * 2 + 0] = l.s;
-                    outBuf[static_cast<size_t>(f) * 2 + 1] = r.s;
-                    if (l.abs01 > peakL) peakL = l.abs01;
-                    if (r.abs01 > peakR) peakR = r.abs01;
-                }
+                // Every channel folded into the pair, so a surround device
+                // keeps its centre and surrounds. See audio/StereoDownmix.h.
+                const StereoPeaks peaks =
+                    downmixToStereo(format, data, static_cast<int>(frames), outBuf.data());
+                peakL = peaks.left;
+                peakR = peaks.right;
             }
 
             capture->ReleaseBuffer(frames);

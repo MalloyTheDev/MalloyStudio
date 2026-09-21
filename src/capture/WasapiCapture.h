@@ -15,7 +15,9 @@
 // Output format is hard-pinned to 48000 Hz / 16-bit / stereo, interleaved
 // little-endian (s16le). The class converts whatever the device delivers
 // (typically float32) into this canonical bus format so AudioController can
-// mix without per-input format negotiation.
+// mix without per-input format negotiation, folding a surround device's extra
+// channels into the pair (audio/StereoDownmix.h). A sample format it cannot
+// read is reported through captureError rather than recorded as silence.
 class WasapiCapture : public QThread {
     Q_OBJECT
 public:

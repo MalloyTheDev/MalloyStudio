@@ -210,7 +210,10 @@ Session creation is injected through `SessionFactory` (and
 Captures one WASAPI endpoint (loopback **or** input). All COM objects live on the worker
 thread. Output is fixed at **48 kHz / 16-bit / stereo** (s16le): the device's format is
 converted per sample and resampled to 48 kHz where the device runs at another rate
-(`audio/Resampler.h`). Every failure that ends the worker is reported through
+(`audio/Resampler.h`). A surround endpoint is downmixed by its channel mask
+(`audio/StereoDownmix.h`: centre and surrounds at -3 dB, LFE left out); 8, 16, 24 (packed)
+and 32-bit PCM and 32-bit float are read, and any other sample format is refused through
+`captureError` before the stream starts. Every failure that ends the worker is reported through
 `captureError` with its HRESULT, and a quiet endpoint is polled on each timeout so a
 device removed while silent is noticed.
 
