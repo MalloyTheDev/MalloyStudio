@@ -461,7 +461,15 @@ bool SceneCollection::loadFromJson(const QJsonObject& root, QString* error) {
     m_restoring = false;
     m_recordUndo = oldRecordUndo;
 
-    m_heldDeviceSources.clear();
+    // The device hold is deliberately left alone here. Undo, redo and a
+    // cancelled edit session all restore through this function, so clearing
+    // it would let an undo start devices the user declined. A new project
+    // clears it in clear(); a file load replaces it in holdDeviceConsent().
+    //
+    // Nor is it pruned to the sources that exist after the restore. Deleting a
+    // held source, undoing, redoing and undoing again would then bring it back
+    // unheld. An id with no source behind it is inert, because both
+    // reconcilers only consider sources present in the scene.
     emit collectionReset();
     emit currentChanged(m_currentIndex);
     emit sourcesChanged();
@@ -481,6 +489,8 @@ void SceneCollection::clear() {
         {QStringLiteral("sources"), QJsonArray{}},
         {QStringLiteral("scenes"), QJsonArray{}},
     };
+    // A new project is this application's own state and holds nothing.
+    m_heldDeviceSources.clear();
     QString ignored;
     loadFromJson(empty, &ignored);
 }
@@ -1040,7 +1050,14 @@ SceneItem* SceneCollection::addItemToScene(Scene* scene, int sourceId) {
 }
 
 int SceneCollection::allocateSourceId() {
-    return m_nextSourceId++;
+    // The counter restarts on every load and is raised to the ids loaded, so
+    // after an undo to a state without a held source it can reach that
+    // source's id again. Held ids are skipped rather than released. Releasing
+    // one would let a new source take the id, and undoing past the new source
+    // would then bring the original back with its hold gone.
+    int id = m_nextSourceId++;
+    while (m_heldDeviceSources.contains(id)) id = m_nextSourceId++;
+    return id;
 }
 
 void SceneCollection::observeLoadedSourceId(int sourceId) {

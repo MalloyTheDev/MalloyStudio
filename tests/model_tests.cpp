@@ -248,6 +248,7 @@ private slots:
     void rtmpRelaySubstitutesAcrossReadBoundaries();
     void rtmpRelayTransportFollowsTheScheme();
     void loadedProjectHoldsItsDevicesUntilAllowed();
+    void undoAndRedoKeepADeclinedDeviceHeld();
     void projectMediaPathsMustBeLocalFiles();
     void encoderRedactsTheStreamKeyFromFfmpegOutput();
     void addingAConfiguredLayerIsOneUndoStep();
@@ -3401,6 +3402,89 @@ void MalloyModelTests::projectMediaPathsMustBeLocalFiles() {
     QVERIFY(loaded != nullptr);
     QVERIFY2(loaded->imagePath().isEmpty(),
              "a UNC image path must not survive the load into the model");
+}
+
+void MalloyModelTests::undoAndRedoKeepADeclinedDeviceHeld() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString path = dir.filePath(QStringLiteral("declined.malloy.json"));
+    {
+        SceneCollection authored;
+        authored.ensureCurrentScene();
+        QVERIFY(authored.addNewSourceToCurrent(QStringLiteral("Title"), Source::Type::Text,
+                                               QStringLiteral("hello")) != nullptr);
+        QVERIFY(authored.addAudioInputToCurrent(QStringLiteral("Desk Mic"),
+                                                QStringLiteral("{mic-device-id}")) != nullptr);
+        // Camera last, so it has the highest id. Only then does deleting it
+        // let the id counter fall back to its id after a restore.
+        QVERIFY(authored.addCameraToCurrent(QStringLiteral("Front Camera"),
+                                            QStringLiteral("\\\\?\\usb#vid_dead&pid_beef"),
+                                            QStringLiteral("Front Camera")) != nullptr);
+        QVERIFY(ProjectDocument::saveToFile(authored, path));
+    }
+
+    // Opened and declined, the way MainWindow leaves it: the prompt answered
+    // no, and the undo history starting from the loaded state.
+    SceneCollection opened;
+    QUndoStack undo;
+    opened.setUndoStack(&undo);
+    QString error;
+    QVERIFY2(ProjectDocument::loadFromFile(opened, path, &error), qPrintable(error));
+    undo.clear();
+    QVERIFY(opened.deviceConsentPending());
+
+    int cameraId = Source::InvalidId;
+    for (Source* s : opened.sources())
+        if (s && s->type() == Source::Type::Camera) cameraId = s->id();
+    QVERIFY(cameraId != Source::InvalidId);
+
+    // Any edit then undo. Undo restores a snapshot through loadFromJson, which
+    // used to clear the hold and so start the declined camera and microphone.
+    opened.setCurrentItemLocked(0, true);
+    QCOMPARE(undo.count(), 1);
+    undo.undo();
+    QVERIFY2(opened.deviceHeld(cameraId), "undo must not release a declined camera");
+    QVERIFY2(opened.gatherVisibleAudioIds().isEmpty(),
+             "undo must not release a declined microphone");
+    undo.redo();
+    QVERIFY2(opened.deviceHeld(cameraId), "redo must not release a declined camera");
+
+    // The longer route. Delete the camera, undo, redo, then create a source of
+    // our own: the id counter restarts on every restore, so the new source can
+    // reach the camera's id. It must not take that id, and must not be held
+    // itself; undoing past it must bring the camera back still held.
+    int cameraIndex = -1;
+    Scene* scene = opened.currentScene();
+    QVERIFY(scene != nullptr);
+    for (int i = 0; i < scene->itemCount(); ++i)
+        if (scene->itemAt(i)->sourceId() == cameraId) cameraIndex = i;
+    QVERIFY(cameraIndex >= 0);
+
+    undo.clear();
+    opened.removeCurrentItemAt(cameraIndex);
+    QVERIFY(opened.sourceById(cameraId) == nullptr);
+    undo.undo();
+    QVERIFY(opened.sourceById(cameraId) != nullptr);
+    undo.redo();
+    QVERIFY(opened.sourceById(cameraId) == nullptr);
+
+    SceneItem* mine = opened.addNewSourceToCurrent(QStringLiteral("Mine"), Source::Type::Text,
+                                                   QStringLiteral("mine"));
+    QVERIFY(mine != nullptr);
+    QVERIFY2(mine->sourceId() != cameraId,
+             "a new source must not be handed a held source's id");
+    QVERIFY2(!opened.deviceHeld(mine->sourceId()),
+             "a source the user just created is never held");
+
+    undo.undo();   // the new source
+    undo.undo();   // the deletion
+    QVERIFY(opened.sourceById(cameraId) != nullptr);
+    QVERIFY2(opened.deviceHeld(cameraId),
+             "the camera must come back still held after undoing past a new source");
+
+    // A new project is the application's own state and holds nothing.
+    opened.clear();
+    QVERIFY(!opened.deviceConsentPending());
 }
 
 void MalloyModelTests::loadedProjectHoldsItsDevicesUntilAllowed() {
