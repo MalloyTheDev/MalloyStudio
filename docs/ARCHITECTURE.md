@@ -281,8 +281,12 @@ the audio with it. A stream uses
 `-fps_mode cfr -r <fps>` and writes on its own clock, repeating the latest picture
 (`Cadence::ConstantRate`), because an ingest expects a steady rate.
 
-**Output.** The codec arguments come from `EncoderRegistry` (see below), after a `scale`
-filter when the output size differs from the 1920x1080 canvas. `-shortest` is not used.
+**Output.** Every output first goes through `EncoderPipeline::videoFilterArgs`: a `scale`
+filter to the output size that converts BGRA to YUV with the BT.709 matrix at limited
+range, `setparams` to stamp the frames so, and the matching `-color_*` tags. ffmpeg's
+defaults were a BT.601 conversion with no colour description, which players read as
+BT.709, shifting saturated colours. The codec arguments then come from `EncoderRegistry`
+(see below). `-shortest` is not used.
 
 **Stop.** The writers and acceptors are asked to stop and their pending I/O cancelled,
 then joined; the pipes are disconnected, which is ffmpeg's end of input; the pipeline

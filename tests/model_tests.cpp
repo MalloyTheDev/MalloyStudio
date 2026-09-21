@@ -215,6 +215,7 @@ private slots:
     void recorderCanRestartAfterFinalization();
     void controllerCanReplacePipelineFromFinishedSignal();
     void aRecordingOfAStillSceneKeepsItsLengthAndAudio();
+    void aRecordingKeepsItsColours();
     void audioControllerHasDefaultLoopbackInput();
     void audioControllerPersistsVolumeAndMute();
     void audioControlsRefuseValuesThatAreNotNumbers();
@@ -762,6 +763,19 @@ private:
     QImage m_image;
 };
 
+// One solid colour, for checking what the encode does to it.
+class SolidColourFrames final : public TimedFrameSource {
+public:
+    explicit SolidColourFrames(QColor c) : m_image(1920, 1080, QImage::Format_ARGB32) {
+        m_image.fill(c);
+    }
+    QImage currentFrame() override { return m_image; }
+    int nativeWidth() const override { return m_image.width(); }
+    int nativeHeight() const override { return m_image.height(); }
+private:
+    QImage m_image;
+};
+
 // Duration of one stream of a media file in seconds, from its packets rather
 // than its header, or -1 when it cannot be read.
 double streamSeconds(const QString& ffprobe, const QString& path, const QString& stream) {
@@ -884,6 +898,61 @@ void MalloyModelTests::aRecordingOfAStillSceneKeepsItsLengthAndAudio() {
     // 0.18 s. The bound sits well between the two so the test does not flake.
     QVERIFY2(sound > 2.0, qPrintable(QStringLiteral("audio %1 s").arg(sound)));
     QVERIFY2(video > 2.0, qPrintable(QStringLiteral("video %1 s").arg(video)));
+}
+
+void MalloyModelTests::aRecordingKeepsItsColours() {
+    RecorderPipeline pipeline;
+    if (!pipeline.ffmpegAvailable()) QSKIP("Real encoder lifecycle requires ffmpeg in PATH");
+    const QString ffprobe = QStandardPaths::findExecutable(QStringLiteral("ffprobe"));
+    if (ffprobe.isEmpty()) QSKIP("ffprobe is needed to read the colour tags");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    // Saturated red and green are where the BT.601 and BT.709 matrices differ
+    // most, so a conversion with the wrong one cannot pass by accident.
+    for (const QColor source : {QColor(220, 30, 30), QColor(30, 200, 60)}) {
+        SolidColourFrames frames(source);
+        RecordingTestAudio audio;
+        EncoderPipeline::Target target;
+        target.output = recordingTestSettings();
+        target.destination = dir.filePath(QStringLiteral("colour-%1.mp4").arg(source.name().mid(1)));
+        QString error;
+        QVERIFY2(pipeline.start(target, &frames, &audio, &error), qPrintable(error));
+        QTest::qWait(1200);
+        pipeline.stop();
+
+        // Tagged as what it is.
+        QProcess probe;
+        probe.start(ffprobe, {QStringLiteral("-v"), QStringLiteral("error"),
+            QStringLiteral("-select_streams"), QStringLiteral("v:0"),
+            QStringLiteral("-show_entries"),
+            QStringLiteral("stream=color_space,color_primaries,color_transfer,color_range"),
+            QStringLiteral("-of"), QStringLiteral("default=nw=1"), target.destination});
+        QVERIFY(probe.waitForFinished(10000));
+        const QString tags = QString::fromUtf8(probe.readAllStandardOutput());
+        QVERIFY2(tags.contains(QStringLiteral("color_space=bt709")), qPrintable(tags));
+        QVERIFY2(tags.contains(QStringLiteral("color_primaries=bt709")), qPrintable(tags));
+        QVERIFY2(tags.contains(QStringLiteral("color_range=tv")), qPrintable(tags));
+
+        // And encoded that way: decoded with the BT.709 matrix, the picture
+        // comes back as the colour that went in.
+        QProcess decode;
+        decode.start(pipeline.ffmpegPath(), {QStringLiteral("-v"), QStringLiteral("error"),
+            QStringLiteral("-i"), target.destination, QStringLiteral("-frames:v"), QStringLiteral("1"),
+            QStringLiteral("-vf"), QStringLiteral("scale=in_color_matrix=bt709:in_range=tv,format=rgb24"),
+            QStringLiteral("-f"), QStringLiteral("rawvideo"), QStringLiteral("-")});
+        QVERIFY(decode.waitForFinished(10000));
+        const QByteArray rgb = decode.readAllStandardOutput();
+        const int w = target.output.width, h = target.output.height;
+        QCOMPARE(rgb.size(), w * h * 3);
+        const int at = ((h / 2) * w + w / 2) * 3;
+        const int r = quint8(rgb[at]), g = quint8(rgb[at + 1]), b = quint8(rgb[at + 2]);
+        qInfo("colour %s came back as (%d, %d, %d)", qPrintable(source.name()), r, g, b);
+        QVERIFY2(std::abs(r - source.red()) <= 8 && std::abs(g - source.green()) <= 8
+                     && std::abs(b - source.blue()) <= 8,
+                 qPrintable(QStringLiteral("%1 came back as (%2, %3, %4)")
+                                .arg(source.name()).arg(r).arg(g).arg(b)));
+    }
 }
 
 void MalloyModelTests::controllerCanReplacePipelineFromFinishedSignal() {

@@ -549,6 +549,25 @@ void EncoderPipeline::closeDropBurst() {
     m_inDropBurst = false;
 }
 
+QStringList EncoderPipeline::videoFilterArgs(const OutputSettings& s) {
+    // The conversion happens in this scale filter, with the matrix named, and
+    // format= makes sure no later, automatically inserted conversion with the
+    // default matrix is needed. setparams stamps the frames: current ffmpeg
+    // takes an encode's colour description from the frames rather than from
+    // the -color_* options, and the scale filter sets only the matrix, so
+    // without it the primaries and transfer were written as unknown.
+    return {
+        QStringLiteral("-vf"),
+        QStringLiteral("scale=%1:%2:out_color_matrix=bt709:out_range=tv,format=yuv420p,"
+                       "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv")
+            .arg(s.width).arg(s.height),
+        QStringLiteral("-colorspace"),      QStringLiteral("bt709"),
+        QStringLiteral("-color_primaries"), QStringLiteral("bt709"),
+        QStringLiteral("-color_trc"),       QStringLiteral("bt709"),
+        QStringLiteral("-color_range"),     QStringLiteral("tv"),
+    };
+}
+
 int EncoderPipeline::declaredInputFrameRate(const OutputSettings& settings) {
     // 1000 is an upper bound rather than a target: past it the time base gets
     // fine enough that the rate control on the stream path has nothing left to
@@ -567,11 +586,7 @@ QStringList EncoderPipeline::buildOutputArgs(const Target& target) const {
     // the timeline, matching what the dropped-frame counter reports.
     args << QStringLiteral("-fps_mode") << QStringLiteral("vfr");
 
-    // Scale filter when output differs from canvas native.
-    if (s.width != MalloyCanvas::Width || s.height != MalloyCanvas::Height) {
-        args << QStringLiteral("-vf")
-             << QStringLiteral("scale=%1:%2").arg(s.width).arg(s.height);
-    }
+    args << videoFilterArgs(s);
 
     // Defer to the per-encoder arg builder in EncoderRegistry. Hardware
     // encoders need different flags than libx264 — for example NVENC rejects

@@ -22,11 +22,8 @@ QStringList StreamingPipeline::buildOutputArgs(const Target& target) const {
     args << QStringLiteral("-fps_mode") << QStringLiteral("cfr")
          << QStringLiteral("-r") << QString::number(s.fps);
 
-    // Scale filter when output differs from canvas native.
-    if (s.width != MalloyCanvas::Width || s.height != MalloyCanvas::Height) {
-        args << QStringLiteral("-vf")
-             << QStringLiteral("scale=%1:%2").arg(s.width).arg(s.height);
-    }
+    // Scaled and converted to BT.709 YUV, and tagged so; see videoFilterArgs.
+    args << videoFilterArgs(s);
 
     // --- Per-encoder codec args via EncoderRegistry ---
     //

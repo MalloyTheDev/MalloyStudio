@@ -118,6 +118,18 @@ protected:
     virtual QStringList buildOutputArgs(const Target& target) const;
 
 public:
+    // The video filter and colour tags every output gets: the canvas scaled to
+    // the output size and converted from BGRA to YUV with the BT.709 matrix at
+    // limited range, and the stream tagged as exactly that.
+    //
+    // Left to its defaults, ffmpeg converted with the BT.601 matrix and wrote
+    // no colour description, and players take untagged HD video to be BT.709,
+    // so every recording and stream shifted saturated colours: reds darker,
+    // greens lighter. OBS settles one colour space for its canvas and uses it
+    // for both the conversion and the tags; this does the same, so the two
+    // cannot disagree. Public so the arguments can be checked directly.
+    static QStringList videoFilterArgs(const OutputSettings& s);
+
     // Removes the stream key from text that came out of ffmpeg.
     //
     // ffmpeg prints the destination URL on a failed connect, even at
