@@ -33,6 +33,7 @@
 #include "recording/RingTimedFrameSource.h"
 #include "platform/TwitchAuth.h"
 #include "platform/TwitchApi.h"
+#include "platform/CredentialStore.h"
 #include "platform/SmartConfig.h"
 #include "recording/StreamingPipeline.h"
 #include "recording/EncoderRegistry.h"
@@ -57,6 +58,9 @@
 #include <QPushButton>
 #include <QScopeGuard>
 #include <QSemaphore>
+#include <QHostAddress>
+#include <QTcpServer>
+#include <QTcpSocket>
 #include <QSpinBox>
 #include <limits>
 #include <QTimer>
@@ -112,6 +116,87 @@ protected:
 private:
     QSemaphore m_release;
 };
+
+// A local stand-in for Twitch. Each request gets the next queued answer, or a
+// 500 once they run out. While holding, requests wait unanswered until
+// release(), so a test can act while one is in flight.
+class FakeTwitch final : public QObject {
+public:
+    FakeTwitch() {
+        connect(&m_server, &QTcpServer::newConnection, this, [this] {
+            while (QTcpSocket* s = m_server.nextPendingConnection()) {
+                connect(s, &QTcpSocket::readyRead, this, [this, s] { onReadable(s); });
+                if (s->bytesAvailable() > 0) onReadable(s);
+            }
+        });
+        m_server.listen(QHostAddress::LocalHost);
+    }
+
+    QString base() const { return QStringLiteral("http://127.0.0.1:%1").arg(m_server.serverPort()); }
+    void answer(int status, const QByteArray& body) { m_answers.append({status, body}); }
+    void hold() { m_holding = true; }
+    void release() {
+        m_holding = false;
+        const QList<QTcpSocket*> held = std::exchange(m_held, {});
+        for (QTcpSocket* s : held) respond(s);
+    }
+    int waiting() const { return int(m_held.size()); }
+
+    QStringList requests;   // "METHOD /path", in arrival order
+
+private:
+    struct Answer { int status; QByteArray body; };
+
+    void onReadable(QTcpSocket* s) {
+        QByteArray& buf = m_buffers[s];
+        buf += s->readAll();
+        const qsizetype end = buf.indexOf("\r\n\r\n");
+        if (end < 0) return;
+        qsizetype length = 0;
+        for (const QByteArray& line : buf.left(end).split('\n')) {
+            const QByteArray l = line.trimmed().toLower();
+            if (l.startsWith("content-length:")) length = l.mid(15).trimmed().toLongLong();
+        }
+        if (buf.size() < end + 4 + length) return;
+        const QList<QByteArray> requestLine = buf.left(buf.indexOf("\r\n")).split(' ');
+        requests << QString::fromLatin1(requestLine.value(0) + ' ' + requestLine.value(1));
+        m_buffers.remove(s);
+        if (m_holding) m_held.append(s);
+        else respond(s);
+    }
+
+    void respond(QTcpSocket* s) {
+        const Answer a = m_answers.isEmpty() ? Answer{500, {}} : m_answers.takeFirst();
+        s->write("HTTP/1.1 " + QByteArray::number(a.status) + " Stand-in\r\n"
+                 "Content-Type: application/json\r\n"
+                 "Content-Length: " + QByteArray::number(a.body.size()) + "\r\n"
+                 "Connection: close\r\n\r\n" + a.body);
+        s->disconnectFromHost();
+    }
+
+    QTcpServer m_server;
+    QHash<QTcpSocket*, QByteArray> m_buffers;
+    QList<QTcpSocket*> m_held;
+    QList<Answer> m_answers;
+    bool m_holding = false;
+};
+
+// Tests keep Twitch tokens under their own credential name, never the one a
+// real sign-in uses, and erase it when done.
+const QString kTestTwitchCredential = QStringLiteral("MalloyStudioTests_TwitchTokens");
+
+void seedTwitchTokens(bool expired) {
+    TwitchTokens tokens;
+    tokens.accessToken  = QStringLiteral("old-access");
+    tokens.refreshToken = QStringLiteral("old-refresh");
+    tokens.expiresAt    = QDateTime::currentDateTimeUtc().addSecs(expired ? -60 : 3600);
+    CredentialStore::save(kTestTwitchCredential, tokens.toJson());
+}
+
+const QByteArray kFreshTokens =
+    R"({"access_token":"new-access","refresh_token":"new-refresh","expires_in":14400,"scope":["channel:read:stream_key"]})";
+const QByteArray kDeviceCode =
+    R"({"device_code":"dev-secret","user_code":"ABCDEFGH","verification_uri":"https://www.twitch.tv/activate","expires_in":1800,"interval":1})";
 
 class MalloyModelTests : public QObject {
     Q_OBJECT
@@ -299,6 +384,11 @@ private slots:
     void aSavedReplayPlaysInRealTime();
     void aWorkerThatWillNotStopIsCutLooseNotDestroyed();
     void aStopRequestedBeforeTheWorkerRunsIsKept();
+    void aSignOutDuringARefreshStaysSignedOut();
+    void aRefreshTwitchDidNotAnswerKeepsTheAccount();
+    void aCancelledSignInIgnoresALateCode();
+    void aNetworkBlipWhilePollingDoesNotEndTheSignIn();
+    void theChannelIdIsForgottenWhenTheAccountChanges();
     void theReplayBufferIsAFrameConsumer();
     void spinBoxesAndTextFieldsKeepTheirDigits();
     void editorClipRoundTripPreservesSourceReference();
@@ -5010,6 +5100,180 @@ void MalloyModelTests::aStopRequestedBeforeTheWorkerRunsIsKept() {
     worker.start();
     QVERIFY(worker.wait(5000));
     QCOMPARE(closed.load(), 0);
+}
+
+void MalloyModelTests::aSignOutDuringARefreshStaysSignedOut() {
+    const auto cleanup = qScopeGuard([] { CredentialStore::erase(kTestTwitchCredential); });
+    seedTwitchTokens(/*expired*/ true);
+
+    FakeTwitch twitch;
+    twitch.hold();
+    twitch.answer(200, kFreshTokens);
+    TwitchAuth auth(kTestTwitchCredential, nullptr);
+    auth.setClientId(QStringLiteral("test-client"));
+    auth.setAuthBase(twitch.base());
+    QVERIFY(auth.isConnected());
+
+    int calls = 0;
+    bool ok = true;
+    auth.withAccessToken([&](bool success, const QString&) { ++calls; ok = success; });
+    QTRY_COMPARE(twitch.waiting(), 1);
+
+    // The user signs out while the refresh is out. When Twitch answers, the
+    // new tokens must not be stored: that signed the user back in, and wrote
+    // the tokens back to the credential store, behind a UI saying otherwise.
+    auth.signOut();
+    twitch.release();
+    QTRY_COMPARE(calls, 1);
+    QVERIFY(!ok);
+    QVERIFY(!auth.isConnected());
+    QVERIFY(CredentialStore::load(kTestTwitchCredential).isEmpty());
+}
+
+void MalloyModelTests::aRefreshTwitchDidNotAnswerKeepsTheAccount() {
+    const auto cleanup = qScopeGuard([] { CredentialStore::erase(kTestTwitchCredential); });
+    seedTwitchTokens(/*expired*/ true);
+
+    // A port nobody is listening on: the request never reaches anyone, as
+    // when offline.
+    quint16 deadPort = 0;
+    {
+        QTcpServer probe;
+        QVERIFY(probe.listen(QHostAddress::LocalHost));
+        deadPort = probe.serverPort();
+    }
+    TwitchAuth auth(kTestTwitchCredential, nullptr);
+    auth.setClientId(QStringLiteral("test-client"));
+    auth.setAuthBase(QStringLiteral("http://127.0.0.1:%1").arg(deadPort));
+    QSignalSpy signedOut(&auth, &TwitchAuth::signedOut);
+
+    int calls = 0;
+    bool ok = true;
+    const auto ask = [&] {
+        auth.withAccessToken([&](bool success, const QString&) { ++calls; ok = success; });
+    };
+
+    ask();
+    QTRY_COMPARE_WITH_TIMEOUT(calls, 1, 15000);
+    QVERIFY(!ok);
+    QVERIFY(auth.isConnected());
+    QCOMPARE(signedOut.count(), 0);
+    QVERIFY(!CredentialStore::load(kTestTwitchCredential).isEmpty());
+
+    // Twitch answering that it is unavailable says nothing about the token
+    // either.
+    FakeTwitch twitch;
+    auth.setAuthBase(twitch.base());
+    twitch.answer(503, "<html>Service Unavailable</html>");
+    ask();
+    QTRY_COMPARE(calls, 2);
+    QVERIFY(!ok);
+    QVERIFY(auth.isConnected());
+    QCOMPARE(signedOut.count(), 0);
+
+    // Twitch refusing the token does disconnect the account.
+    twitch.answer(400, R"({"status":400,"message":"Invalid refresh token"})");
+    ask();
+    QTRY_COMPARE(calls, 3);
+    QVERIFY(!ok);
+    QVERIFY(!auth.isConnected());
+    QCOMPARE(signedOut.count(), 1);
+    QVERIFY(CredentialStore::load(kTestTwitchCredential).isEmpty());
+}
+
+void MalloyModelTests::aCancelledSignInIgnoresALateCode() {
+    const auto cleanup = qScopeGuard([] { CredentialStore::erase(kTestTwitchCredential); });
+    CredentialStore::erase(kTestTwitchCredential);
+
+    FakeTwitch twitch;
+    twitch.hold();
+    twitch.answer(200, kDeviceCode);
+    TwitchAuth auth(kTestTwitchCredential, nullptr);
+    auth.setClientId(QStringLiteral("test-client"));
+    auth.setAuthBase(twitch.base());
+    QSignalSpy shown(&auth, &TwitchAuth::deviceCodeReady);
+
+    auth.beginDeviceFlow(TwitchApi::requiredScopes());
+    QTRY_COMPARE(twitch.waiting(), 1);
+
+    // Cancel while the code is still being fetched. The answer arriving
+    // afterwards used to be shown and polled with, invisibly, once a second.
+    auth.cancelDeviceFlow();
+    twitch.release();
+    QTest::qWait(1500);   // longer than the one second polling interval
+    QCOMPARE(shown.count(), 0);
+    QCOMPARE(twitch.requests.size(), 1);
+}
+
+void MalloyModelTests::aNetworkBlipWhilePollingDoesNotEndTheSignIn() {
+    const auto cleanup = qScopeGuard([] { CredentialStore::erase(kTestTwitchCredential); });
+    CredentialStore::erase(kTestTwitchCredential);
+
+    FakeTwitch twitch;
+    twitch.answer(200, kDeviceCode);
+    twitch.answer(503, {});           // one poll lands on an unavailable Twitch
+    twitch.answer(200, kFreshTokens); // and the next finds the approval
+    TwitchAuth auth(kTestTwitchCredential, nullptr);
+    auth.setClientId(QStringLiteral("test-client"));
+    auth.setAuthBase(twitch.base());
+    QSignalSpy failed(&auth, &TwitchAuth::failed);
+    QSignalSpy connected(&auth, &TwitchAuth::connected);
+
+    auth.beginDeviceFlow(TwitchApi::requiredScopes());
+    QTRY_COMPARE_WITH_TIMEOUT(connected.count(), 1, 10000);
+    QCOMPARE(failed.count(), 0);
+    QVERIFY(auth.isConnected());
+}
+
+void MalloyModelTests::theChannelIdIsForgottenWhenTheAccountChanges() {
+    const auto cleanup = qScopeGuard([] { CredentialStore::erase(kTestTwitchCredential); });
+    seedTwitchTokens(/*expired*/ false);
+
+    FakeTwitch helix;
+    helix.answer(200, R"({"data":[{"id":"111","login":"first"}]})");
+    TwitchAuth auth(kTestTwitchCredential, nullptr);
+    auth.setClientId(QStringLiteral("test-client"));
+    TwitchApi api(&auth);
+    api.setApiBase(helix.base());
+
+    int calls = 0;
+    bool ok = false;
+    QString id;
+    const auto fetch = [&] {
+        api.fetchUserId([&](bool success, const QString& value) { ++calls; ok = success; id = value; });
+    };
+
+    fetch();
+    QTRY_COMPARE(calls, 1);
+    QVERIFY(ok);
+    QCOMPARE(id, QStringLiteral("111"));
+
+    // Signed out, the cached id must not be handed back as if an account were
+    // still connected.
+    auth.signOut();
+    fetch();
+    QTRY_COMPARE(calls, 2);
+    QVERIFY(!ok);
+
+    // A lookup still in flight when someone signs in, perhaps as a different
+    // account, must not cache the id it was answering for.
+    seedTwitchTokens(/*expired*/ false);
+    TwitchAuth second(kTestTwitchCredential, nullptr);
+    second.setClientId(QStringLiteral("test-client"));
+    TwitchApi api2(&second);
+    api2.setApiBase(helix.base());
+    helix.hold();
+    helix.answer(200, R"({"data":[{"id":"111","login":"first"}]})");
+    helix.answer(200, R"({"data":[{"id":"222","login":"second"}]})");
+    api2.fetchUserId([&](bool success, const QString& value) { ++calls; ok = success; id = value; });
+    QTRY_COMPARE(helix.waiting(), 1);
+    emit second.connected();   // stands in for a sign-in completing meanwhile
+    helix.release();
+    QTRY_COMPARE(calls, 3);
+    api2.fetchUserId([&](bool success, const QString& value) { ++calls; ok = success; id = value; });
+    QTRY_COMPARE(calls, 4);
+    QVERIFY(ok);
+    QCOMPARE(id, QStringLiteral("222"));
 }
 
 QTEST_MAIN(MalloyModelTests)

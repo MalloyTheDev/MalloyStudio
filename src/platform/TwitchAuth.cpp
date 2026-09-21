@@ -18,6 +18,22 @@ const QString kTokenCredential = QStringLiteral("MalloyStudio_TwitchTokens");
 constexpr int kMinPollSecs = 1;
 constexpr int kSlowDownStepSecs = 5;
 
+// A stalled connection is given up on rather than left to TCP, which can take
+// minutes, during which no other token request could be made.
+constexpr int kTransferTimeoutMs = 30000;
+
+int httpStatus(const QNetworkReply* reply) {
+    return reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+}
+
+// No answer at all (offline, DNS, a stall cut off by the timeout), or Twitch
+// saying it is unavailable. Nothing was decided about the request, so it can
+// be made again.
+bool twitchUnavailable(const QNetworkReply* reply) {
+    const int status = httpStatus(reply);
+    return status == 0 || status == 429 || status >= 500;
+}
+
 QByteArray formEncode(const QList<QPair<QString, QString>>& fields) {
     QUrlQuery q;
     for (const auto& f : fields) q.addQueryItem(f.first, f.second);
@@ -162,9 +178,12 @@ bool TwitchAuth::parseTokens(const QByteArray& json, TwitchTokens* out,
 // TwitchAuth
 // ---------------------------------------------------------------------------
 
-TwitchAuth::TwitchAuth(QObject* parent)
-    : QObject(parent), m_authBase(kDefaultAuthBase) {
+TwitchAuth::TwitchAuth(QObject* parent) : TwitchAuth(kTokenCredential, parent) {}
+
+TwitchAuth::TwitchAuth(const QString& credentialTarget, QObject* parent)
+    : QObject(parent), m_credentialTarget(credentialTarget), m_authBase(kDefaultAuthBase) {
     m_net = new QNetworkAccessManager(this);
+    m_net->setTransferTimeout(kTransferTimeoutMs);
     m_pollTimer = new QTimer(this);
     m_pollTimer->setSingleShot(true);
     connect(m_pollTimer, &QTimer::timeout, this, &TwitchAuth::pollOnce);
@@ -183,22 +202,29 @@ void TwitchAuth::setAuthBase(const QString& baseUrl) {
 bool TwitchAuth::isConnected() const { return !m_tokens.refreshToken.isEmpty(); }
 
 void TwitchAuth::loadTokens() {
-    m_tokens = TwitchTokens::fromJson(CredentialStore::load(kTokenCredential));
+    m_tokens = TwitchTokens::fromJson(CredentialStore::load(m_credentialTarget));
 }
 
 void TwitchAuth::storeTokens(const TwitchTokens& tokens) {
     m_tokens = tokens;
-    CredentialStore::save(kTokenCredential, tokens.toJson());
+    CredentialStore::save(m_credentialTarget, tokens.toJson());
+}
+
+void TwitchAuth::forgetTokens() {
+    ++m_session;
+    m_refreshing = false;
+    m_tokens = TwitchTokens{};
+    CredentialStore::erase(m_credentialTarget);
 }
 
 void TwitchAuth::signOut() {
     cancelDeviceFlow();
-    m_tokens = TwitchTokens{};
-    CredentialStore::erase(kTokenCredential);
+    forgetTokens();
     emit signedOut();
 }
 
 void TwitchAuth::cancelDeviceFlow() {
+    ++m_flow;
     m_pollTimer->stop();
     m_device = TwitchDeviceCode{};
     m_deviceExpiresAt = QDateTime();
@@ -216,14 +242,18 @@ void TwitchAuth::beginDeviceFlow(const QStringList& scopes) {
     }
     cancelDeviceFlow();
     m_requestedScopes = scopes;
+    const quint64 flow = m_flow;
 
     QNetworkRequest req{QUrl(m_authBase + QStringLiteral("/oauth2/device"))};
     req.setHeader(QNetworkRequest::ContentTypeHeader,
                   QStringLiteral("application/x-www-form-urlencoded"));
 
     QNetworkReply* reply = m_net->post(req, buildDeviceCodeBody(m_clientId, scopes));
-    connect(reply, &QNetworkReply::finished, this, [this, reply] {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, flow] {
         reply->deleteLater();
+        // Cancelled while the code was being requested: showing it now, and
+        // polling with it, would carry on a sign-in the user called off.
+        if (flow != m_flow) return;
         const QByteArray body = reply->readAll();
         QString error;
         TwitchDeviceCode device;
@@ -249,10 +279,12 @@ void TwitchAuth::pollOnce() {
     req.setHeader(QNetworkRequest::ContentTypeHeader,
                   QStringLiteral("application/x-www-form-urlencoded"));
 
+    const quint64 flow = m_flow;
     QNetworkReply* reply = m_net->post(
         req, buildDeviceTokenBody(m_clientId, m_requestedScopes, m_device.deviceCode));
-    connect(reply, &QNetworkReply::finished, this, [this, reply] {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, flow] {
         reply->deleteLater();
+        if (flow != m_flow) return;
         const QByteArray body = reply->readAll();
 
         QString pending, error;
@@ -267,6 +299,13 @@ void TwitchAuth::pollOnce() {
             // slow_down means Twitch wants a longer gap, and it stays longer.
             if (pending == QLatin1String("slow_down"))
                 m_device.intervalSecs += kSlowDownStepSecs;
+            m_pollTimer->start(m_device.intervalSecs * 1000);
+            return;
+        }
+        // A dropped connection or an unavailable Twitch is not an answer: the
+        // code stays good until it expires, which pollOnce checks, so one
+        // network blip does not throw away a sign-in the user is approving.
+        if (twitchUnavailable(reply)) {
             m_pollTimer->start(m_device.intervalSecs * 1000);
             return;
         }
@@ -302,19 +341,36 @@ void TwitchAuth::refresh(std::function<void(bool, QString)> done) {
     req.setHeader(QNetworkRequest::ContentTypeHeader,
                   QStringLiteral("application/x-www-form-urlencoded"));
 
+    const quint64 session = m_session;
     QNetworkReply* reply = m_net->post(req, buildRefreshBody(m_clientId, m_tokens.refreshToken));
-    connect(reply, &QNetworkReply::finished, this, [this, reply, done] {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, done, session] {
         reply->deleteLater();
+        // Signed out while this was in flight. Whatever came back belongs to an
+        // account the user has let go of, and storing it would sign them back
+        // in without their knowing.
+        if (session != m_session) {
+            done(false, tr("No Twitch account is connected."));
+            return;
+        }
         m_refreshing = false;
 
         QString pending, error;
         TwitchTokens tokens;
         if (!parseTokens(reply->readAll(), &tokens, &pending, &error)) {
-            // The refresh token is spent whether or not this succeeded, so a
-            // failure here means the account is disconnected rather than
-            // retryable. Say so instead of leaving a token that cannot work.
-            m_tokens = TwitchTokens{};
-            CredentialStore::erase(kTokenCredential);
+            const int status = httpStatus(reply);
+            if (status != 400 && status != 401) {
+                // Not refused, only not answered: offline, timed out, Twitch
+                // unavailable, or a page that is not Twitch's at all. Nothing
+                // was said about the token, so the account is kept and the
+                // next call tries again.
+                done(false, tr("Could not reach Twitch to renew the sign-in (%1).")
+                                .arg(status ? tr("HTTP %1").arg(status) : reply->errorString()));
+                return;
+            }
+            // Refused: the token is invalid, spent or expired, so the account
+            // is disconnected. Say so instead of leaving a token that cannot
+            // work.
+            forgetTokens();
             emit signedOut();
             done(false, error.isEmpty() ? tr("Twitch sign-in expired.") : error);
             return;

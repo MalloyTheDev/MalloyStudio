@@ -55,6 +55,9 @@ class TwitchAuth : public QObject {
     Q_OBJECT
 public:
     explicit TwitchAuth(QObject* parent = nullptr);
+    // Keeps its tokens under another credential name. For tests, so they
+    // never read or disturb the user's own sign-in.
+    TwitchAuth(const QString& credentialTarget, QObject* parent);
     ~TwitchAuth() override;
 
     // The client id of a Twitch application registered by the user. It is not a
@@ -76,10 +79,13 @@ public:
     void cancelDeviceFlow();
 
     // Forgets the tokens locally. Twitch keeps the authorization until the user
-    // removes it in their account settings, which the UI should say.
+    // removes it in their account settings, which the UI should say. A refresh
+    // or sign-in still in flight is disowned: what it brings back is dropped.
     void signOut();
 
-    // Calls back with a usable access token, refreshing first if needed.
+    // Calls back with a usable access token, refreshing first if needed. A
+    // refresh that gets no answer from Twitch keeps the account; only a
+    // refresh Twitch refuses signs it out.
     void withAccessToken(std::function<void(bool ok, QString tokenOrError)> done);
 
     // ---- Pure protocol helpers, exposed for testing -----------------------
@@ -108,11 +114,13 @@ private slots:
 private:
     void storeTokens(const TwitchTokens& tokens);
     void loadTokens();
+    void forgetTokens();
     void refresh(std::function<void(bool ok, QString tokenOrError)> done);
     void finishWithError(const QString& message);
 
     QNetworkAccessManager* m_net = nullptr;
     QTimer*  m_pollTimer = nullptr;
+    QString  m_credentialTarget;
     QString  m_clientId;
     QString  m_authBase;
     QStringList m_requestedScopes;
@@ -120,4 +128,12 @@ private:
     QDateTime m_deviceExpiresAt;
     TwitchTokens m_tokens;
     bool m_refreshing = false;
+
+    // Replies carry the generation they were sent in and are dropped if it
+    // has moved on. m_session moves when the tokens are forgotten, so a
+    // refresh answered after a sign-out cannot store tokens again; m_flow
+    // moves when a sign-in is cancelled or restarted, so a late device code
+    // or poll answer cannot resume it.
+    quint64 m_session = 0;
+    quint64 m_flow = 0;
 };

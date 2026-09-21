@@ -32,6 +32,18 @@ QStringList TwitchApi::requiredScopes() {
 TwitchApi::TwitchApi(TwitchAuth* auth, QObject* parent)
     : QObject(parent), m_auth(auth), m_apiBase(kDefaultApiBase) {
     m_net = new QNetworkAccessManager(this);
+    // The cached id is the channel of whoever was signed in when it was
+    // fetched. Signing out, or in again, perhaps as someone else, makes it
+    // stale; keeping it sent every later call to the old channel. The counter
+    // also stops a lookup still in flight from caching the old account's id.
+    if (m_auth) {
+        const auto accountChanged = [this] {
+            m_userId.clear();
+            ++m_account;
+        };
+        connect(m_auth, &TwitchAuth::signedOut, this, accountChanged);
+        connect(m_auth, &TwitchAuth::connected, this, accountChanged);
+    }
 }
 
 void TwitchApi::setApiBase(const QString& baseUrl) {
@@ -117,9 +129,14 @@ void TwitchApi::fetchUserId(std::function<void(bool, QString)> done) {
         req.setRawHeader("Client-Id", m_auth->clientId().toUtf8());
         req.setRawHeader("Authorization", QByteArray("Bearer ") + tokenOrError.toUtf8());
 
+        const quint64 account = m_account;
         QNetworkReply* reply = m_net->get(req);
-        connect(reply, &QNetworkReply::finished, this, [this, reply, done] {
+        connect(reply, &QNetworkReply::finished, this, [this, reply, done, account] {
             reply->deleteLater();
+            if (account != m_account) {
+                done(false, tr("The Twitch account changed during the request."));
+                return;
+            }
             QString error;
             const QString id = parseUserId(reply->readAll(), &error);
             if (id.isEmpty()) {

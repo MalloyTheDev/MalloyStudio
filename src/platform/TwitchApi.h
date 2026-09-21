@@ -29,7 +29,8 @@ public:
     void setApiBase(const QString& baseUrl);
 
     // The broadcaster id of the signed-in user, cached after the first call
-    // since it never changes for an account.
+    // since it never changes for an account. The cache is dropped whenever the
+    // account may have changed: on sign-out and on every new sign-in.
     void fetchUserId(std::function<void(bool ok, QString idOrError)> done);
 
     // The channel's stream key. Requires channel:read:stream_key.
@@ -56,4 +57,5 @@ private:
     QNetworkAccessManager* m_net = nullptr;
     QString m_apiBase;
     QString m_userId;
+    quint64 m_account = 0;   // moves on sign-out and sign-in; see the constructor
 };
