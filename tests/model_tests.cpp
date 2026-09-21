@@ -218,6 +218,7 @@ private slots:
     void aRecordingOfAStillSceneKeepsItsLengthAndAudio();
     void aRecordingKeepsItsColours();
     void stoppingKeepsTheSoundAlreadyHandedOver();
+    void soundTheEncoderNeverTookIsReported();
     void killingAProcessEndsWhatItStarted();
     void audioControllerHasDefaultLoopbackInput();
     void audioControllerPersistsVolumeAndMute();
@@ -996,6 +997,33 @@ void MalloyModelTests::stoppingKeepsTheSoundAlreadyHandedOver() {
     QVERIFY2(video > 0.5, qPrintable(QStringLiteral("video %1 s").arg(video)));
     QVERIFY2(sound - video > 6.0,
              qPrintable(QStringLiteral("audio %1 s, video %2 s").arg(sound).arg(video)));
+}
+
+void MalloyModelTests::soundTheEncoderNeverTookIsReported() {
+    RecorderPipeline pipeline;
+    if (!pipeline.ffmpegAvailable()) QSKIP("Real encoder lifecycle requires ffmpeg in PATH");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    RecordingTestFrames frames;
+    RecordingTestAudio audio;
+    EncoderPipeline::Target target;
+    target.output = recordingTestSettings();
+    target.destination = dir.filePath(QStringLiteral("dropped.mp4"));
+    QString error;
+
+    QVERIFY2(pipeline.start(target, &frames, &audio, &error), qPrintable(error));
+    QTest::qWait(1000);
+
+    // Forty seconds of sound at once, ahead of the picture so that ffmpeg
+    // reads none of it before Stop. The pipe buffers about five seconds and
+    // the transport queue thirty, so the rest is dropped; both the moment it
+    // starts and the total must be reported, since it is time missing from
+    // the recording's sound.
+    QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral("oldest sound is being dropped")));
+    QTest::ignoreMessage(QtInfoMsg, QRegularExpression(QStringLiteral("AUDIO DROP [1-9][0-9]*\\.[0-9]{2} s")));
+    for (int i = 0; i < 40 * 50; ++i) emit audio.pcmReady(QByteArray(3840, '\0'));
+    QCoreApplication::processEvents();
+    pipeline.stop();
 }
 
 void MalloyModelTests::killingAProcessEndsWhatItStarted() {

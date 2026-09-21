@@ -280,8 +280,10 @@ public:
         QMutexLocker lock(&m_mutex);
         if (m_stopping) return;
         while (m_queue.size() >= kMaxQueuedChunks) {
-            m_queue.dequeue();
-            ++m_dropped;
+            if (m_droppedBytes == 0)
+                qWarning("ffmpeg has not read audio for the length of the transport queue; "
+                         "the oldest sound is being dropped");
+            m_droppedBytes += m_queue.dequeue().size();
         }
         m_queue.enqueue(pcm);
         m_wake.wakeOne();
@@ -305,9 +307,10 @@ public:
         m_wake.wakeAll();
     }
 
-    int droppedChunks() const {
+    // Sound dropped because the queue was full, reported in the run summary.
+    qint64 droppedBytes() const {
         QMutexLocker lock(&m_mutex);
-        return m_dropped;
+        return m_droppedBytes;
     }
 
 protected:
@@ -332,7 +335,7 @@ private:
     QWaitCondition      m_wake;
     QQueue<QByteArray>  m_queue;
     bool                m_stopping = false;
-    int                 m_dropped = 0;
+    qint64              m_droppedBytes = 0;
 };
 
 
@@ -744,6 +747,7 @@ bool EncoderPipeline::start(const Target& target,
     m_cfrDuplicates = 0;
     m_idleTicks = 0;
     m_stillRepeats = 0;
+    m_audioBytesDropped = 0;
     m_lastVideoWrite.invalidate();
     m_longestDropBurstMs = 0;
     m_inDropBurst = false;
@@ -1018,7 +1022,8 @@ void EncoderPipeline::stop() {
     // against accepted is what this application refused to hand over, and CFR
     // DUP is what the output side invented to hold a cadence. Idle ticks are
     // timer opportunities where nothing new existed, and are not loss of any
-    // kind.
+    // kind. AUDIO DROP is sound discarded because ffmpeg stopped reading for
+    // longer than the audio queue holds, and is time missing from the sound.
     //
     // The two source figures are this run's, not the application's: they are
     // the difference from the totals taken when the run started.
@@ -1027,15 +1032,19 @@ void EncoderPipeline::stop() {
     closeDropBurst();
 
     const int piped = m_framesPiped;
+    // The audio input's format, fixed in buildInputArgs: 48 kHz, two
+    // channels, two bytes a sample.
+    constexpr double kPcmBytesPerSecond = 48000.0 * 2 * 2;
     qInfo("capture stages: SOURCE RX %d  CAP DROP %d  COMPOSED %d  ENC ACCEPT %d  "
           "PIPE WRITE %d  ENC DROP %d  ENC DROP BURST MAX %.2f s  "
-          "CFR DUP %d  IDLE %d  STILL %d",
+          "CFR DUP %d  IDLE %d  STILL %d  AUDIO DROP %.2f s",
           sourceNow.framesProduced - m_sourceStatsAtStart.framesProduced,
           sourceNow.framesDropped  - m_sourceStatsAtStart.framesDropped,
           m_composedFramesAccepted + m_composedFramesRejected,
           m_composedFramesAccepted, piped, m_composedFramesRejected,
           double(m_longestDropBurstMs) / 1000.0,
-          m_cfrDuplicates, m_idleTicks, m_stillRepeats);
+          m_cfrDuplicates, m_idleTicks, m_stillRepeats,
+          double(m_audioBytesDropped) / kPcmBytesPerSecond);
 
     if (FrameProfile::enabled())
         qInfo("%s", qPrintable(FrameProfile::report()));
@@ -1083,6 +1092,7 @@ void EncoderPipeline::retireAudioWorkers() {
     }
     if (m_audioWriter) {
         m_audioWriter->wait();
+        m_audioBytesDropped = m_audioWriter->droppedBytes();
         delete m_audioWriter;
         m_audioWriter = nullptr;
     }

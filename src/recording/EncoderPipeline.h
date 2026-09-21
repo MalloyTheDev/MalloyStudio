@@ -341,6 +341,10 @@ private:
     // Frames written only to keep a file's video moving through a still
     // scene; see kStillFloorMs. Not composed pictures, so not ENC ACCEPT.
     int m_stillRepeats = 0;
+    // Sound the audio transport dropped because ffmpeg had stopped reading
+    // for longer than its queue holds (AUDIO DROP). Read when the writer is
+    // retired.
+    qint64 m_audioBytesDropped = 0;
     // When the last video frame was handed to the transport, for the floor.
     QElapsedTimer m_lastVideoWrite;
 
