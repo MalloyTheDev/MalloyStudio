@@ -212,6 +212,7 @@ public:
                                      int* cfrDuplicates = nullptr);
 
 private slots:
+    void onVideoClock();
     void onTickVideo();
     void onMixedSamples(QByteArray pcm);
     void onFfmpegError();
@@ -228,6 +229,8 @@ private:
     static constexpr int kStopDrainMs = 1000;
 
     void cleanup();
+    // Arms the video timer for the next deadline on the sink's clock.
+    void armVideoClock();
     void retirePipeWorkers();
     void retireVideoWorkers();
     void retireAudioWorkers();
@@ -341,6 +344,11 @@ private:
     // Frames written only to keep a file's video moving through a still
     // scene; see kStillFloorMs. Not composed pictures, so not ENC ACCEPT.
     int m_stillRepeats = 0;
+    // The sink's clock: when the run started, how many ticks it has had, and
+    // how many it missed by arriving more than a period late (TICK LATE).
+    QElapsedTimer m_videoClock;
+    qint64 m_videoTicks = 0;
+    int m_lateTicks = 0;
     // Sound the audio transport dropped because ffmpeg had stopped reading
     // for longer than its queue holds (AUDIO DROP). Read when the writer is
     // retired.

@@ -70,6 +70,9 @@ finding again.
   audio ran ahead of the picture (cdac802).
 - Sound dropped because ffmpeg stopped reading is logged when it starts and totalled as
   AUDIO DROP in the run summary (2874669).
+- The video clock ticks at the configured rate. A timer repeating in whole milliseconds
+  ran 60 fps at 58.8 Hz and 120 at 125 Hz, which a stream's ingest saw as duplicated or
+  dropped frames.
 - Replay saves play in real time, keep their first audio, and finish before their
   sources when the app closes (61a9abc, 9112313); the replay buffer counts as a consumer
   (18dee41).

@@ -285,7 +285,10 @@ when it has gone 100 ms without one (`kStillFloorMs`): ffmpeg stops reading an i
 runs ahead of the others, so a video stream that stopped during a still scene used to take
 the audio with it. A stream uses
 `-fps_mode cfr -r <fps>` and writes on its own clock, repeating the latest picture
-(`Cadence::ConstantRate`), because an ingest expects a steady rate.
+(`Cadence::ConstantRate`), because an ingest expects a steady rate. The sink's clock
+ticks at deadlines n/fps seconds from the start, re-arming a single-shot precise timer
+for each one, so the rate is exact rather than a whole number of milliseconds per frame;
+a tick more than a period late is taken once and the missed ones counted (TICK LATE).
 
 **Output.** Every output first goes through `EncoderPipeline::videoFilterArgs`: a `scale`
 filter to the output size that converts BGRA to YUV with the BT.709 matrix at limited

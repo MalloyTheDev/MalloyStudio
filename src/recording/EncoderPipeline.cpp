@@ -886,16 +886,21 @@ bool EncoderPipeline::start(const Target& target,
     accept->start();
 
     // --- 4. Start pumping video immediately (audio waits for pipe connect) ---
+    // The sink's clock: tick n is due n/fps seconds after the start, and the
+    // timer is re-armed for each deadline rather than left to repeat. A
+    // repeating timer runs in whole milliseconds, so 60 fps ticked every 17 ms
+    // (58.8 Hz) and 120 every 8 ms (125 Hz), and a stream then ran slow or
+    // fast against the rate it declared to the ingest, which ffmpeg made up
+    // by duplicating or dropping frames. Re-arming against absolute deadlines
+    // keeps each tick within a millisecond of its time and the rate exact.
+    m_videoClock.start();
+    m_videoTicks = 0;
+    m_lateTicks = 0;
     m_videoTimer = new QTimer(this);
     m_videoTimer->setTimerType(Qt::PreciseTimer);
-    // Rounded rather than truncated. Integer division turns 60 into 16 ms and
-    // so ticks at 62.5 Hz, which a file sink absorbs because it follows the
-    // source, but a stream holds its own cadence and would then run fast
-    // against the rate it declared to the ingest.
-    const int fps = std::max(1, m_target.output.fps);
-    m_videoTimer->setInterval(std::max(1, (1000 + fps / 2) / fps));
-    connect(m_videoTimer, &QTimer::timeout, this, &EncoderPipeline::onTickVideo);
-    m_videoTimer->start();
+    m_videoTimer->setSingleShot(true);
+    connect(m_videoTimer, &QTimer::timeout, this, &EncoderPipeline::onVideoClock);
+    armVideoClock();
 
     // --- 5. Watchdog: if ffmpeg never opens the audio pipe within 5 s,
     // it almost certainly crashed during arg parsing. Surface that as a
@@ -1022,8 +1027,10 @@ void EncoderPipeline::stop() {
     // against accepted is what this application refused to hand over, and CFR
     // DUP is what the output side invented to hold a cadence. Idle ticks are
     // timer opportunities where nothing new existed, and are not loss of any
-    // kind. AUDIO DROP is sound discarded because ffmpeg stopped reading for
-    // longer than the audio queue holds, and is time missing from the sound.
+    // kind. TICK LATE is ticks the sink's clock missed because this thread was
+    // busy for more than a frame period. AUDIO DROP is sound discarded because
+    // ffmpeg stopped reading for longer than the audio queue holds, and is
+    // time missing from the sound.
     //
     // The two source figures are this run's, not the application's: they are
     // the difference from the totals taken when the run started.
@@ -1037,13 +1044,13 @@ void EncoderPipeline::stop() {
     constexpr double kPcmBytesPerSecond = 48000.0 * 2 * 2;
     qInfo("capture stages: SOURCE RX %d  CAP DROP %d  COMPOSED %d  ENC ACCEPT %d  "
           "PIPE WRITE %d  ENC DROP %d  ENC DROP BURST MAX %.2f s  "
-          "CFR DUP %d  IDLE %d  STILL %d  AUDIO DROP %.2f s",
+          "CFR DUP %d  IDLE %d  STILL %d  TICK LATE %d  AUDIO DROP %.2f s",
           sourceNow.framesProduced - m_sourceStatsAtStart.framesProduced,
           sourceNow.framesDropped  - m_sourceStatsAtStart.framesDropped,
           m_composedFramesAccepted + m_composedFramesRejected,
           m_composedFramesAccepted, piped, m_composedFramesRejected,
           double(m_longestDropBurstMs) / 1000.0,
-          m_cfrDuplicates, m_idleTicks, m_stillRepeats,
+          m_cfrDuplicates, m_idleTicks, m_stillRepeats, m_lateTicks,
           double(m_audioBytesDropped) / kPcmBytesPerSecond);
 
     if (FrameProfile::enabled())
@@ -1138,6 +1145,31 @@ bool EncoderPipeline::shouldWriteFrame(Cadence cadence, quint64 compositionSeque
     // Otherwise the same sequence means the same picture, already recorded,
     // and it is written again only when the still floor is due.
     return compositionSequence != lastSentSequence || stillFloorDue;
+}
+
+void EncoderPipeline::onVideoClock() {
+    const qint64 fps = std::max(1, m_target.output.fps);
+    const qint64 due = m_videoClock.nsecsElapsed() * fps / 1'000'000'000;
+    if (due > m_videoTicks) {
+        // A tick that arrives more than a period late is one tick, not
+        // several: writing the same picture again to make up the count would
+        // put frames at the wrong times. The ones it stood for are counted.
+        m_lateTicks += int(due - m_videoTicks - 1);
+        m_videoTicks = due;
+        onTickVideo();
+    }
+    armVideoClock();
+}
+
+void EncoderPipeline::armVideoClock() {
+    // Stopping deletes the timer, and a tick may have stopped the pipeline.
+    if (!m_videoTimer) return;
+    const qint64 fps = std::max(1, m_target.output.fps);
+    const qint64 nextNs = (m_videoTicks + 1) * 1'000'000'000 / fps;
+    const qint64 waitNs = nextNs - m_videoClock.nsecsElapsed();
+    // Rounded up, so the timer never fires before the deadline and the tick
+    // it would then find not yet due is not spent waiting another period.
+    m_videoTimer->start(int(std::max<qint64>(0, (waitNs + 999'999) / 1'000'000)));
 }
 
 void EncoderPipeline::onTickVideo() {

@@ -220,6 +220,7 @@ private slots:
     void aRecordingKeepsItsColours();
     void stoppingKeepsTheSoundAlreadyHandedOver();
     void soundTheEncoderNeverTookIsReported();
+    void theSinkTicksAtItsConfiguredRate();
     void killingAProcessEndsWhatItStarted();
     void audioControllerHasDefaultLoopbackInput();
     void audioControllerPersistsVolumeAndMute();
@@ -771,6 +772,21 @@ private:
     QImage m_image;
 };
 
+// Counts the pictures asked for. Unsequenced, so a file sink asks for one on
+// every tick of its clock.
+class CountingFrames final : public TimedFrameSource {
+public:
+    CountingFrames() : m_image(1920, 1080, QImage::Format_ARGB32) {
+        m_image.fill(QColor(90, 40, 140));
+    }
+    QImage currentFrame() override { ++calls; return m_image; }
+    int nativeWidth() const override { return m_image.width(); }
+    int nativeHeight() const override { return m_image.height(); }
+    int calls = 0;
+private:
+    QImage m_image;
+};
+
 // One solid colour, for checking what the encode does to it.
 class SolidColourFrames final : public TimedFrameSource {
 public:
@@ -1028,6 +1044,47 @@ void MalloyModelTests::soundTheEncoderNeverTookIsReported() {
     for (int i = 0; i < 40 * 50; ++i) emit audio.pcmReady(QByteArray(3840, '\0'));
     QCoreApplication::processEvents();
     pipeline.stop();
+}
+
+void MalloyModelTests::theSinkTicksAtItsConfiguredRate() {
+    RecorderPipeline pipeline;
+    if (!pipeline.ffmpegAvailable()) QSKIP("Real encoder lifecycle requires ffmpeg in PATH");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    RecordingTestAudio audio;
+
+    // A timer repeating in whole milliseconds ticked 60 fps at 58.8 Hz and 120
+    // at 125 Hz. Measured over three seconds, well after start-up, a tick more
+    // or less at either end of the window is under 0.6%.
+    for (const int fps : {60, 120}) {
+        CountingFrames frames;
+        EncoderPipeline::Target target;
+        target.output = recordingTestSettings();
+        target.output.fps = fps;
+        target.destination = dir.filePath(QStringLiteral("rate-%1.mp4").arg(fps));
+        QString error;
+        QVERIFY2(pipeline.start(target, &frames, &audio, &error), qPrintable(error));
+        // A real event loop, as the application runs. QTest::qWait sleeps
+        // between passes over the events, which makes every timer late.
+        const auto spin = [](int ms) {
+            QEventLoop loop;
+            QTimer::singleShot(ms, &loop, &QEventLoop::quit);
+            loop.exec();
+        };
+        spin(700);
+        const int before = frames.calls;
+        QElapsedTimer window;
+        window.start();
+        spin(3000);
+        const int ticks = frames.calls - before;
+        const double seconds = double(window.nsecsElapsed()) / 1e9;
+        pipeline.stop();
+
+        const double rate = ticks / seconds;
+        qInfo("sink at %d fps ticked at %.2f Hz", fps, rate);
+        QVERIFY2(std::abs(rate - fps) / fps < 0.012,
+                 qPrintable(QStringLiteral("%1 fps ticked at %2 Hz").arg(fps).arg(rate)));
+    }
 }
 
 void MalloyModelTests::killingAProcessEndsWhatItStarted() {
