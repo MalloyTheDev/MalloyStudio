@@ -282,9 +282,12 @@ qt_add_executable(MalloyStudioTests
     # configured microphone and nothing else.
     src/ui/SmartConfigDialog.cpp
     src/ui/SmartConfigDialog.h
-    # The status bar, which must name the ffmpeg this build actually runs.
+    # The status bar, which must name the ffmpeg this build actually runs, and
+    # the controls bar: the timers in both count each output's own time.
     src/ui/shell/StudioStatusBar.cpp
     src/ui/shell/StudioStatusBar.h
+    src/ui/ControlsBar.cpp
+    src/ui/ControlsBar.h
 )
 
 # Force console subsystem so CTest captures stdout test output

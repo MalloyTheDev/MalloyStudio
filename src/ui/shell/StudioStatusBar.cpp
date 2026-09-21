@@ -137,7 +137,6 @@ QWidget* StudioStatusBar::makeStat(const QString& label, QLabel** valueOut) {
 void StudioStatusBar::setMode(Mode mode) {
     if (m_mode == mode) return;
     m_mode = mode;
-    m_elapsed = 0;
     const bool active = (mode == Mode::Recording || mode == Mode::Streaming);
     if (active) m_clock->start(); else m_clock->stop();
     if (active) m_pulse->start();
@@ -155,15 +154,16 @@ void StudioStatusBar::refreshState() {
     QColor c = Theme::Success;
     QString text = QStringLiteral("IDLE");
     QString tone = QStringLiteral("success");
-    auto hms = [](int s) {
+    auto hms = [](const QElapsedTimer& session) {
+        const qint64 s = session.isValid() ? session.elapsed() / 1000 : 0;
         return QStringLiteral("%1:%2:%3")
             .arg(s / 3600, 2, 10, QChar('0'))
             .arg((s % 3600) / 60, 2, 10, QChar('0'))
             .arg(s % 60, 2, 10, QChar('0'));
     };
     switch (m_mode) {
-    case Mode::Recording: c = Theme::Rec; text = QStringLiteral("REC %1").arg(hms(m_elapsed)); tone = "rec"; break;
-    case Mode::Streaming: c = Theme::Rec; text = QStringLiteral("LIVE %1").arg(hms(m_elapsed)); tone = "rec"; break;
+    case Mode::Recording: c = Theme::Rec; text = QStringLiteral("REC %1").arg(hms(m_recordingClock)); tone = "rec"; break;
+    case Mode::Streaming: c = Theme::Rec; text = QStringLiteral("LIVE %1").arg(hms(m_streamingClock)); tone = "rec"; break;
     case Mode::Rendering: c = Theme::AccentHi; text = QStringLiteral("RENDERING"); tone = "accent"; break;
     case Mode::Idle:      break;
     }
@@ -173,7 +173,26 @@ void StudioStatusBar::refreshState() {
 }
 
 void StudioStatusBar::tickClock() {
-    ++m_elapsed;
+    refreshState();
+}
+
+void StudioStatusBar::markRecordingStarted() {
+    m_recordingClock.start();
+    refreshState();
+}
+
+void StudioStatusBar::markRecordingFinished() {
+    m_recordingClock.invalidate();
+    refreshState();
+}
+
+void StudioStatusBar::markStreamingStarted() {
+    m_streamingClock.start();
+    refreshState();
+}
+
+void StudioStatusBar::markStreamingFinished() {
+    m_streamingClock.invalidate();
     refreshState();
 }
 

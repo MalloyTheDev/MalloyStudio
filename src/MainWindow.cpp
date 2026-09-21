@@ -605,6 +605,14 @@ void MainWindow::connectModelSignals() {
     connect(m_scenes, &SceneCollection::programChanged,     this, reconcileAudio);
     connect(m_scenes, &SceneCollection::studioModeChanged,  this, reconcileAudio);
 
+    // The bar's timers count from when an output actually started, not from
+    // the click that asked for it, which comes before the save dialog or the
+    // stream key prompt.
+    connect(m_media, &MediaController::recordingStarted,
+            m_controlsBar, &ControlsBar::markRecordingStarted);
+    connect(m_media, &MediaController::streamingStarted,
+            m_controlsBar, &ControlsBar::markStreamingStarted);
+
     // ControlsBar → MediaController (recording)
     connect(m_controlsBar, &ControlsBar::recordingStarted, this, [this] {
         if (!m_media->ffmpegAvailable()) {
@@ -786,6 +794,15 @@ void MainWindow::connectModelSignals() {
                 bar, &StudioStatusBar::setEncodeStats);
         connect(m_media, &MediaController::recordingProgress,
                 bar, &StudioStatusBar::setEncodeStats);
+        // Each output's elapsed time, from its own start to its own end.
+        connect(m_media, &MediaController::recordingStarted,
+                bar, &StudioStatusBar::markRecordingStarted);
+        connect(m_media, &MediaController::recordingFinished,
+                bar, &StudioStatusBar::markRecordingFinished);
+        connect(m_media, &MediaController::streamingStarted,
+                bar, &StudioStatusBar::markStreamingStarted);
+        connect(m_media, &MediaController::streamingFinished,
+                bar, &StudioStatusBar::markStreamingFinished);
         // Capture-side loss, which until now had nowhere to appear at all: a
         // recording could shed frames before composition and the only sign of
         // it was a shorter file.

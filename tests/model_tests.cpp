@@ -52,6 +52,7 @@
 #include "ui/workspaces/LibraryWorkspaces.h"
 #include "ui/shell/EditingFocus.h"
 #include "ui/shell/StudioStatusBar.h"
+#include "ui/ControlsBar.h"
 #include "ui/OutputSettingsDialog.h"
 #include "ui/StreamSettingsDialog.h"
 #include "ui/SmartConfigDialog.h"
@@ -318,6 +319,10 @@ private slots:
     // own `-version` in the background, and says so when there is none.
     void ffmpegVersionIsReadFromItsFirstLine();
     void theStatusBarNamesTheFfmpegItRuns();
+    // Record and stream times count from when each output actually started,
+    // and one ending does not restart the other's.
+    void theButtonsCountFromTheOutputsStart();
+    void theStatusBarKeepsEachSessionsOwnTime();
     // Machine load: the pure percentage math, including every case where two
     // readings say nothing and the honest answer is to report unknown.
     void machineLoadReportsUnknownRatherThanGuessing();
@@ -2875,6 +2880,68 @@ void MalloyModelTests::theStatusBarNamesTheFfmpegItRuns() {
     QCOMPARE(found.path, shell);
     QVERIFY(found.version.isEmpty());
     QTRY_VERIFY_WITH_TIMEOUT(!ProcessTree::isRunning(pid), 3000);
+}
+
+void MalloyModelTests::theButtonsCountFromTheOutputsStart() {
+    ControlsBar controls;
+    // The timer labels on show, which are the only labels besides the
+    // transition picker's.
+    const auto timers = [&controls] {
+        QStringList shown;
+        for (const QLabel* label : controls.findChildren<QLabel*>())
+            if (label->isVisibleTo(&controls) && label->text() != QObject::tr("Transition:"))
+                shown << label->text();
+        return shown;
+    };
+
+    // Clicking Start asks for a recording; the save dialog comes next and
+    // ffmpeg starts after it. The timer used to start at the click, so a
+    // recording that began after twenty seconds in the dialog read 00:00:20
+    // from its first frame, and stayed that far ahead of the file.
+    controls.toggleRecord();
+    QCOMPARE(timers(), QStringList{QObject::tr("Starting")});
+    QTest::qWait(1200);   // the dialog
+    controls.markRecordingStarted();
+    QCOMPARE(timers(), QStringList{QStringLiteral("00:00:00")});
+
+    // The same for a stream and its key prompt, while the recording goes on.
+    controls.toggleStream();
+    QVERIFY(timers().contains(QObject::tr("Starting")));
+    QTest::qWait(1200);   // the prompt
+    controls.markStreamingStarted();
+    QVERIFY2(timers().contains(QStringLiteral("LIVE 00:00:00")), qPrintable(timers().join(u',')));
+}
+
+void MalloyModelTests::theStatusBarKeepsEachSessionsOwnTime() {
+    StudioStatusBar bar;
+    const auto state = [&bar] {
+        static const QRegularExpression chip(QStringLiteral("^(IDLE|REC |LIVE |RENDERING)"));
+        for (const QLabel* label : bar.findChildren<QLabel*>())
+            if (chip.match(label->text()).hasMatch()) return label->text();
+        return QString();
+    };
+
+    bar.markRecordingStarted();
+    bar.setMode(StudioStatusBar::Mode::Recording);
+    QCOMPARE(state(), QStringLiteral("REC 00:00:00"));
+    QTest::qWait(1200);
+
+    // A stream starts while recording, and the bar shows the stream's time.
+    bar.markStreamingStarted();
+    bar.setMode(StudioStatusBar::Mode::Streaming);
+    QCOMPARE(state(), QStringLiteral("LIVE 00:00:00"));
+
+    // The stream ends and the recording carries on. The bar goes back to the
+    // recording's time; it used to restart from 00:00:00 on every change of
+    // what it showed, and undercount for the rest of the recording.
+    bar.markStreamingFinished();
+    bar.setMode(StudioStatusBar::Mode::Recording);
+    QVERIFY2(QRegularExpression(QStringLiteral("^REC 00:00:0[1-9]$")).match(state()).hasMatch(),
+             qPrintable(state()));
+
+    bar.markRecordingFinished();
+    bar.setMode(StudioStatusBar::Mode::Idle);
+    QCOMPARE(state(), QStringLiteral("IDLE"));
 }
 
 void MalloyModelTests::sinkCadenceDecidesWhenAFrameIsDue() {

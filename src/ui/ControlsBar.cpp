@@ -99,21 +99,32 @@ void ControlsBar::toggleStream() {
 void ControlsBar::onRecordClicked() {
     if (!m_recording) {
         m_recording = true;
-        m_recordElapsed.start();
-        m_recordTimer->setText(QStringLiteral("00:00:00"));
+        // Not counting yet; see markRecordingStarted.
+        m_recordTimer->setText(tr("Starting"));
         m_recordTimer->setVisible(true);
         m_recordBtn->setText(tr("■  Stop Recording"));
-
-        m_recordTicker = new QTimer(this);
-        m_recordTicker->setInterval(1000);
-        connect(m_recordTicker, &QTimer::timeout, this, &ControlsBar::onRecordTick);
-        m_recordTicker->start();
 
         emit recordingStarted();
     } else {
         forceStopRecording();
         emit recordingStopped();
     }
+}
+
+void ControlsBar::markRecordingStarted() {
+    // The started signal is the authority on whether a recording is running,
+    // whichever path asked for it.
+    m_recording = true;
+    m_recordBtn->setText(tr("■  Stop Recording"));
+    m_recordElapsed.start();
+    if (!m_recordTicker) {
+        m_recordTicker = new QTimer(this);
+        m_recordTicker->setInterval(1000);
+        connect(m_recordTicker, &QTimer::timeout, this, &ControlsBar::onRecordTick);
+    }
+    m_recordTicker->start();
+    m_recordTimer->setVisible(true);
+    onRecordTick();
 }
 
 void ControlsBar::forceStopRecording() {
@@ -151,21 +162,30 @@ void ControlsBar::onRecordTick() {
 void ControlsBar::onStreamClicked() {
     if (!m_streaming) {
         m_streaming = true;
-        m_streamElapsed.start();
-        m_streamTimer->setText(QStringLiteral("00:00:00"));
+        // Not counting yet; see markStreamingStarted.
+        m_streamTimer->setText(tr("Starting"));
         m_streamTimer->setVisible(true);
         m_streamBtn->setText(tr("■  Stop Stream"));
-
-        m_streamTicker = new QTimer(this);
-        m_streamTicker->setInterval(1000);
-        connect(m_streamTicker, &QTimer::timeout, this, &ControlsBar::onStreamTick);
-        m_streamTicker->start();
 
         emit streamingStarted();
     } else {
         forceStopStreaming();
         emit streamingStopped();
     }
+}
+
+void ControlsBar::markStreamingStarted() {
+    m_streaming = true;
+    m_streamBtn->setText(tr("■  Stop Stream"));
+    m_streamElapsed.start();
+    if (!m_streamTicker) {
+        m_streamTicker = new QTimer(this);
+        m_streamTicker->setInterval(1000);
+        connect(m_streamTicker, &QTimer::timeout, this, &ControlsBar::onStreamTick);
+    }
+    m_streamTicker->start();
+    m_streamTimer->setVisible(true);
+    onStreamTick();
 }
 
 void ControlsBar::forceStopStreaming() {

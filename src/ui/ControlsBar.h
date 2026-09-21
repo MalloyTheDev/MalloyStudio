@@ -41,6 +41,15 @@ public:
     // timer. Hidden when not streaming.
     void setStreamStats(int bitrateKbps, int droppedFrames);
 
+public slots:
+    // A session that has actually begun, from MediaController's
+    // recordingStarted and streamingStarted. Clicking Start only asks for one:
+    // the save dialog or the stream key prompt, and ffmpeg's own start, come
+    // first and are not part of the session. So the timer reads "Starting"
+    // from the click and counts from here.
+    void markRecordingStarted();
+    void markStreamingStarted();
+
 signals:
     void transitionTypeChanged(TransitionType type);
     void transitionDurationChanged(int ms);

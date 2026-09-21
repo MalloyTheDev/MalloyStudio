@@ -4,6 +4,7 @@
 #include "platform/MachineLoad.h"
 #include "recording/FfmpegVersion.h"
 
+#include <QElapsedTimer>
 #include <QString>
 #include <QWidget>
 
@@ -32,12 +33,24 @@ public:
 
     explicit StudioStatusBar(QWidget* parent = nullptr);
 
+    // Which state the chip shows. Showing a recording or a stream shows that
+    // session's own elapsed time, so changing what is shown resets nothing.
     void setMode(Mode mode);
     Mode mode() const { return m_mode; }
 
     void flashMessage(const QString& text, int ms = 4000);
 
 public slots:
+    // When each output actually began and ended, from MediaController's
+    // started and finished signals. Each session keeps its own clock: a
+    // recording that outlives a stream started during it goes back to showing
+    // the recording's time, and time spent in a save dialog or a stream key
+    // prompt before ffmpeg starts is not counted.
+    void markRecordingStarted();
+    void markRecordingFinished();
+    void markStreamingStarted();
+    void markStreamingFinished();
+
     // Measured encoder throughput, driven from MediaController's progress
     // signals while recording or streaming. Zero means ffmpeg has not reported
     // that figure yet.
@@ -66,7 +79,10 @@ private:
     void refreshState();
 
     Mode m_mode = Mode::Idle;
-    int  m_elapsed = 0;   // seconds in rec/stream
+    // Running from each session's started signal until its finished signal,
+    // and invalid outside a session.
+    QElapsedTimer m_recordingClock;
+    QElapsedTimer m_streamingClock;
 
     QWidget* m_stateChip = nullptr;
     QLabel*  m_stateDot = nullptr;
