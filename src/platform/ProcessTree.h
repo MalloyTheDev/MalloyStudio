@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QList>
+#include <QString>
 
 // Ending a child process together with everything it started.
 //
@@ -25,5 +26,9 @@ bool kill(quint32 pid);
 
 // Whether a process with this ID exists and has not exited.
 bool isRunning(quint32 pid);
+
+// The file name of a process's executable, such as "ffmpeg.exe", or empty
+// when it cannot be read.
+QString imageName(quint32 pid);
 
 }  // namespace ProcessTree

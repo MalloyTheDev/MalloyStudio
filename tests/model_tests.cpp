@@ -959,26 +959,35 @@ void MalloyModelTests::aRecordingKeepsItsColours() {
 
 void MalloyModelTests::killingAProcessEndsWhatItStarted() {
     // A launcher and the program it starts, as a package manager's ffmpeg is:
-    // cmd waiting on ping, which runs for half a minute.
+    // cmd waiting on ping, which runs for half a minute. Its output goes to
+    // nul: writing to the pipe QProcess closes once cmd is gone would end ping
+    // by itself, and the test could not tell the two kills apart.
     const QString shell = QStandardPaths::findExecutable(QStringLiteral("cmd"));
     if (shell.isEmpty()) QSKIP("cmd.exe not found");
     const auto launch = [&](QProcess& p) -> quint32 {
         p.start(shell, {QStringLiteral("/c"), QStringLiteral("ping"), QStringLiteral("-n"),
-                        QStringLiteral("30"), QStringLiteral("127.0.0.1")});
+                        QStringLiteral("30"), QStringLiteral("127.0.0.1"), QStringLiteral(">nul")});
         if (!p.waitForStarted(5000)) return 0;
         const quint32 root = quint32(p.processId());
-        for (int i = 0; i < 50 && ProcessTree::descendants(root).isEmpty(); ++i) QThread::msleep(50);
-        const QList<quint32> kids = ProcessTree::descendants(root);
-        return kids.isEmpty() ? 0 : kids.first();
+        // The console host is a child as well; the program is the one to watch.
+        for (int i = 0; i < 60; ++i) {
+            for (const quint32 kid : ProcessTree::descendants(root))
+                if (ProcessTree::imageName(kid).compare(QStringLiteral("ping.exe"), Qt::CaseInsensitive) == 0)
+                    return kid;
+            QThread::msleep(50);
+        }
+        return 0;
     };
 
-    // What QProcess::kill() does: the launcher ends and its child does not.
+    // What QProcess::kill() does: the launcher ends and its child does not,
+    // still running well after the launcher is gone.
     {
         QProcess launcher;
         const quint32 child = launch(launcher);
         QVERIFY(child != 0);
         launcher.kill();
         launcher.waitForFinished(3000);
+        QTest::qWait(1500);
         QVERIFY2(ProcessTree::isRunning(child), "the child should outlive a plain kill of its launcher");
         ProcessTree::kill(child);   // tidy up after the demonstration
     }

@@ -84,3 +84,15 @@ bool ProcessTree::isRunning(quint32 pid) {
     CloseHandle(h);
     return running;
 }
+
+QString ProcessTree::imageName(quint32 pid) {
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!h) return {};
+    wchar_t path[MAX_PATH];
+    DWORD size = MAX_PATH;
+    const bool ok = QueryFullProcessImageNameW(h, 0, path, &size);
+    CloseHandle(h);
+    if (!ok) return {};
+    const QString full = QString::fromWCharArray(path, int(size));
+    return full.mid(full.lastIndexOf(QLatin1Char('\\')) + 1);
+}
