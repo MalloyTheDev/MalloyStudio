@@ -12,9 +12,9 @@ class QComboBox;
 class QLabel;
 class QLineEdit;
 class QPushButton;
+class QScrollArea;
 class QSlider;
 class QToolButton;
-class QVBoxLayout;
 class VuMeter;
 
 // Streaming Studio: destination + preview + go-live card in the center, and a
@@ -69,7 +69,7 @@ private:
     Strip makeMixStrip(const QString& id, const AudioInput& in);
 
     AudioController*      m_audio = nullptr;
-    QVBoxLayout*          m_mixLanes = nullptr;
+    QScrollArea*          m_mixScroll = nullptr;   // holds the strips; rebuildMixStrips() fills it
     QLabel*               m_mixEmpty = nullptr;
     QHash<QString, Strip> m_mixStrips;
 

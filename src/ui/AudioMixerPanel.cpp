@@ -9,6 +9,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QToolButton>
@@ -46,10 +47,15 @@ AudioMixerPanel::AudioMixerPanel(AudioController* controller,
     m_emptyLabel->setVisible(false);
     root->addWidget(m_emptyLabel);
 
-    m_lanes = new QVBoxLayout();
-    m_lanes->setSpacing(6);
-    root->addLayout(m_lanes);
-    root->addStretch();
+    // The strips scroll. Laid straight into this layout, one fixed-height
+    // strip per input gave the panel a minimum height that grew with every
+    // input, and QStackedLayout takes the minimum over hidden pages as well,
+    // so enough inputs grew the window past the bottom of the screen from any
+    // workspace, as the media bin once did.
+    m_laneScroll = new QScrollArea(this);
+    m_laneScroll->setWidgetResizable(true);
+    m_laneScroll->setFrameShape(QFrame::NoFrame);
+    root->addWidget(m_laneScroll, 1);
 
     // ── Master bus limiter ────────────────────────────────────────────────────
     auto* sep = new QFrame(this);
@@ -102,17 +108,24 @@ AudioMixerPanel::AudioMixerPanel(AudioController* controller,
 }
 
 void AudioMixerPanel::rebuild() {
-    // Remove existing strips
-    for (auto it = m_strips.begin(); it != m_strips.end(); ++it)
-        delete it.value().root;
+    // A new list each time rather than strips added to the old one. The scroll
+    // area measures its widget only when the widget is set, so a list that
+    // grew afterwards would have left the panel sized for the inputs there at
+    // startup. Setting the new list deletes the old one and its strips.
     m_strips.clear();
+    auto* list = new QWidget;
+    auto* lanes = new QVBoxLayout(list);
+    lanes->setContentsMargins(0, 0, 0, 0);
+    lanes->setSpacing(6);
 
     for (const AudioInput& in : m_controller->inputs()) {
         Strip s = makeStrip(in.id, in);
-        m_lanes->addWidget(s.root);
+        lanes->addWidget(s.root);
         m_strips.insert(in.id, s);
         s.meter->setEnabled(in.connected);
     }
+    lanes->addStretch();
+    m_laneScroll->setWidget(list);
 
     if (m_emptyLabel) m_emptyLabel->setVisible(m_strips.isEmpty());
 }

@@ -8,9 +8,9 @@
 class AudioController;
 class QCheckBox;
 class QLabel;
+class QScrollArea;
 class QSlider;
 class QToolButton;
-class QVBoxLayout;
 class SceneCollection;
 class VuMeter;
 
@@ -53,7 +53,7 @@ private:
 
     AudioController*      m_controller  = nullptr;
     SceneCollection*      m_scenes      = nullptr;
-    QVBoxLayout*          m_lanes       = nullptr;
+    QScrollArea*          m_laneScroll  = nullptr;  // holds the strips; rebuild() fills it
     QHash<QString, Strip> m_strips;
     QLabel*               m_emptyLabel  = nullptr;  // shown when no mixer strips exist (Tier 3)
 

@@ -60,8 +60,10 @@
 #include <QSettings>
 #include <QSignalSpy>
 #include <QLabel>
+#include <QLayout>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QScrollArea>
 #include <QSlider>
 #include <QStackedWidget>
 #include <QWidget>
@@ -241,6 +243,9 @@ private slots:
     void audioFromARemovedInputIsNotKept();
     // Both mixers show the level that is stored, rounded, wherever it was set.
     void aMixerSliderStaysWhereItWasSet();
+    // A mixer's strips scroll, so its minimum height does not grow with the
+    // number of inputs and cannot grow the window.
+    void manyAudioInputsScrollInsteadOfGrowingTheWindow();
     void theMixerKeepsTimeWithTheWallClock();
     void mediaProbesAreRememberedNotRepeated();
     void aHungOrMissingProberDoesNotStallTheScan();
@@ -6847,6 +6852,55 @@ void MalloyModelTests::aMixerSliderStaysWhereItWasSet() {
     QCOMPARE(streamVolume->value(), 59);
     QCOMPARE(controls.count(), 1);
     QCOMPARE(stored().volume, 0.59f);
+}
+
+void MalloyModelTests::manyAudioInputsScrollInsteadOfGrowingTheWindow() {
+    // Both mixers built one fixed-height strip per input straight into their
+    // layouts, so their minimum height grew with every input. QStackedLayout
+    // takes the minimum over hidden pages as well, and Qt grows the window to
+    // meet it, so enough inputs pushed the controls bar and the status bar off
+    // the screen from any workspace, as the media bin once did.
+    AudioController c;
+    c.setWorkerFactoryForTesting([](const QString& deviceId, bool loopback) {
+        return new FakeWasapiWorker(deviceId, loopback);
+    });
+    AudioMixerPanel recording(&c, nullptr);
+    StreamingWorkspace streaming(&c);
+    // The minimum height the view has once it is laid out again. Layouts on a
+    // widget that has never been shown are not redone when their contents
+    // change, which is also why the media bin's fault looked intermittent, so
+    // every layout and every widget's measurements are marked stale first.
+    const auto minimumHeight = [](QWidget* view) {
+        for (QLayout* layout : view->findChildren<QLayout*>()) layout->invalidate();
+        for (QWidget* child : view->findChildren<QWidget*>()) child->updateGeometry();
+        return view->minimumSizeHint().height();
+    };
+    const int recordingMinimum = minimumHeight(&recording);
+    const int streamingMinimum = minimumHeight(&streaming);
+
+    QStringList mics;
+    for (int i = 0; i < 40; ++i) mics << QStringLiteral("{scroll-test-mic-%1}").arg(i);
+    c.reconcileInputs(mics);
+    QCOMPARE(c.inputs().size(), 41);
+    QCOMPARE(minimumHeight(&recording), recordingMinimum);
+    QCOMPARE(minimumHeight(&streaming), streamingMinimum);
+
+    // The strips scroll: each mixer asks for less room than they take up.
+    auto* recordingScroll = recording.findChild<QScrollArea*>();
+    auto* streamingScroll = streaming.findChild<QScrollArea*>();
+    QVERIFY(recordingScroll && streamingScroll);
+    for (const QScrollArea* scroll : {recordingScroll, streamingScroll})
+        QVERIFY(scroll->widget()->sizeHint().height() > scroll->sizeHint().height());
+
+    // A second input is still given the room to be seen. A scroll area
+    // measures its widget only when the widget is set, so strips added to the
+    // list it already had would not have grown the mixer to show them.
+    c.reconcileInputs({});
+    const int recordingOne = recordingScroll->sizeHint().height();
+    const int streamingOne = streamingScroll->sizeHint().height();
+    c.reconcileInputs({mics.first()});
+    QVERIFY(recordingScroll->sizeHint().height() > recordingOne);
+    QVERIFY(streamingScroll->sizeHint().height() > streamingOne);
 }
 
 void MalloyModelTests::theMixerKeepsTimeWithTheWallClock() {

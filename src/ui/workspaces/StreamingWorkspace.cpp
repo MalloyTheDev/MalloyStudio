@@ -15,6 +15,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QToolButton>
@@ -293,10 +294,13 @@ QWidget* StreamingWorkspace::buildRail() {
     auto* mv = new QVBoxLayout(mbody);
     mv->setContentsMargins(10, 10, 10, 10);
     mv->setSpacing(8);
-    m_mixLanes = new QVBoxLayout;
-    m_mixLanes->setContentsMargins(0, 0, 0, 0);
-    m_mixLanes->setSpacing(6);
-    mv->addLayout(m_mixLanes);
+    // Scrolls for the reason the Recording mixer does: one fixed-height strip
+    // per input, unscrolled, set a minimum height that grew with every input
+    // and could grow the window from any workspace.
+    m_mixScroll = new QScrollArea;
+    m_mixScroll->setWidgetResizable(true);
+    m_mixScroll->setFrameShape(QFrame::NoFrame);
+    mv->addWidget(m_mixScroll);
     m_mixEmpty = lbl(tr("No audio inputs detected."), QStringLiteral("mute"), 11);
     m_mixEmpty->setAlignment(Qt::AlignCenter);
     m_mixEmpty->setVisible(false);
@@ -444,20 +448,28 @@ StreamingWorkspace::Strip StreamingWorkspace::makeMixStrip(const QString& id, co
 }
 
 void StreamingWorkspace::rebuildMixStrips() {
-    if (!m_mixLanes) return;
+    if (!m_mixScroll) return;
     // Wipe existing strips wholesale — re-seeding via setValue would re-fire
     // the volume/mute lambdas, and recreating is also the simplest way to
-    // handle an input being removed.
-    for (auto it = m_mixStrips.begin(); it != m_mixStrips.end(); ++it)
-        if (it.value().root) it.value().root->deleteLater();
+    // handle an input being removed. They go in a new list rather than the
+    // old one because the scroll area measures its widget only when the
+    // widget is set; a list that grew afterwards would have left the mix
+    // sized for the inputs there at startup.
     m_mixStrips.clear();
+    if (QWidget* old = m_mixScroll->takeWidget()) old->deleteLater();
+    auto* list = new QWidget;
+    auto* lanes = new QVBoxLayout(list);
+    lanes->setContentsMargins(0, 0, 0, 0);
+    lanes->setSpacing(6);
 
     const QList<AudioInput>& inputs = m_audio->inputs();
     for (const AudioInput& in : inputs) {
         Strip s = makeMixStrip(in.id, in);
-        m_mixLanes->addWidget(s.root);
+        lanes->addWidget(s.root);
         m_mixStrips.insert(in.id, s);
     }
+    lanes->addStretch();
+    m_mixScroll->setWidget(list);
     if (m_mixEmpty) m_mixEmpty->setVisible(inputs.isEmpty());
 }
 
