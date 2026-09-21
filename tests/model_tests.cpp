@@ -376,6 +376,7 @@ private slots:
     void removingAScenePreservesWhatIsOnAir();
     void stagingASceneKeepsTheProgramCaptureRunning();
     void aFrameQueuedBeforeAStopIsDropped();
+    void aLostDisplayCaptureIsTriedAgain();
     void projectMediaPathsMustBeLocalFiles();
     void encoderRedactsTheStreamKeyFromFfmpegOutput();
     void addingAConfiguredLayerIsOneUndoStep();
@@ -3961,6 +3962,57 @@ void MalloyModelTests::aFrameQueuedBeforeAStopIsDropped() {
     // preview a picture of a source that is off.
     emit session->frameReady(QImage(4, 4, QImage::Format_RGB32));
     QCOMPARE(frames.count(), 1);
+    QCOMPARE(controller.monitorStatus(1, 2), QStringLiteral("Idle"));
+}
+
+void MalloyModelTests::aLostDisplayCaptureIsTriedAgain() {
+    FakeCaptureSession::started.clear();
+    FakeCaptureSession::stopped.clear();
+    FakeCaptureSession::created.clear();
+
+    SceneCollection scenes;
+    scenes.addScene(QStringLiteral("Scene"));
+    scenes.addNewSourceToCurrent(QStringLiteral("Display"), Source::Type::DisplayCapture,
+                                 QString(), QColor(), 1, 2);
+    CaptureController controller(
+        &scenes,
+        [](int adapterIndex, int outputIndex, QObject* parent) {
+            return new FakeCaptureSession(adapterIndex, outputIndex, parent);
+        });
+    QCOMPARE(FakeCaptureSession::started.count(QStringLiteral("1:2")), 1);
+
+    // The secure desktop takes the duplication away, as a UAC prompt does.
+    emit FakeCaptureSession::created.last()->captureError(QStringLiteral("Access lost"));
+    QCOMPARE(FakeCaptureSession::stopped.count(QStringLiteral("1:2")), 1);
+    QCOMPARE(controller.activeSessionCount(), 0);
+    QVERIFY(controller.monitorStatus(1, 2).startsWith(QStringLiteral("Error")));
+
+    // It comes back by itself. Before, it stayed blank until the user hid and
+    // showed the source again.
+    QTRY_COMPARE_WITH_TIMEOUT(FakeCaptureSession::started.count(QStringLiteral("1:2")), 2, 3000);
+
+    // Still failing, as while the prompt stays up: the next attempt waits
+    // longer rather than hammering the device.
+    QElapsedTimer waited;
+    waited.start();
+    emit FakeCaptureSession::created.last()->captureError(QStringLiteral("Access denied"));
+    QTRY_COMPARE_WITH_TIMEOUT(FakeCaptureSession::started.count(QStringLiteral("1:2")), 3, 5000);
+    QVERIFY2(waited.elapsed() >= 900, qPrintable(QString::number(waited.elapsed())));
+
+    // A frame means it works again, and the next failure starts over quickly.
+    emit FakeCaptureSession::created.last()->frameReady(QImage(4, 4, QImage::Format_RGB32));
+    QCOMPARE(controller.monitorStatus(1, 2), QStringLiteral("Live"));
+    waited.restart();
+    emit FakeCaptureSession::created.last()->captureError(QStringLiteral("Access lost"));
+    QTRY_COMPARE_WITH_TIMEOUT(FakeCaptureSession::started.count(QStringLiteral("1:2")), 4, 3000);
+    QVERIFY2(waited.elapsed() < 900, qPrintable(QString::number(waited.elapsed())));
+
+    // Hiding the source while a retry is pending cancels it.
+    emit FakeCaptureSession::created.last()->captureError(QStringLiteral("Access lost"));
+    scenes.selectCurrentItemAt(0);
+    scenes.setCurrentItemVisible(0, false);
+    QTest::qWait(1500);
+    QCOMPARE(FakeCaptureSession::started.count(QStringLiteral("1:2")), 4);
     QCOMPARE(controller.monitorStatus(1, 2), QStringLiteral("Idle"));
 }
 

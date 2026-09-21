@@ -11,6 +11,9 @@
 #include "model/Source.h"
 
 #include <QSet>
+#include <QTimer>
+
+#include <algorithm>
 #include <utility>
 
 DxgiCaptureSession::DxgiCaptureSession(int adapterIndex, int outputIndex, QObject* parent)
@@ -166,6 +169,8 @@ void CaptureController::reconcile() {
     for (const QString& key : blockedKeys) {
         if (!required.contains(key)) {
             m_blockedErrorKeys.remove(key);
+            m_retryTokens.remove(key);
+            m_retryDelayMs.remove(key);
             setMonitorStatus(key, QStringLiteral("Idle"));
         }
     }
@@ -223,6 +228,8 @@ void CaptureController::stopAll() {
     const QList<QString> cameraKeys = m_cameraSessions.keys();
     for (const QString& key : cameraKeys) stopCameraSession(key);
     m_blockedErrorKeys.clear();
+    m_retryTokens.clear();
+    m_retryDelayMs.clear();
     setSummary(QStringLiteral("Idle"));
 }
 
@@ -236,13 +243,27 @@ void CaptureController::startSession(int adapterIndex, int outputIndex) {
 
     connect(session, &CaptureSession::frameReady, this, [this, adapterIndex, outputIndex](QImage frame) {
         const QString key = keyFor(adapterIndex, outputIndex);
+        m_retryDelayMs.remove(key);   // working again: the next failure starts over
         setMonitorStatus(key, QStringLiteral("Live"));
         emit frameReady(adapterIndex, outputIndex, std::move(frame));
     });
     connect(session, &CaptureSession::captureError, this, [this, adapterIndex, outputIndex](const QString& message) {
         const QString key = keyFor(adapterIndex, outputIndex);
         m_blockedErrorKeys.insert(key);
-        setMonitorStatus(key, QStringLiteral("Error: %1").arg(message));
+        // Blocked until the retry, which then unblocks it and reconciles; see
+        // m_retryDelayMs. Blocking it for good, as this did, left a recording
+        // or a stream without its screen from the first UAC prompt on, until
+        // the user happened to toggle the source.
+        const int delay = m_retryDelayMs.value(key, kFirstRetryMs);
+        m_retryDelayMs.insert(key, std::min(delay * 2, kMaxRetryMs));
+        const quint64 token = ++m_retrySerial;
+        m_retryTokens.insert(key, token);
+        QTimer::singleShot(delay, this, [this, key, token] {
+            if (m_retryTokens.value(key) != token) return;   // superseded or cancelled
+            m_retryTokens.remove(key);
+            if (m_blockedErrorKeys.remove(key)) reconcile();
+        });
+        setMonitorStatus(key, QStringLiteral("Error: %1 (retrying)").arg(message));
         stopSession(key, false);
         reconcile();
     });

@@ -165,5 +165,16 @@ private:
 
     QHash<QString, QString> m_lastStatus;
     QSet<QString> m_blockedErrorKeys;
+
+    // A display capture that fails is tried again rather than left blocked:
+    // desktop duplication loses access every time the secure desktop shows
+    // (a UAC prompt, the lock screen, Ctrl+Alt+Del) or the display mode
+    // changes, and recreating it is the documented recovery. The delay
+    // doubles while it keeps failing and resets once a frame arrives.
+    static constexpr int kFirstRetryMs = 500;
+    static constexpr int kMaxRetryMs   = 10000;
+    QHash<QString, int>     m_retryDelayMs;   // next delay per display key
+    QHash<QString, quint64> m_retryTokens;    // the pending retry per key
+    quint64                 m_retrySerial = 0;
     QString m_statusSummary = QStringLiteral("Idle");
 };
