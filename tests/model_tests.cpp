@@ -516,6 +516,7 @@ private slots:
     void timelineGraphPlacesTrimsAndScalesClips();
     // Clip positions are stored in canvas pixels and rendered in output pixels.
     void timelineGraphScalesPositionsFromCanvasToOutput();
+    void timelineGraphDrawsTheTopTrackOnTop();
     // A clip that runs past the end of its source is cut there and reported
     // (ADR-0001, contract 1): in the graph, on the job, and in the file.
     void timelineGraphClampsClipsThatRunPastTheirSource();
@@ -5183,6 +5184,39 @@ void MalloyModelTests::timelineGraphScalesPositionsFromCanvasToOutput() {
     g = placed(100, -50, 1280, 720);
     QVERIFY2(g.ok, qPrintable(g.error));
     QVERIFY2(g.filterGraph.contains(QStringLiteral("overlay=67:-33:")), qPrintable(g.filterGraph));
+}
+
+void MalloyModelTests::timelineGraphDrawsTheTopTrackOnTop() {
+    // The editor lists its video tracks top down: V3 (track 0) above V2 (1)
+    // above V1 (2). A clip on V3 must end up over one on V1 in the render, as
+    // it does on the timeline. The titles come first in the array, so array
+    // order alone would get this wrong too.
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString titles = makeMediaFile(dir.filePath(QStringLiteral("titles.mp4")));
+    const QString gameplay = makeMediaFile(dir.filePath(QStringLiteral("gameplay.mp4")));
+    QVERIFY(!titles.isEmpty() && !gameplay.isEmpty());
+
+    QJsonObject top = makeClip(titles, 0.0, 5.0);
+    top.insert(QStringLiteral("track"), 0);
+    QJsonObject bottom = makeClip(gameplay, 0.0, 5.0);
+    bottom.insert(QStringLiteral("track"), 2);
+    const RenderGraph g = TimelineGraphBuilder::build(QJsonArray{top, bottom}, OutputSettings{});
+    QVERIFY2(g.ok, qPrintable(g.error));
+
+    // Inputs are numbered in the order they are given to ffmpeg.
+    QStringList inputs;
+    for (int i = 0; i + 1 < g.inputArgs.size(); ++i)
+        if (g.inputArgs.at(i) == QStringLiteral("-i")) inputs << g.inputArgs.at(i + 1);
+    const int titlesInput = inputs.indexOf(titles);
+    QVERIFY(titlesInput >= 0 && inputs.contains(gameplay));
+
+    // The last overlay, the one that produces the output, lays the titles over
+    // everything beneath them.
+    QString last;
+    for (const QString& chain : g.filterGraph.split(QLatin1Char(';')))
+        if (chain.contains(QStringLiteral("[vout]"))) last = chain;
+    QVERIFY2(last.contains(QStringLiteral("[v%1]overlay").arg(titlesInput)), qPrintable(last));
 }
 
 void MalloyModelTests::timelineGraphClampsClipsThatRunPastTheirSource() {

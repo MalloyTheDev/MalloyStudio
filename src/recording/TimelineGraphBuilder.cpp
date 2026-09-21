@@ -195,12 +195,15 @@ RenderGraph TimelineGraphBuilder::build(const QJsonArray& timeline, const Output
     if (g.durationSecs <= 0.0)
         return fail(QStringLiteral("The timeline has no duration."));
 
-    // Lower tracks composite first, so later overlays land on top. Ties keep the
-    // snapshot order, which is the order the editor lists them in.
+    // Each overlay lands on top of the ones before it, so the bottom track goes
+    // first. The editor lists its video tracks top down, V3 above V2 above V1,
+    // as track 0, 1 and 2, so the highest index is the bottom track. Sorting
+    // the other way drew V1 over V3, putting the gameplay over the titles.
+    // Ties keep the snapshot order.
     QVector<Clip> video, audio;
     for (const Clip& c : clips) (c.audio ? audio : video).push_back(c);
     std::stable_sort(video.begin(), video.end(),
-                     [](const Clip& a, const Clip& b) { return a.track < b.track; });
+                     [](const Clip& a, const Clip& b) { return a.track > b.track; });
 
     if (video.isEmpty())
         return fail(QStringLiteral("The timeline has no video clips."));

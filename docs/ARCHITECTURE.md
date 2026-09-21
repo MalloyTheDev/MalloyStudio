@@ -1399,8 +1399,8 @@ arguments, a filter graph and output arguments:
   records it (`ClampedClip`, `describeClamps`); a clip that starts after its source ends is
   refused.
 - Builds a black background at the output size, rate and duration, so gaps render black and
-  timing does not shift; trims, retimes and scales each video clip and overlays them in track
-  order at positions scaled from canvas pixels to output pixels; trims, retempos (chained
+  timing does not shift; trims, retimes and scales each video clip and overlays them bottom track first (V1, then V2, then V3, as the editor stacks
+  them) at positions scaled from canvas pixels to output pixels; trims, retempos (chained
   `atempo`), applies gain and delays each audio clip and mixes them with `amix` without
   normalisation.
 - Puts media paths only in `-i` arguments, never in the graph text, where `:` and `'` are

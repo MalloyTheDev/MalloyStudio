@@ -523,10 +523,10 @@ give the clip keys their meaning are:
   A timeline needs at least one video clip to render.
 - **Background.** Video is composited onto black at the output size and frame rate, so
   gaps render black and every clip keeps its timeline position.
-- **Order.** Video clips are composited in ascending `track` order, ties in array order,
-  each over the ones before it. With the editor's track list, V1 (`track` 2) is therefore
-  drawn over V2 (`track` 1), which is drawn over V3 (`track` 0), the reverse of the order
-  in which the editor lists them.
+- **Order.** Video clips are composited in descending `track` order, ties in array order,
+  each over the ones before it. With the editor's track list, V3 (`track` 0) is therefore
+  drawn over V2 (`track` 1), which is drawn over V1 (`track` 2), matching the order in
+  which the editor lists them.
 - **Placement.** `transform.x` and `transform.y` are canvas pixels, scaled to the output
   (`x * output width / 1920`, `y * output height / 1080`, rounded), so a clip lands in the
   same place at any output size.
@@ -902,7 +902,5 @@ format is not surprised by them. Open issues are linked where they exist.
   a render refuses a clip that uses them (section 9.6).
 - The editor's Effects tab is not connected to anything, and clips carry no effects in
   the format ([#22](https://github.com/MalloyTheDev/MalloyStudio/issues/22)).
-- Video clips are composited in ascending `track` order, which puts V1 over V3, the
-  reverse of the order the editor lists them in (section 9.5).
 - `scroll` filter speeds are not bounded on load (section 7.5).
 - A browser source stores a URL that nothing loads (section 5.1).

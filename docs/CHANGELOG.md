@@ -257,6 +257,8 @@ Changes since v7
 
 - Clip positions scale to the render's output size; at any size other than
   1920x1080, positioned clips landed in the wrong place (ce40a16).
+- A render stacks video tracks as the editor shows them, V3 over V2 over V1; it drew
+  them the other way up, so gameplay on V1 covered titles on V3.
 - Dropping or moving media longer than the timeline no longer aborts the
   application (43f152f).
 - Timeline edits mark the project modified, so closing prompts to save them, and
@@ -375,7 +377,7 @@ Changes since v7
 - Panels no longer show stale state: the Inspector clears a deleted layer's
   fields, the Recording header's source count follows removals, and the
   Dashboard's recent recordings update when a recording or replay is saved
-  (45b07b6).
+  (45b07b6, 566c6f6).
 - Typing in an Inspector text, URL or transform field keeps the caret and the
   partial value; a width typed as 800 used to commit as 1060 (d606f0d).
 - Sliders show stored levels rounded instead of truncated, so 53 no longer shows as

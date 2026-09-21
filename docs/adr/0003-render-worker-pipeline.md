@@ -205,10 +205,10 @@ Dated records of where the implementation refines or extends the decision.
 **Implementation details as of 2026-09-21**, which the decision left open. Not all of
 them date from the first slice.
 
-- Video clips are composited onto the black background in ascending `track` order, ties
+- Video clips are composited onto the black background in descending `track` order, ties
   in timeline order, each over the ones before it. The editor lists its tracks as V3
-  (`track` 0), V2 (1) and V1 (2) from top to bottom, so a render draws V1 over V3, the
-  reverse of the order the editor shows.
+  (`track` 0), V2 (1) and V1 (2) from top to bottom, so a render draws V3 over V1, as the
+  editor shows them. Until 2026-09-21 the order was ascending, which drew V1 over V3.
 - Only clips marked `audio` contribute sound. Each is trimmed, retimed with a chain of
   `atempo` filters, given its gain with `volume` and placed with `adelay`; the clips are
   mixed with `amix` without normalisation, or passed through when there is only one.
