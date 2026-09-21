@@ -202,6 +202,9 @@ void RtmpKeyRelay::onIncomingConnection() {
     }
     m_client = incoming;
     m_server->close();
+    // Bounded, so that when the relay stops reading, Qt stops reading too and
+    // the loopback connection fills: that is what makes ffmpeg's send block.
+    m_client->setReadBufferSize(512 * 1024);
 
     connect(m_client, &QTcpSocket::readyRead, this, &RtmpKeyRelay::onClientReadable);
     connect(m_client, &QTcpSocket::disconnected, this, &RtmpKeyRelay::onSocketError);
@@ -231,6 +234,10 @@ void RtmpKeyRelay::onIncomingConnection() {
         connect(m_upstream, &QTcpSocket::connected, this, &RtmpKeyRelay::onUpstreamConnected);
     }
     connect(m_upstream, &QTcpSocket::readyRead, this, &RtmpKeyRelay::onUpstreamReadable);
+    // Room upstream is the cue to read from ffmpeg again after holding off.
+    connect(m_upstream, &QIODevice::bytesWritten, this, &RtmpKeyRelay::onClientReadable);
+    if (auto* secure = qobject_cast<QSslSocket*>(m_upstream))
+        connect(secure, &QSslSocket::encryptedBytesWritten, this, &RtmpKeyRelay::onClientReadable);
     connect(m_upstream, &QTcpSocket::disconnected, this, &RtmpKeyRelay::onSocketError);
     connect(m_upstream, &QTcpSocket::errorOccurred, this, &RtmpKeyRelay::onSocketError);
 
@@ -249,8 +256,25 @@ void RtmpKeyRelay::onUpstreamConnected() {
     }
 }
 
+qint64 RtmpKeyRelay::backlog() const {
+    qint64 bytes = m_outboundQueue.size();
+    if (m_upstream) {
+        bytes += m_upstream->bytesToWrite();
+        if (const auto* secure = qobject_cast<const QSslSocket*>(m_upstream))
+            bytes += secure->encryptedBytesToWrite();
+    }
+    return bytes;
+}
+
 void RtmpKeyRelay::onClientReadable() {
     if (!m_client) return;
+    // Backpressure. Reading everything ffmpeg sent and handing it to a socket
+    // that cannot send it as fast moved the whole excess of a slow uplink into
+    // this process, without limit and without ffmpeg ever seeing congestion.
+    // Leaving it unread instead fills the loopback connection and blocks
+    // ffmpeg, as a direct connection to the ingest would. Reading resumes when
+    // the upstream reports progress.
+    if (backlog() >= kMaxBacklog) return;
     m_pending += m_client->readAll();
 
     // Hold back only what could be the beginning of a split placeholder. A

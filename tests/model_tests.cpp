@@ -358,6 +358,8 @@ private slots:
     void twitchApiParsesHelixPayloads();
     void rtmpRelaySubstitutesAcrossReadBoundaries();
     void rtmpRelayTransportFollowsTheScheme();
+    void aSlowUplinkBacksUpIntoFfmpegNotMemory();
+    void aRelayThatHeldBackStillDeliversEverything();
     void loadedProjectHoldsItsDevicesUntilAllowed();
     void undoAndRedoKeepADeclinedDeviceHeld();
     void sourceIdsNearTheTopDoNotOverflow();
@@ -5496,6 +5498,93 @@ void MalloyModelTests::aCommandDuringAnEditSessionKeepsItsOwnUndoStep() {
     undo.undo();
     QVERIFY(!scenes.currentScene()->itemAt(0)->isVisible());
     QCOMPARE(scenes.sources().first()->text(), QStringLiteral("a"));
+}
+
+void MalloyModelTests::aSlowUplinkBacksUpIntoFfmpegNotMemory() {
+    // An rtmps ingest that accepts the connection and never answers the TLS
+    // handshake, so the upstream never becomes ready and everything the relay
+    // reads from ffmpeg waits inside the relay. On loopback the kernel will
+    // buffer tens of megabytes of a plain connection, which would hide the
+    // relay's own behaviour; this cannot.
+    QTcpServer ingest;
+    QVERIFY(ingest.listen(QHostAddress::LocalHost));
+    QTcpSocket* silent = nullptr;
+    QObject::connect(&ingest, &QTcpServer::newConnection, &ingest,
+                     [&] { silent = ingest.nextPendingConnection(); });
+
+    RtmpKeyRelay relay;
+    QString error;
+    const QString local = relay.start(
+        QStringLiteral("rtmps://127.0.0.1:%1/app/live_secret_key").arg(ingest.serverPort()), &error);
+    QVERIFY2(!local.isEmpty(), qPrintable(error));
+
+    const QUrl url(local);
+    QTcpSocket publisher;
+    publisher.connectToHost(url.host(), quint16(url.port()));
+    QVERIFY(publisher.waitForConnected(5000));
+    QTRY_VERIFY(silent != nullptr);
+
+    // ffmpeg publishing far more than can go anywhere.
+    constexpr qint64 kSent = 16 * 1024 * 1024;
+    publisher.write(QByteArray(kSent, '\0'));
+    QTest::qWait(1500);
+
+    // The relay filled to its bound and stopped reading. Before, it read all
+    // of it into memory, and on a slow uplink kept doing so without limit.
+    QVERIFY2(relay.backlog() >= RtmpKeyRelay::kMaxBacklog,
+             qPrintable(QString::number(relay.backlog())));
+    QVERIFY2(relay.backlog() <= RtmpKeyRelay::kMaxBacklog + 1024 * 1024,
+             qPrintable(QString::number(relay.backlog())));
+    relay.stop();
+    publisher.abort();
+}
+
+void MalloyModelTests::aRelayThatHeldBackStillDeliversEverything() {
+    // An ingest that stalls, long enough for the relay to reach its bound and
+    // stop reading from ffmpeg, and then catches up. Holding off must not
+    // strand anything: once the uplink drains, reading resumes and every byte
+    // arrives. The stalled side keeps a small window and reads nothing, so
+    // the kernel cannot soak up the excess the way loopback otherwise does.
+    QTcpServer ingest;
+    QVERIFY(ingest.listen(QHostAddress::LocalHost));
+    QTcpSocket* upstream = nullptr;
+    qint64 received = 0;
+    QObject::connect(&ingest, &QTcpServer::newConnection, &ingest, [&] {
+        upstream = ingest.nextPendingConnection();
+        upstream->setSocketOption(QAbstractSocket::ReceiveBufferSizeSocketOption, 8192);
+        upstream->setReadBufferSize(1);
+    });
+
+    RtmpKeyRelay relay;
+    QString error;
+    const QString local = relay.start(
+        QStringLiteral("rtmp://127.0.0.1:%1/app/live_secret_key").arg(ingest.serverPort()), &error);
+    QVERIFY2(!local.isEmpty(), qPrintable(error));
+
+    const QUrl url(local);
+    QTcpSocket publisher;
+    publisher.connectToHost(url.host(), quint16(url.port()));
+    QVERIFY(publisher.waitForConnected(5000));
+    QTRY_VERIFY(upstream != nullptr);
+
+    constexpr qint64 kSent = 6 * 1024 * 1024;
+    publisher.write(QByteArray(kSent, '\0'));
+    QTRY_VERIFY_WITH_TIMEOUT(relay.backlog() >= RtmpKeyRelay::kMaxBacklog, 10000);
+    // Long enough for the relay's read buffer on the ffmpeg side to fill, after
+    // which ffmpeg's socket reports nothing new, and only progress upstream
+    // can start the relay reading again.
+    QTest::qWait(1000);
+    QVERIFY(relay.backlog() <= RtmpKeyRelay::kMaxBacklog + 1024 * 1024);
+
+    // The uplink recovers.
+    QObject::connect(upstream, &QTcpSocket::readyRead, upstream,
+                     [&] { received += upstream->readAll().size(); });
+    upstream->setSocketOption(QAbstractSocket::ReceiveBufferSizeSocketOption, 1024 * 1024);
+    upstream->setReadBufferSize(0);
+    received += upstream->readAll().size();
+    QTRY_COMPARE_WITH_TIMEOUT(received, kSent, 30000);
+    relay.stop();
+    publisher.abort();
 }
 
 QTEST_MAIN(MalloyModelTests)

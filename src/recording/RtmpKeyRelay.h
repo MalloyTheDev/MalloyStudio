@@ -51,6 +51,17 @@ public:
     // zero by the time media flows means the relay is not doing its job.
     int substitutions() const { return m_substitutions; }
 
+    // Bytes accepted from ffmpeg and not yet handed to the network: queued
+    // before the upstream was up, or waiting in the upstream socket. Held
+    // under kMaxBacklog; see onClientReadable.
+    qint64 backlog() const;
+
+    // How much may wait to go upstream before the relay stops reading from
+    // ffmpeg. A few seconds of video at streaming bitrates: enough to ride
+    // out jitter, small enough that congestion reaches ffmpeg, whose own
+    // statistics are where it is reported, instead of piling up in memory.
+    static constexpr qint64 kMaxBacklog = 2 * 1024 * 1024;
+
     // ---- Pure helpers, exposed for testing -------------------------------
 
     // A random placeholder of exactly `length` bytes, from a character set that
