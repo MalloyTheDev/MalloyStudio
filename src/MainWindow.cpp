@@ -546,9 +546,24 @@ void MainWindow::connectModelSignals() {
     });
 
     // SceneCollection audio changes → AudioController dynamic mic management
-    connect(m_scenes, &SceneCollection::audioInputsChanged, this, [this] {
+    //
+    // Driven by every structural change, not only audioInputsChanged. That
+    // signal is emitted by hand from a handful of edits, and the rest (removing
+    // a layer, removing a scene, undo, redo, opening a project, leaving studio
+    // mode) forgot it, so a deleted microphone kept its worker running and kept
+    // being recorded. The capture reconciler has always listened to the broad
+    // signals and never had this problem. reconcileInputs compares what is
+    // wanted with what is running, so a call that changes nothing costs nothing.
+    const auto reconcileAudio = [this] {
         m_audio->reconcileInputs(m_scenes->gatherVisibleAudioIds());
-    });
+    };
+    connect(m_scenes, &SceneCollection::audioInputsChanged, this, reconcileAudio);
+    connect(m_scenes, &SceneCollection::itemsChanged,       this, reconcileAudio);
+    connect(m_scenes, &SceneCollection::sourcesChanged,     this, reconcileAudio);
+    connect(m_scenes, &SceneCollection::collectionReset,    this, reconcileAudio);
+    connect(m_scenes, &SceneCollection::currentChanged,     this, reconcileAudio);
+    connect(m_scenes, &SceneCollection::programChanged,     this, reconcileAudio);
+    connect(m_scenes, &SceneCollection::studioModeChanged,  this, reconcileAudio);
 
     // ControlsBar → MediaController (recording)
     connect(m_controlsBar, &ControlsBar::recordingStarted, this, [this] {

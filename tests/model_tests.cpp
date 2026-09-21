@@ -251,6 +251,7 @@ private slots:
     void undoAndRedoKeepADeclinedDeviceHeld();
     void fileDevicesAreHeldBeforeTheLoadIsAnnounced();
     void userChosenSharePathSurvivesUndo();
+    void everyMicChangeIsAnnouncedStructurally();
     void projectMediaPathsMustBeLocalFiles();
     void encoderRedactsTheStreamKeyFromFfmpegOutput();
     void addingAConfiguredLayerIsOneUndoStep();
@@ -3449,6 +3450,52 @@ void MalloyModelTests::fileDevicesAreHeldBeforeTheLoadIsAnnounced() {
     QVERIFY2(heldWhenAnnounced,
              "a file's devices must already be held when the load is first announced");
     QVERIFY(opened.deviceConsentPending());
+}
+
+void MalloyModelTests::everyMicChangeIsAnnouncedStructurally() {
+    // MainWindow reconciles microphones on these signals. Only audioInputsChanged
+    // used to be connected, and most edits never emit it, so a deleted mic kept
+    // its capture worker running. This pins the contract the wiring relies on:
+    // each edit that changes the set of live microphones announces itself on at
+    // least one of them.
+    SceneCollection scenes;
+    QUndoStack undo;
+    scenes.setUndoStack(&undo);
+    scenes.ensureCurrentScene();
+    QVERIFY(scenes.addAudioInputToCurrent(QStringLiteral("Desk Mic"),
+                                          QStringLiteral("{mic}")) != nullptr);
+    undo.clear();
+    const QStringList live{QStringLiteral("{mic}")};
+    QCOMPARE(scenes.gatherVisibleAudioIds(), live);
+
+    int announced = 0;
+    const auto bump = [&announced] { ++announced; };
+    QObject::connect(&scenes, &SceneCollection::audioInputsChanged, &scenes, bump);
+    QObject::connect(&scenes, &SceneCollection::itemsChanged,       &scenes, bump);
+    QObject::connect(&scenes, &SceneCollection::sourcesChanged,     &scenes, bump);
+    QObject::connect(&scenes, &SceneCollection::collectionReset,    &scenes, bump);
+    QObject::connect(&scenes, &SceneCollection::currentChanged,     &scenes, bump);
+    QObject::connect(&scenes, &SceneCollection::programChanged,     &scenes, bump);
+    QObject::connect(&scenes, &SceneCollection::studioModeChanged,  &scenes, bump);
+
+    announced = 0;
+    scenes.removeCurrentItemAt(0);
+    QVERIFY2(announced > 0, "removing a mic layer must be announced");
+    QVERIFY(scenes.gatherVisibleAudioIds().isEmpty());
+
+    announced = 0;
+    undo.undo();
+    QVERIFY2(announced > 0, "undoing a removal must be announced");
+    QCOMPARE(scenes.gatherVisibleAudioIds(), live);
+
+    announced = 0;
+    undo.redo();
+    QVERIFY2(announced > 0, "redoing a removal must be announced");
+    QVERIFY(scenes.gatherVisibleAudioIds().isEmpty());
+
+    announced = 0;
+    scenes.clear();
+    QVERIFY2(announced > 0, "a new project must be announced");
 }
 
 void MalloyModelTests::userChosenSharePathSurvivesUndo() {
