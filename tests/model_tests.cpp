@@ -214,6 +214,9 @@ private slots:
     void audioControllerHasDefaultLoopbackInput();
     void audioControllerPersistsVolumeAndMute();
     void audioControlsRefuseValuesThatAreNotNumbers();
+    void mediaProbesAreRememberedNotRepeated();
+    void aHungOrMissingProberDoesNotStallTheScan();
+    void cloudOnlyMediaIsListedButNeverOpened();
     // v5 new tests
     void windowCaptureKeyIsStable();
     void filterChainRoundTrips();
@@ -5632,6 +5635,146 @@ void MalloyModelTests::audioControlsRefuseValuesThatAreNotNumbers() {
 
     c.setVolume(id, 1.0f);
     QSettings().remove(QStringLiteral("audio/inputs/") + id + QStringLiteral("/pan"));
+}
+
+// Declared here rather than by including windows.h into a file this size.
+extern "C" __declspec(dllimport) int __stdcall SetFileAttributesW(const wchar_t*, unsigned long);
+
+namespace {
+// cmd.exe stands in for ffprobe: `/c exit 0 & rem` returns at once with
+// nothing to parse, and `/c pause & rem` waits on its input forever. The rem
+// swallows the ffprobe arguments that follow.
+QString commandShell() { return QStandardPaths::findExecutable(QStringLiteral("cmd")); }
+}
+
+void MalloyModelTests::mediaProbesAreRememberedNotRepeated() {
+    const QString shell = commandShell();
+    if (shell.isEmpty()) QSKIP("cmd.exe not found");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString media = dir.filePath(QStringLiteral("media"));
+    QVERIFY(QDir().mkpath(media));
+    QVERIFY(!makeMediaFile(QDir(media).filePath(QStringLiteral("a.mp4"))).isEmpty());
+    QVERIFY(!makeMediaFile(QDir(media).filePath(QStringLiteral("b.wav"))).isEmpty());
+    const QString cache = dir.filePath(QStringLiteral("probe-cache.json"));
+    const QStringList quick{QStringLiteral("/c"), QStringLiteral("exit"), QStringLiteral("0"),
+                            QStringLiteral("&"), QStringLiteral("rem")};
+
+    MediaRegistry reg;
+    reg.setProbeCachePathForTesting(cache);
+    reg.setProbeCommandForTesting(shell, quick, 10000);
+    reg.setSearchDirs({media});
+    QTRY_VERIFY(!reg.probing());
+    QCOMPARE(reg.probesStarted(), 2);
+
+    // A rescan, as every finished recording triggers, probes nothing again.
+    reg.rescan();
+    QTRY_VERIFY(!reg.probing());
+    QCOMPARE(reg.probesStarted(), 2);
+    for (const MediaInfo& m : reg.media()) QVERIFY(m.probed);
+
+    // A changed file is probed again, and only that one.
+    {
+        QFile f(QDir(media).filePath(QStringLiteral("a.mp4")));
+        QVERIFY(f.open(QIODevice::Append));
+        f.write("more");
+    }
+    reg.rescan();
+    QTRY_VERIFY(!reg.probing());
+    QCOMPARE(reg.probesStarted(), 3);
+
+    // And the next launch starts from what this one learned.
+    MediaRegistry relaunched;
+    relaunched.setProbeCachePathForTesting(cache);
+    relaunched.setProbeCommandForTesting(shell, quick, 10000);
+    relaunched.setSearchDirs({media});
+    QTRY_VERIFY(!relaunched.probing());
+    QCOMPARE(relaunched.probesStarted(), 0);
+    QCOMPARE(relaunched.count(), 2);
+
+    // A damaged cache is no cache: numbers out of range are skipped, not
+    // narrowed, and those files are simply probed again.
+    {
+        QFile f(cache);
+        QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        f.write(R"({"entries":[{"path":"x","size":1e300,"modified":1e300},)"
+                R"({"path":"y","size":-5,"modified":0},{"path":7}]})");
+    }
+    MediaRegistry damaged;
+    damaged.setProbeCachePathForTesting(cache);
+    damaged.setProbeCommandForTesting(shell, quick, 10000);
+    damaged.setSearchDirs({media});
+    QTRY_VERIFY(!damaged.probing());
+    QCOMPARE(damaged.probesStarted(), 2);
+}
+
+void MalloyModelTests::aHungOrMissingProberDoesNotStallTheScan() {
+    const QString shell = commandShell();
+    if (shell.isEmpty()) QSKIP("cmd.exe not found");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString media = dir.filePath(QStringLiteral("media"));
+    QVERIFY(QDir().mkpath(media));
+    for (const char* name : {"a.mp4", "b.mp4", "c.mp4"})
+        QVERIFY(!makeMediaFile(QDir(media).filePath(QString::fromLatin1(name))).isEmpty());
+
+    // Every probe hangs. Each is given its time and killed, and the scan goes
+    // on to the next file instead of stopping at the first.
+    {
+        MediaRegistry reg;
+        reg.setProbeCachePathForTesting(dir.filePath(QStringLiteral("hung-cache.json")));
+        reg.setProbeCommandForTesting(shell, {QStringLiteral("/c"), QStringLiteral("pause"),
+                                              QStringLiteral("&"), QStringLiteral("rem")}, 300);
+        reg.setSearchDirs({media});
+        QTRY_VERIFY_WITH_TIMEOUT(!reg.probing(), 10000);
+        QCOMPARE(reg.probesStarted(), 3);
+        for (const MediaInfo& m : reg.media()) QVERIFY(m.probed);
+    }
+
+    // The prober cannot be started at all: no finished() ever comes.
+    {
+        MediaRegistry reg;
+        reg.setProbeCachePathForTesting(dir.filePath(QStringLiteral("missing-cache.json")));
+        reg.setProbeCommandForTesting(dir.filePath(QStringLiteral("no-such-prober.exe")), {}, 10000);
+        reg.setSearchDirs({media});
+        QTRY_VERIFY(!reg.probing());
+        QCOMPARE(reg.probesStarted(), 3);
+        for (const MediaInfo& m : reg.media()) QVERIFY(m.probed);
+    }
+}
+
+void MalloyModelTests::cloudOnlyMediaIsListedButNeverOpened() {
+    const QString shell = commandShell();
+    if (shell.isEmpty()) QSKIP("cmd.exe not found");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString media = dir.filePath(QStringLiteral("media"));
+    QVERIFY(QDir().mkpath(media));
+    const QString local = makeMediaFile(QDir(media).filePath(QStringLiteral("local.mp4")));
+    const QString cloud = makeMediaFile(QDir(media).filePath(QStringLiteral("cloud.mp4")));
+    QVERIFY(!local.isEmpty() && !cloud.isEmpty());
+
+    // Marked the way a file whose data lives elsewhere is. Opening such a
+    // file is what makes OneDrive download it.
+    constexpr unsigned long kOffline = 0x00001000;   // FILE_ATTRIBUTE_OFFLINE
+    QVERIFY(SetFileAttributesW(reinterpret_cast<const wchar_t*>(
+                                   QDir::toNativeSeparators(cloud).utf16()), kOffline));
+    const auto restore = qScopeGuard([&cloud] {
+        SetFileAttributesW(reinterpret_cast<const wchar_t*>(QDir::toNativeSeparators(cloud).utf16()),
+                           0x00000080 /* FILE_ATTRIBUTE_NORMAL */);
+    });
+    QVERIFY(MediaRegistry::isCloudOnly(cloud));
+    QVERIFY(!MediaRegistry::isCloudOnly(local));
+
+    MediaRegistry reg;
+    reg.setProbeCachePathForTesting(dir.filePath(QStringLiteral("cloud-cache.json")));
+    reg.setProbeCommandForTesting(shell, {QStringLiteral("/c"), QStringLiteral("exit"),
+                                          QStringLiteral("0"), QStringLiteral("&"),
+                                          QStringLiteral("rem")}, 10000);
+    reg.setSearchDirs({media});
+    QTRY_VERIFY(!reg.probing());
+    QCOMPARE(reg.count(), 2);           // still listed
+    QCOMPARE(reg.probesStarted(), 1);   // only the local one was opened
 }
 
 QTEST_MAIN(MalloyModelTests)

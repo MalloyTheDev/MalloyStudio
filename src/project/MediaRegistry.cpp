@@ -12,9 +12,14 @@
 #include <QSet>
 #include <QSettings>
 #include <QStandardPaths>
+#include <QSaveFile>
+#include <QTimeZone>
 #include <QTimer>
 
 #include <algorithm>
+
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 
 namespace {
 const QStringList& videoExts() {
@@ -97,11 +102,99 @@ MediaRegistry::MediaRegistry(QObject* parent) : QObject(parent) {
         const QString d = QStandardPaths::writableLocation(loc);
         if (!d.isEmpty() && !m_dirs.contains(d)) m_dirs << d;
     }
-    rescan();
+    loadProbeCache();
+    // The first scan waits for the event loop rather than running inside the
+    // constructor: it walks folders and starts probing, which is no part of
+    // constructing the object, and a caller that sets its own folders first
+    // (tests do) should not have the default ones scanned and probed.
+    QTimer::singleShot(0, this, [this] { if (!m_scanned) rescan(); });
 }
 
 MediaRegistry::~MediaRegistry() {
     killProbe();
+}
+
+bool MediaRegistry::isCloudOnly(const QString& path) {
+    // Reading the attributes does not fetch the file; opening it does.
+    const DWORD attrs = GetFileAttributesW(reinterpret_cast<const wchar_t*>(
+        QDir::toNativeSeparators(path).utf16()));
+    if (attrs == INVALID_FILE_ATTRIBUTES) return false;
+    constexpr DWORD kRecallOnDataAccess = 0x00400000;   // FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+    constexpr DWORD kRecallOnOpen       = 0x00040000;   // FILE_ATTRIBUTE_RECALL_ON_OPEN
+    return (attrs & (FILE_ATTRIBUTE_OFFLINE | kRecallOnDataAccess | kRecallOnOpen)) != 0;
+}
+
+void MediaRegistry::setProbeCommandForTesting(const QString& program,
+                                              const QStringList& leadingArgs, int timeoutMs) {
+    m_ffprobe = program;
+    m_probeLeadingArgs = leadingArgs;
+    m_probeTimeoutMs = timeoutMs;
+}
+
+void MediaRegistry::setProbeCachePathForTesting(const QString& path) {
+    m_probeCachePath = path;
+    m_probeCache.clear();
+    loadProbeCache();
+}
+
+QString MediaRegistry::probeCachePath() const {
+    if (!m_probeCachePath.isEmpty()) return m_probeCachePath;
+    const QString dir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+    return dir.isEmpty() ? QString() : QDir(dir).filePath(QStringLiteral("media-probe-cache.json"));
+}
+
+void MediaRegistry::loadProbeCache() {
+    const QString path = probeCachePath();
+    if (path.isEmpty()) return;
+    QFile f(path);
+    // A cache is only ever an optimisation: anything unreadable, oversized or
+    // malformed is treated as no cache, and the files are simply probed.
+    if (!f.open(QIODevice::ReadOnly) || f.size() > 8 * 1024 * 1024) return;
+    const QJsonArray entries = QJsonDocument::fromJson(f.readAll()).object()
+                                   .value(QStringLiteral("entries")).toArray();
+    for (const QJsonValue& v : entries) {
+        const QJsonObject o = v.toObject();
+        const QString key = o.value(QStringLiteral("path")).toString();
+        if (key.isEmpty()) continue;
+        // Converting a double outside the integer's range is undefined, so the
+        // numbers are checked before they are narrowed. The comparisons are
+        // also false for NaN.
+        const double size = o.value(QStringLiteral("size")).toDouble(-1);
+        const double modified = o.value(QStringLiteral("modified")).toDouble(0);
+        if (!(size >= 0 && size < 9e15) || !(modified > -9e15 && modified < 9e15)) continue;
+        ProbeRecord r;
+        r.sizeBytes = qint64(size);
+        r.modified = QDateTime::fromMSecsSinceEpoch(qint64(modified), QTimeZone::UTC);
+        const int dur = o.value(QStringLiteral("duration")).toInt(0);
+        r.durationSecs = dur > 0 ? dur : 0;
+        r.resolution = o.value(QStringLiteral("resolution")).toString().left(32);
+        m_probeCache.insert(key, r);
+    }
+}
+
+void MediaRegistry::saveProbeCache() const {
+    const QString path = probeCachePath();
+    if (path.isEmpty()) return;
+    // Only what the current scan holds, so the cache is bounded by the folders
+    // being indexed rather than growing with every file ever seen.
+    QJsonArray entries;
+    for (const MediaInfo& m : m_media) {
+        const QString key = QFileInfo(m.filePath).canonicalFilePath();
+        const auto it = m_probeCache.constFind(key);
+        if (it == m_probeCache.constEnd()) continue;
+        entries.append(QJsonObject{
+            {QStringLiteral("path"), key},
+            {QStringLiteral("size"), double(it->sizeBytes)},
+            {QStringLiteral("modified"), double(it->modified.toMSecsSinceEpoch())},
+            {QStringLiteral("duration"), it->durationSecs},
+            {QStringLiteral("resolution"), it->resolution},
+        });
+    }
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    QSaveFile f(path);
+    if (!f.open(QIODevice::WriteOnly)) return;
+    f.write(QJsonDocument(QJsonObject{{QStringLiteral("entries"), entries}}).toJson(QJsonDocument::Compact));
+    f.commit();
 }
 
 void MediaRegistry::killProbe() {
@@ -152,6 +245,7 @@ int MediaRegistry::countOfKind(MediaInfo::Kind kind) const {
 }
 
 void MediaRegistry::rescan() {
+    m_scanned = true;
     m_media.clear();
 
     QStringList filters;
@@ -173,6 +267,15 @@ void MediaRegistry::rescan() {
             m.kind      = MediaInfo::kindForExt(m.ext);
             m.sizeBytes = fi.size();
             m.modified  = fi.lastModified();
+            const auto cached = m_probeCache.constFind(canon);
+            if (cached != m_probeCache.constEnd() && cached->sizeBytes == m.sizeBytes
+                && cached->modified == m.modified) {
+                m.durationSecs = cached->durationSecs;
+                m.resolution   = cached->resolution;
+                m.probed       = true;
+            } else if (isCloudOnly(canon)) {
+                m.probed = true;   // listed, never opened; see isCloudOnly
+            }
             m_media.push_back(m);
         }
     }
@@ -189,12 +292,36 @@ void MediaRegistry::rescan() {
     probeNext(m_probeGen);
 }
 
+void MediaRegistry::finishProbe(int generation, int idx) {
+    if (generation != m_probeGen) return;
+    if (idx < m_media.size()) {
+        MediaInfo& m = m_media[idx];
+        m.probed = true;   // even on failure: don't retry
+        // Failures are remembered too, so a file ffprobe cannot read is not
+        // opened again at every launch.
+        const QString key = QFileInfo(m.filePath).canonicalFilePath();
+        if (!key.isEmpty()) {
+            m_probeCache.insert(key, ProbeRecord{m.sizeBytes, m.modified, m.durationSecs, m.resolution});
+            m_probeCacheDirty = true;
+        }
+    }
+    emitChangedCoalesced();
+    ++m_probeIndex;
+    probeNext(generation);
+}
+
 void MediaRegistry::probeNext(int generation) {
     if (m_ffprobe.isEmpty() || generation != m_probeGen) return;
     while (m_probeIndex < m_media.size() && m_media[m_probeIndex].probed)
         ++m_probeIndex;
     // Cap probing so a huge media folder can't spawn an unbounded ffprobe chain.
-    if (m_probeIndex >= m_media.size() || m_probeIndex >= 200) return;
+    if (m_probeIndex >= m_media.size() || m_probeIndex >= 200) {
+        if (m_probeCacheDirty) {
+            saveProbeCache();
+            m_probeCacheDirty = false;
+        }
+        return;
+    }
 
     const int idx = m_probeIndex;
     const QString path = m_media[idx].filePath;
@@ -227,13 +354,25 @@ void MediaRegistry::probeNext(int generation) {
                 }
             }
         }
-        if (idx < m_media.size()) m_media[idx].probed = true;  // even on failure: don't retry
-        emitChangedCoalesced();
-        ++m_probeIndex;
-        probeNext(generation);
+        finishProbe(generation, idx);
     });
+    // A probe that cannot start never finishes, and one that hangs (a file on
+    // a stalled network share, a pathological file) never finishes either;
+    // both used to end the chain there, leaving every later file unprobed.
+    connect(proc, &QProcess::errorOccurred, this,
+            [this, proc, generation, idx](QProcess::ProcessError error) {
+        if (error != QProcess::FailedToStart) return;   // the others still finish
+        if (m_proc == proc) m_proc = nullptr;
+        proc->deleteLater();
+        finishProbe(generation, idx);
+    });
+    QTimer::singleShot(m_probeTimeoutMs, proc, [proc] {
+        if (proc->state() != QProcess::NotRunning) proc->kill();   // finished follows
+    });
+    ++m_probesStarted;
     proc->start(m_ffprobe,
-                {QStringLiteral("-v"), QStringLiteral("quiet"),
-                 QStringLiteral("-print_format"), QStringLiteral("json"),
-                 QStringLiteral("-show_format"), QStringLiteral("-show_streams"), path});
+                m_probeLeadingArgs + QStringList{
+                    QStringLiteral("-v"), QStringLiteral("quiet"),
+                    QStringLiteral("-print_format"), QStringLiteral("json"),
+                    QStringLiteral("-show_format"), QStringLiteral("-show_streams"), path});
 }
