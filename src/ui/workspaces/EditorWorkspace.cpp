@@ -608,8 +608,9 @@ void TimelineCanvas::mouseMoveEvent(QMouseEvent* e) {
         const double t = pos.x() / m_zoom;
         constexpr double minDur = 0.25;
         if (m_dragZone == Zone::Body) {
-            c.start = qBound(0.0, snapTime(t - m_grabOffset, m_drag),
-                             double(kTimelineLen) - c.dur);
+            // Moving a clip changes where it starts, never how long it is.
+            c.start = placeClip(snapTime(t - m_grabOffset, m_drag), c.dur,
+                                double(kTimelineLen)).start;
             const int ty = qBound(0, (int(pos.y()) - kRulerH) / kTrackH,
                                   int(tracks().size()) - 1);
             if (tracks()[ty].audio == c.audio) c.track = ty;
@@ -684,14 +685,19 @@ void TimelineCanvas::dropEvent(QDropEvent* e) {
         }
     }
     const double t = qBound(0.0, e->position().x() / m_zoom, double(kTimelineLen));
-    const double dur = (durSecs > 0) ? double(durSecs) : 4.0;
+    // The timeline is a fixed kTimelineLen long, so placeClip shortens longer
+    // media to fit. That shortening is a known limitation of the fixed-length
+    // timeline and is tracked on its own.
+    const TimelinePlacement placed = placeClip(snapTime(t, -1),
+                                               (durSecs > 0) ? double(durSecs) : 4.0,
+                                               double(kTimelineLen));
 
     Clip nc;
     nc.sourcePath = path;      // ADR-0001: what makes the clip renderable
     nc.sourceIn   = 0.0;       // dropped clips start at the head of the file
     nc.track = track;
-    nc.start = qBound(0.0, snapTime(t, -1), double(kTimelineLen) - dur);
-    nc.dur   = std::min(dur, double(kTimelineLen) - nc.start);
+    nc.start = placed.start;
+    nc.dur   = placed.dur;
     nc.label = name;
     nc.audio = isAudio;
     switch (kind) {

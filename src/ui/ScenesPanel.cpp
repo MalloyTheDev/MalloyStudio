@@ -111,16 +111,23 @@ void ScenesPanel::onRenameClicked() {
 
 void ScenesPanel::onItemChanged(QListWidgetItem* item) {
     if (m_updating) return;
+    // Everything needed from the item is read before calling into the model,
+    // and the item is not touched afterwards. An accepted rename emits
+    // sceneRenamed, which rebuilds this list synchronously, and the rebuild
+    // deletes every item including this one: reading or writing it after the
+    // call was a use-after-free on every successful inline rename.
     const int row = m_list->row(item);
-    m_scenes->renameSceneAt(row, item->text());
+    const QString requested = item->text();
+    m_scenes->renameSceneAt(row, requested);
 
     // The model refuses empty or whitespace-only names and returns without
     // signalling, which used to leave the list showing a name the project does
-    // not have. Put the real name back.
+    // not have. Put the real name back, on whatever item now occupies the row.
     const Scene* scene = m_scenes->sceneAt(row);
-    if (scene && item->text() != scene->name()) {
+    QListWidgetItem* shown = m_list->item(row);
+    if (scene && shown && shown->text() != scene->name()) {
         const QSignalBlocker block(m_list);
-        item->setText(scene->name());
+        shown->setText(scene->name());
     }
 }
 

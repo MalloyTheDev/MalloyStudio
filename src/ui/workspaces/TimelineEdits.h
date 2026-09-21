@@ -10,6 +10,26 @@
 
 #include <algorithm>
 
+// Where a clip of a given length may sit. A clip longer than the timeline is
+// shortened to fit, and the start is then bounded so the clip ends within the
+// timeline. The bounds are ordered by construction: the placement code used to
+// hand qBound a maximum below its minimum whenever a clip was longer than the
+// timeline, and qBound asserts on that, which aborted the application when a
+// long recording was dropped onto a track.
+struct TimelinePlacement {
+    double start = 0.0;
+    double dur   = 0.0;
+};
+
+inline TimelinePlacement placeClip(double requestedStart, double dur, double timelineLen) {
+    const double len = std::max(0.0, timelineLen);
+    TimelinePlacement out;
+    out.dur = std::min(std::max(dur, 0.0), len);
+    const double latestStart = len - out.dur;          // never negative
+    out.start = std::min(std::max(requestedStart, 0.0), latestStart);
+    return out;
+}
+
 struct TimelineTrim {
     double start    = 0.0;
     double dur      = 0.0;

@@ -35,6 +35,7 @@
 #include "recording/EncoderRegistry.h"
 #include "ui/workspaces/EditorWorkspace.h"
 #include "ui/workspaces/TimelineEdits.h"
+#include "ui/shell/EditingFocus.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -48,6 +49,9 @@
 #include <QSettings>
 #include <QSignalSpy>
 #include <QTemporaryDir>
+#include <QDoubleSpinBox>
+#include <QPushButton>
+#include <QSpinBox>
 #include <limits>
 #include <QTimer>
 #include <QtTest/QtTest>
@@ -268,6 +272,8 @@ private slots:
     void timelineGraphRefusesWhatItCannotRender();
     void timelineGraphBoundsNumbersBeforeArithmetic();
     void restoredRenderJobsAreValidatedLikeEnqueuedOnes();
+    void clipsLongerThanTheTimelineArePlacedNotAborted();
+    void spinBoxesAndTextFieldsKeepTheirDigits();
     void editorClipRoundTripPreservesSourceReference();
     void editorLegacyClipLoadsAsUnlinked();
     void timelineTrimKeepsSourceInSync();
@@ -2659,6 +2665,68 @@ void MalloyModelTests::renderQueueRejectsUnrenderableRequests() {
     QVERIFY(!q.enqueue(makeRenderRequest(dir.filePath(QStringLiteral("d.mp4"))), &error).isEmpty());
     QVERIFY(error.isEmpty());
     QCOMPARE(q.jobs().size(), 1);
+}
+
+void MalloyModelTests::clipsLongerThanTheTimelineArePlacedNotAborted() {
+    constexpr double len = 360.0;
+
+    // A 30 minute recording dropped anywhere. The placement code used to pass
+    // qBound a maximum of len - dur, negative here, and qBound asserts when its
+    // maximum is below its minimum: the application aborted.
+    TimelinePlacement p = placeClip(120.0, 1800.0, len);
+    QCOMPARE(p.dur, len);
+    QCOMPARE(p.start, 0.0);
+    QVERIFY(p.start + p.dur <= len);
+
+    // Exactly the timeline's length fits only at the start.
+    p = placeClip(50.0, len, len);
+    QCOMPARE(p.start, 0.0);
+    QCOMPARE(p.dur, len);
+
+    // An ordinary clip keeps its length and is kept inside the timeline.
+    p = placeClip(350.0, 30.0, len);
+    QCOMPARE(p.dur, 30.0);
+    QCOMPARE(p.start, 330.0);
+    p = placeClip(-5.0, 30.0, len);
+    QCOMPARE(p.start, 0.0);
+    p = placeClip(100.0, 30.0, len);
+    QCOMPARE(p.start, 100.0);
+
+    // Nonsense in, something placeable out rather than a negative span.
+    p = placeClip(10.0, -4.0, len);
+    QCOMPARE(p.dur, 0.0);
+    QVERIFY(p.start >= 0.0 && p.start <= len);
+}
+
+void MalloyModelTests::spinBoxesAndTextFieldsKeepTheirDigits() {
+    // The application-wide filter switches workspace on a bare digit unless the
+    // focused widget is being typed into. Only QLineEdit used to count, and a
+    // spin box is the focus proxy of its own line edit, so digits typed into any
+    // spin box were eaten and switched the workspace instead.
+    QSpinBox spin;
+    QDoubleSpinBox doubleSpin;
+    QLineEdit line;
+    QPlainTextEdit plain;
+    QTextEdit rich;
+    QKeySequenceEdit keys;
+    QComboBox editableCombo;
+    editableCombo.setEditable(true);
+    QVERIFY2(isTakingTypedInput(&spin), "a focused spin box is being typed into");
+    QVERIFY(isTakingTypedInput(&doubleSpin));
+    QVERIFY(isTakingTypedInput(&line));
+    QVERIFY(isTakingTypedInput(&plain));
+    QVERIFY(isTakingTypedInput(&rich));
+    QVERIFY2(isTakingTypedInput(&keys), "a shortcut editor must be able to record a digit");
+    QVERIFY(isTakingTypedInput(&editableCombo));
+
+    // Where a digit should still switch workspace.
+    QComboBox fixedCombo;
+    QPushButton button;
+    QWidget plainWidget;
+    QVERIFY(!isTakingTypedInput(&fixedCombo));
+    QVERIFY(!isTakingTypedInput(&button));
+    QVERIFY(!isTakingTypedInput(&plainWidget));
+    QVERIFY(!isTakingTypedInput(nullptr));
 }
 
 void MalloyModelTests::restoredRenderJobsAreValidatedLikeEnqueuedOnes() {

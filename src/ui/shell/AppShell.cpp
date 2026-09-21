@@ -1,4 +1,5 @@
 #include "ui/shell/AppShell.h"
+#include "ui/shell/EditingFocus.h"
 #include "ui/shell/IconRail.h"
 #include "ui/shell/NavModel.h"
 #include "ui/shell/StudioStatusBar.h"
@@ -99,11 +100,19 @@ bool AppShell::eventFilter(QObject* watched, QEvent* event) {
             const auto overlays = findChildren<QWidget*>(QStringLiteral("paletteOverlay"));
             for (QWidget* ov : overlays)
                 if (ov->isVisible()) return QWidget::eventFilter(watched, event);
-            // Don't steal digits while typing into an editable widget.
-            QWidget* fw = QApplication::focusWidget();
-            const bool editing = qobject_cast<QLineEdit*>(fw)
-                || (qobject_cast<QComboBox*>(fw) && qobject_cast<QComboBox*>(fw)->isEditable());
-            if (!editing) {
+            // This filter sees every key in the application, so it has to say
+            // no to anything that is not plainly a workspace switch in this
+            // window. It used to exempt only a focused QLineEdit, but a spin box
+            // makes itself the focus proxy of its line edit, so digits typed
+            // into any spin box (width, bitrate, the Inspector's X and Y) were
+            // eaten and switched the workspace, even inside a modal dialog.
+            if (QApplication::activeModalWidget())
+                return QWidget::eventFilter(watched, event);
+            auto* target = qobject_cast<QWidget*>(watched);
+            if (!target || target->window() != window())
+                return QWidget::eventFilter(watched, event);
+
+            if (!isTakingTypedInput(QApplication::focusWidget())) {
                 const QString text = ke->text();
                 if (text.size() == 1 && text.at(0).isDigit()) {
                     for (const NavItem& n : navItems()) {
