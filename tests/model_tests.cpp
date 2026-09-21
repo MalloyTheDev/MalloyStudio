@@ -422,6 +422,7 @@ private slots:
     // A file holds quality and a stream holds its bitrate, and the encoder
     // arguments say so.
     void rateControlFollowsWhereTheMediaIsGoing();
+    void aSoftwareStreamIsCappedAtItsBitrate();
     // The rawvideo input declares the rate the sink is clocked at, which is
     // what stops ffmpeg quantising arrivals to its 25 fps default.
     void inputDeclaresTheConfiguredFrameRate();
@@ -4831,6 +4832,35 @@ void MalloyModelTests::rateControlFollowsWhereTheMediaIsGoing() {
     QVERIFY(file.contains(QStringLiteral("-c:v")));
     QVERIFY(file.contains(QStringLiteral("-pix_fmt")));
     QVERIFY(stream.contains(QStringLiteral("-c:v")));
+}
+
+void MalloyModelTests::aSoftwareStreamIsCappedAtItsBitrate() {
+    OutputSettings s;
+    s.bitrateKbps = 4500;
+    s.crf = 23;
+    for (const QString id : {QStringLiteral("libx264"), QStringLiteral("libx265")}) {
+        const EncoderRegistry::Encoder* sw = nullptr;
+        for (const auto& e : EncoderRegistry::available())
+            if (e.id == id) sw = &e;
+        QVERIFY2(sw, qPrintable(id));   // software encoders are always listed
+
+        // The stream keeps its quality target and gains the ceiling the user
+        // set. Before, nothing about the bitrate reached a software encoder.
+        const QStringList stream = sw->buildArgs(s, EncoderRegistry::Destination::Stream);
+        QVERIFY(stream.contains(QStringLiteral("-crf")));
+        const int max = int(stream.indexOf(QStringLiteral("-maxrate")));
+        QVERIFY2(max >= 0, qPrintable(stream.join(u' ')));
+        QCOMPARE(stream.value(max + 1), QStringLiteral("4500k"));
+        const int buf = int(stream.indexOf(QStringLiteral("-bufsize")));
+        QVERIFY(buf >= 0);
+        QCOMPARE(stream.value(buf + 1), QStringLiteral("9000k"));
+
+        // A file is unchanged: quality alone, no rate at all.
+        const QStringList file = sw->buildArgs(s, EncoderRegistry::Destination::File);
+        QVERIFY(file.contains(QStringLiteral("-crf")));
+        QVERIFY(!file.contains(QStringLiteral("-maxrate")));
+        QVERIFY(!file.contains(QStringLiteral("-b:v")));
+    }
 }
 
 void MalloyModelTests::inputDeclaresTheConfiguredFrameRate() {

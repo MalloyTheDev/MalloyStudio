@@ -10,17 +10,28 @@ namespace {
 using Destination = EncoderRegistry::Destination;
 
 // Software encoder arg builders. CRF either way, and deliberately so: it
-// already holds quality constant and is indifferent to the frame rate declared
-// on the input, which is the property that matters here. Whether a stream
-// would be better served by a true constant bitrate from x264 is a separate
-// question about streams and not about this one.
-QStringList buildSoftwareArgs(const OutputSettings& s, const QString& codec) {
-    return {
+// holds quality constant and does not divide a bit budget by the frame rate
+// declared on the input, which is the property that matters here.
+//
+// A stream is CRF with a ceiling. Uncapped, a high-motion 1080p60 scene ran
+// well past the bitrate the user set and past what an uplink or an ingest
+// accepts, and changing the setting did nothing: the stream bitrate never
+// reached a software encoder. The VBV limits below cap the peak at that
+// bitrate while CRF still decides the quality under it.
+QStringList buildSoftwareArgs(const OutputSettings& s, const QString& codec,
+                              Destination destination) {
+    QStringList args{
         QStringLiteral("-c:v"),    codec,
         QStringLiteral("-preset"), s.preset,
         QStringLiteral("-crf"),    QString::number(s.crf),
-        QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"),
     };
+    if (destination == Destination::Stream) {
+        const int bitrate = std::max(500, s.bitrateKbps);
+        args << QStringLiteral("-maxrate") << QStringLiteral("%1k").arg(bitrate)
+             << QStringLiteral("-bufsize") << QStringLiteral("%1k").arg(bitrate * 2);
+    }
+    args << QStringLiteral("-pix_fmt") << QStringLiteral("yuv420p");
+    return args;
 }
 
 // Hardware encoder arg builders. A stream gets the constant bitrate its ingest
@@ -125,14 +136,14 @@ QList<EncoderRegistry::Encoder> buildRegistry() {
         QStringLiteral("libx264"),
         QStringLiteral("libx264 (H.264, software)"),
         false,
-        [](const OutputSettings& s, Destination) { return buildSoftwareArgs(s, QStringLiteral("libx264")); },
+        [](const OutputSettings& s, Destination d) { return buildSoftwareArgs(s, QStringLiteral("libx264"), d); },
         QStringLiteral("zerolatency")
     });
     list.push_back({
         QStringLiteral("libx265"),
         QStringLiteral("libx265 (H.265/HEVC, software)"),
         false,
-        [](const OutputSettings& s, Destination) { return buildSoftwareArgs(s, QStringLiteral("libx265")); },
+        [](const OutputSettings& s, Destination d) { return buildSoftwareArgs(s, QStringLiteral("libx265"), d); },
         QStringLiteral("zerolatency")
     });
 

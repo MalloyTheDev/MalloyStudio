@@ -373,12 +373,20 @@ and returns a list of `Encoder` records: `{id, display, isHardware, buildArgs,
 streamingTune}`. Software encoders (libx264, libx265) are always listed even
 when ffmpeg isn't present, so the Output Settings dialog is never empty.
 
-Each `Encoder::buildArgs` is a `std::function<QStringList(const OutputSettings&)>`
-that emits the correct ffmpeg flags for that codec:
+Each `Encoder::buildArgs` is a
+`std::function<QStringList(const OutputSettings&, EncoderRegistry::Destination)>`
+that emits the ffmpeg flags for that codec and for where the output goes. A file
+(`Destination::File`) holds a quality target; a stream (`Destination::Stream`) is
+held to the configured bitrate. All of them end with `-pix_fmt yuv420p`.
 
-- libx264/libx265 emit `-c:v <codec> -preset <s.preset> -crf <s.crf> -pix_fmt yuv420p`
-- NVENC emits `-c:v <codec> -preset p4 -rc cbr -b:v <bitrate>k -maxrate <bitrate>k -bufsize <2×bitrate>k -pix_fmt yuv420p`
-- QSV/AMF emit `-c:v <codec> -b:v <bitrate>k -maxrate <bitrate>k -bufsize <2×bitrate>k -pix_fmt yuv420p`
+- libx264/libx265 emit `-c:v <codec> -preset <s.preset> -crf <s.crf>`, and a stream
+  adds `-maxrate <bitrate>k -bufsize <2×bitrate>k`: CRF with a ceiling.
+- NVENC emits `-c:v <codec> -preset <preset, p4 by default>`, then for a stream
+  `-rc cbr -b:v <bitrate>k -maxrate <bitrate>k -bufsize <2×bitrate>k` and for a file
+  `-rc constqp -qp <s.crf>`.
+- QSV/AMF emit `-c:v <codec>`, then for a stream
+  `-b:v <bitrate>k -maxrate <bitrate>k -bufsize <2×bitrate>k`; for a file QSV uses
+  `-global_quality <s.crf>` and AMF `-rc cqp -qp_i <s.crf> -qp_p <s.crf>`.
 
 `streamingTune` (v7) holds the per-encoder `-tune` value used **only** when
 streaming: libx264/libx265 → `zerolatency`, NVENC → `ull`, QSV/AMF → empty
