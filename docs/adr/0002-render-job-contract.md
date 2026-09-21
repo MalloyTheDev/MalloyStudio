@@ -2,7 +2,13 @@
 
 ## Status
 
-Accepted, implemented in b506592
+Accepted. Implemented in b506592 (2026-09-06). Since amended: restored jobs are
+validated like enqueued ones (f0e7a7a, 2026-09-13, #47); a restored job's output path is
+held to the media path policy (7574924, 2026-09-21, which added the last three sentences
+of decision 4); and jobs carry a `note` recording what a render had to change
+(a47c7bb, 2026-09-21, #55). The Amendments section at the end gives the job schema as it
+now stands and the rules that have moved on; the other sections are the decision as
+recorded.
 
 ## Context
 
@@ -93,12 +99,18 @@ the queue file per progress update is measurable.
 - `renderqueue.json` grows by roughly the size of a timeline per queued job. Completed
   jobs keep their snapshot, so `clearCompleted` becomes the mechanism that bounds the
   file. That is acceptable; if it is not, dropping the snapshot on completion is a
-  compatible follow-up.
+  compatible follow-up. *(2026-09-21: still so, with a gap. `clearCompleted` removes
+  completed jobs only, and cancel removes only pending and active ones, so a failed job
+  and its snapshot stay in the file until a retry of it completes; one that can never be
+  rendered stays for good. On read the store is bounded at 16 MiB; see Amendments.)*
 - The queue currently saves on every progress change. With snapshots embedded, progress
   updates should stop rewriting the whole file on every tick: persist on state
-  transitions and throttle progress writes.
+  transitions and throttle progress writes. *(Done, more strictly than proposed:
+  progress changes are never saved on their own. The store is written on
+  enqueue, on each state change, on retry, cancel and `clearCompleted`, and when a note
+  is recorded, so a persisted `progress` is the value at the last such write.)*
 - Export in the Editor (issue #3) becomes implementable: it has settings, an output path
-  and a snapshot to hand over.
+  and a snapshot to hand over. *(Done: Export queues a render; #3 is closed.)*
 - Retry becomes meaningful for the first time, because there is something deterministic
   to retry.
 
@@ -108,6 +120,12 @@ The job file gains absolute paths for media, project and output, with the same
 disclosure property described in ADR-0001. No credentials are involved: unlike the
 streaming path in issue #10, a render has no stream key, and nothing secret should ever
 be placed in a job or in an ffmpeg argument list.
+
+*(Amended 2026-09-13 and 2026-09-21: the store is also an input. The queue is restored
+and started at launch, so anything able to write `renderqueue.json` could otherwise
+choose an ffmpeg invocation that runs with no user action (#47). Restored jobs are
+therefore held to the checks an enqueued job gets, and their output paths to the media
+path policy; see Amendments.)*
 
 ## Validation plan
 
@@ -122,9 +140,110 @@ Model tests, no ffmpeg required:
 - The snapshot is independent: enqueue, mutate the source timeline, and confirm the job's
   copy is unchanged.
 
+*(2026-09-21: covered in `tests/model_tests.cpp` by `outputSettingsJsonRoundTrips`,
+`renderJobCarriesSettingsAndSnapshot`, `renderQueueProcessesAndPersists`,
+`renderQueueRetiresJobsWithoutASnapshot` and `renderQueueRejectsUnrenderableRequests`;
+the restore rules by `restoredRenderJobsAreValidatedLikeEnqueuedOnes` and
+`restoredRenderJobsMustWriteToALocalDrive`; and the note, with ffmpeg and ffprobe
+present, by `renderJobReportsAClipCutAtTheEndOfItsSource`.)*
+
 ## Rollback or migration notes
 
 `schema` starts at 1; a file without it is schema 0 and is read with the legacy rules
 above. The added keys are additive, so an older build loads the file, ignores them, and
 keeps its simulated behavior. Rollback is reverting the commit: existing queue files stay
 readable because every new key is optional.
+
+## Amendments
+
+Dated records of where the implementation refines or extends the decision.
+
+### The job schema as it stands (2026-09-21)
+
+The store is `renderqueue.json` in the per-user application data directory
+(`QStandardPaths::AppDataLocation`). Each job has this shape; the `note` key and
+`output.keyframeSec` are additions to the schema shown in decision 2.
+
+```jsonc
+{
+  "schema": 1,
+  "jobs": [{
+    "id": "8f3c2a9e-5b1d-4c7a-9e0f-2d6b8a4c1e37",
+    "name": "Spire ep14-20260921-142000.mp4",
+    "project": "Spire ep14",
+    "projectPath": "F:/Projects/Spire ep14.malloy.json",
+    "outputPath": "F:/Renders/Spire ep14-20260921-142000.mp4",
+    "target": "1920x1080 30fps libx264 (H.264, software) CRF 23",
+    "output": { "width": 1920, "height": 1080, "fps": 30, "videoCodec": "libx264",
+                "crf": 23, "preset": "veryfast", "audioCodec": "aac",
+                "audioBitratekbps": 192, "container": "mp4", "bitrateKbps": 4500,
+                "keyframeSec": 0 },
+    "timeline": [ /* clip objects, PROJECT_FORMAT.md section 9 */ ],
+    "state": 2, "progress": 100, "error": "",
+    "note": "\"spire-ep14.mkv\" runs 0.480 s past the end of its source, so it was cut from 55.500 s to 55.020 s.",
+    "finishedAt": "2026-09-21T14:23:05"
+  }]
+}
+```
+
+| Key | Type | Meaning |
+|---|---|---|
+| `id` | string | A UUID without braces, assigned at enqueue. |
+| `name` | string | The output file's name at enqueue. |
+| `project` | string | The project's display name, or "Untitled" for a project never saved. |
+| `projectPath` | string | The project file the timeline came from, empty for a project never saved. Informational: nothing reads it. |
+| `outputPath` | string | Absolute path of the file to write. |
+| `target` | string | Display string derived from `output` at enqueue: width x height, frame rate, the encoder's display name, then `CRF n` for a software encoder or `n kb/s` for a hardware one. |
+| `output` | object | `OutputSettings` as JSON. `replayBufferSeconds` is not carried. Missing keys take their defaults, and on read every value is normalised as the application settings are (for example width 320 to 7680 and even, an unknown codec replaced with `libx264`). |
+| `timeline` | array | The snapshot, in the clip format of PROJECT_FORMAT.md, section 9, as the editor serialised it at Export. |
+| `state` | integer | 0 Pending, 1 Active, 2 Completed, 3 Failed. Not range-checked on read. |
+| `progress` | integer | 0 to 100, as of the last write of the store. |
+| `error` | string | Why the job failed; empty otherwise. |
+| `note` | string | What the render had to change to render the timeline at all; empty when nothing was changed. See below. |
+| `finishedAt` | string | ISO 8601 date and time of completion; empty until then. |
+
+`schema` is written as 1 and is not read: an object's `jobs` array is read whatever
+`schema` says, and a bare array is read as schema 0.
+
+### `note` (a47c7bb, 2026-09-21, #55)
+
+ADR-0001's contract 1 cuts a clip that runs past the end of its source and requires the
+cut to be reported. The report is the job's `note`: one line per clip cut, of the form
+`"<clip>" runs X s past the end of its source, so it was cut from Y s to Z s.`, with
+times to the millisecond. It is cleared when a job becomes Active, so a retry reports
+afresh; it is set, and the store written, when ffmpeg is launched after the sources have
+been measured and at least one clip was cut; and it is kept whether the render then
+completes or fails. The Render workspace shows it under an active job and as a tagged
+tooltip on a completed one; a failed job keeps it but does not show it.
+
+### Restoring the queue (f0e7a7a, 2026-09-13, #47; 7574924, 2026-09-21)
+
+On launch the store is read and the queue started. A store that cannot be opened, is
+larger than 16 MiB, or does not parse as JSON is read as an empty queue, and the next
+write replaces it. Each job is then taken through these steps in order:
+
+1. An `Active` job becomes `Pending` with progress 0, because a killed ffmpeg leaves
+   nothing to resume.
+2. A `Pending` job that is not renderable becomes `Failed` with the error in decision 3.
+   Decision 3 names a missing `output` or `timeline`; the rule implemented is an empty
+   `timeline` or an empty `outputPath`, so a job without `output` is not retired, and
+   loads with default output settings.
+3. A `Pending` job whose `outputPath` is not a local, drive-absolute path becomes
+   `Failed`, before anything asks the filesystem about that path.
+4. A `Pending` job that fails the enqueue checks (an empty timeline, no output path, an
+   output path that is a folder, or an output folder that does not exist) becomes
+   `Failed` with the reason.
+
+Refused jobs stay in the queue, visible as failed, rather than being dropped. Retrying a
+failed job that is not renderable leaves it failed with the same message.
+
+### Output paths (d2717d2, 2026-09-06)
+
+Decision 4 as implemented: the Export command offers a save dialog whose suggested name
+is `<project>-<yyyyMMdd-HHmmss>.<container>` in the recordings folder (the
+`recording/lastDir` setting, which recordings and exports share, and which Export
+updates), or the Movies folder when none is set. The user may choose any name. Renders
+never overwrite: Export refuses a file that already exists, and the render pipeline
+checks again when a job starts and once more just before ffmpeg is launched. Enqueue
+itself does not check for an existing file. A render that fails still deletes the file at
+the output path, so a file created there while the render runs is lost (#93).

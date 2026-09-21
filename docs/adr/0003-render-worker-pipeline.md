@@ -2,14 +2,27 @@
 
 ## Status
 
-Accepted, implemented in d2717d2, as a first slice narrower than the decision below:
+Accepted. Implemented in d2717d2 (2026-09-06) as a first slice narrower than the
+decision below, and amended since. The Amendments section at the end records each change
+with its date; the sections before it are the decision as recorded. As of 2026-09-21 the
+implementation differs from the decision in these ways:
 
 - A clip with a non-zero rotation, audio pan or channel mapping fails the render with a
   message naming it; those mappings are not built yet.
 - Opacity is applied through `format=yuva420p` and `colorchannelmixer=aa=`.
-- A render takes at most 32 clips.
+- A render takes at most 32 clips. The segment-and-concat fallback is not built, so a
+  longer timeline cannot be rendered.
 - Every `sourcePath` must be a local, drive-absolute path (`MediaPathPolicy`), and
-  numeric clip values are range-checked before any arithmetic; see PROJECT_FORMAT.md.
+  numeric clip values are range-checked before any arithmetic; see PROJECT_FORMAT.md,
+  sections 9.6 and 11.2.
+- Before ffmpeg starts, each source is measured with ffprobe, and a clip that runs past
+  the end of its source is cut and reported (ADR-0001, contract 1).
+- Cancel ends ffmpeg and every process it started at once, rather than terminating and
+  then killing it after a grace period.
+- A render reaches 100 percent when ffmpeg exits with code 0 and the output file exists;
+  `progress=end` is not consulted.
+- Only clips marked `audio` contribute sound, mixed together with `amix`; a video clip's
+  own sound is not used.
 
 ## Context
 
@@ -110,14 +123,19 @@ swap would happen.
   ETA become real numbers.
 - This introduces the first genuine `RenderJob::Failed` state. The queue model and the
   Render workspace already have retry, cancel and pause, but nothing has ever set
-  `error`, so error display in the workspace needs a pass.
+  `error`, so error display in the workspace needs a pass. *(Done: the Render workspace
+  lists failed jobs with their error and a Retry button. A failed job cannot be removed
+  from the queue; see ADR-0002.)*
 - `RenderQueue` stops owning a simulated worker and becomes a scheduler over
   `RenderPipeline`. `advanceForTest()` and the tests that use it need replacing with
-  tests that drive the state machine directly.
+  tests that drive the state machine directly. *(Done in d2717d2: the simulated tick and
+  `advanceForTest()` are gone, and the queue tests drive jobs that fail to start
+  deterministically without ffmpeg.)*
 - Rendering competes with capture for CPU. Rendering while recording or streaming is a
   real risk on a busy machine; the queue's existing pause is the mitigation offered to
   the user, and automatic pausing during capture is a follow-up decision, not part of
-  this ADR.
+  this ADR. *(2026-09-21: automatic pausing has not been built. Pausing the queue stops
+  the next job from starting; a render already running continues.)*
 
 ## Security / privacy impact
 
@@ -128,8 +146,17 @@ swap would happen.
   apostrophes and brackets, and are never concatenated into the filter graph.
 - The temporary graph file is written to the application temp directory and deleted when
   the job ends, including on failure and cancellation. It contains paths only.
+  *(Amended: it is written to the system temporary directory
+  (`QStandardPaths::TempLocation`) as `malloy_render_<uuid>.txt`. It holds the filter
+  graph, which addresses inputs by index and contains no paths; the paths are only in
+  ffmpeg's argument list.)*
 - Output paths are validated before the process starts, so ffmpeg is never asked to
   create a file in a directory the app has not checked.
+- *(Amended 2026-09-13, a60fec6: media paths come from project files, which may not be
+  the user's. A UNC `sourcePath` would make Windows authenticate to the host it names as
+  soon as the path is checked, and a URL would be read by ffmpeg as an input of the file
+  author's choosing, so every `sourcePath` must pass `MediaPathPolicy` before anything,
+  ffprobe included, touches it.)*
 
 ## Validation plan
 
@@ -150,6 +177,17 @@ the Editor, watch the Render workspace reach 100 percent, and confirm with ffpro
 the output duration equals the timeline duration. The commands used to establish the
 numbers in this ADR are the model for that check.
 
+*(2026-09-21: the graph builder is covered in `tests/model_tests.cpp` by
+`timelineGraphPlacesTrimsAndScalesClips`, `timelineGraphScalesPositionsFromCanvasToOutput`,
+`timelineGraphMixesAudioAndKeepsPathsOutOfTheGraph`, `timelineGraphRefusesWhatItCannotRender`,
+`timelineGraphBoundsNumbersBeforeArithmetic` and
+`timelineGraphClampsClipsThatRunPastTheirSource`; the queue by
+`renderQueueProcessesAndPersists`, `renderQueueRetryCancelClear` and
+`renderQueuePauseHoldsPendingJobs`; source measurement by
+`aRenderIsNotHeldUpByAProberThatHangs`; and a real render, when ffmpeg and ffprobe are
+present, by `renderJobReportsAClipCutAtTheEndOfItsSource`. No test asserts the progress
+percentages described under Validation plan.)*
+
 ## Rollback or migration notes
 
 The change is additive at the file-format level (ADR-0002 covers the schema). Rollback is
@@ -157,3 +195,71 @@ reverting to the timer-driven `tick()`, which needs no data migration: jobs left
 `Pending` are simply picked up by whichever worker is present. A job left `Active` when
 the app exits is already resumed as `Pending` on the next launch, and that behavior must
 be preserved, since a killed ffmpeg leaves no resumable state.
+
+## Amendments
+
+Dated records of where the implementation refines or extends the decision.
+
+**2026-09-06, d2717d2: first slice.** Implemented with the limits the Status lists.
+
+**Implementation details as of 2026-09-21**, which the decision left open. Not all of
+them date from the first slice.
+
+- Video clips are composited onto the black background in ascending `track` order, ties
+  in timeline order, each over the ones before it. The editor lists its tracks as V3
+  (`track` 0), V2 (1) and V1 (2) from top to bottom, so a render draws V1 over V3, the
+  reverse of the order the editor shows.
+- Only clips marked `audio` contribute sound. Each is trimmed, retimed with a chain of
+  `atempo` filters, given its gain with `volume` and placed with `adelay`; the clips are
+  mixed with `amix` without normalisation, or passed through when there is only one.
+- A clip is scaled to `transform.scale` percent of the output width and height, so the
+  source's aspect ratio is not preserved.
+- Encoder arguments come from `EncoderRegistry`, as for recordings, followed by
+  `-pix_fmt yuv420p`, the audio codec and bitrate, and `-t` set to the timeline length.
+  A codec the registry does not know fails the render.
+- ffmpeg is started with `-hide_banner -loglevel error -nostdin -progress pipe:1 -nostats`,
+  and a failure message carries the last 4000 characters of its standard error.
+- Progress is `out_time_us` over the timeline length, never lower than the last value
+  reported. On exit code 0 the job reaches 100 percent if the output file exists, and
+  fails with "ffmpeg reported success but wrote no file." if it does not.
+- An existing output file is refused when the job starts and again just before ffmpeg is
+  launched. ffmpeg is given neither `-y` nor `-n`, and a failed render deletes the file at
+  the output path, so a file created there during the render is lost (#93).
+
+**2026-09-13, a60fec6 and bd75eb0: untrusted input.** Every `sourcePath` must pass
+`MediaPathPolicy` before the existence check, and clip numbers are bounded and required
+to be finite before any arithmetic (ADR-0001, Amendments).
+
+**2026-09-21, 1d857cd: cancellation (#85).** `terminate()` asks a process to close its
+windows, which a windowless ffmpeg does not have, so every cancel waited out the grace
+period on the GUI thread; and `kill()` ended only the process started, which for an
+ffmpeg installed through a package manager's launcher left the real encoder running.
+Cancel now ends ffmpeg with every process it started (`ProcessTree::kill`), waits up to
+2 seconds for it to finish, and deletes the partial output. The same applies to a probe
+cancelled or timed out.
+
+**2026-09-21, ce40a16: placement.** `transform.x` and `transform.y` are canvas pixels and
+are scaled to the output size before `overlay`, rounded in 64-bit arithmetic.
+
+**2026-09-21, a47c7bb: measuring sources (ADR-0001 contract 1, #55).** The pipeline gains
+a stage before ffmpeg:
+
+1. `start()` builds the graph once without source lengths, so everything that can be
+   refused without them (an unlinked clip, a refused or missing path, a value out of
+   range, too many clips) is still refused synchronously.
+2. Each distinct `sourcePath` is then measured with
+   `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1`,
+   one file at a time from the event loop. A probe that has not answered after 10 seconds
+   is ended with its process tree. Only a finite, positive answer is used.
+3. The graph is built again with the lengths, clips that run past their source are cut,
+   and ffmpeg is launched. The cut is reported through a new `adjusted(note)` signal and
+   stored on the job (ADR-0002, Amendments).
+
+When ffprobe is not installed, the render is launched at once without measuring, as
+before. Cancelling while sources are being measured ends the probe; no output file has
+been started, so there is nothing to delete.
+
+Known gaps in the render path, tracked as issues: still images render as a single frame
+(#100); output is neither converted to nor tagged as BT.709 (#92); a job whose hardware
+encoder is unavailable on this machine starts and then fails in ffmpeg instead of being
+refused (#106); and a failed render can delete a file it did not write (#93).

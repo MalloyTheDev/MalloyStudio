@@ -2,8 +2,11 @@
 
 ## Status
 
-Accepted, implemented in 7fe0923. The render-time clamp and report in contract 1 followed
-separately, for #55.
+Accepted. Implemented in 7fe0923 (2026-09-06), apart from the render-time clamp and
+report in contract 1, which followed in a47c7bb (2026-09-21, #55). Every contract below is
+now implemented. The Amendments section at the end records where the implementation
+refines or goes beyond the decision; the sections before it are the decision as recorded.
+The current format is specified in [PROJECT_FORMAT.md](../PROJECT_FORMAT.md), section 9.
 
 ## Context
 
@@ -93,16 +96,22 @@ already give.
 ## Consequences
 
 - Renders become expressible. This ADR is a prerequisite for ADR-0003 and for issue #3.
+  *(2026-09-06: ADR-0003 was implemented in d2717d2, and the Editor's Export button now
+  queues a render; #3 is closed.)*
 - Projects saved by the current build keep loading in older builds, which ignore the new
   keys; those builds simply lose the source links on the next save.
 - Every existing saved project loads with all clips unlinked. There is no automatic
   repair, and none should be attempted: guessing a path from a label would be wrong more
   often than right.
 - The editor gains an unlinked state to display, and `MediaRegistry` probe results
-  (duration, resolution) become load-bearing rather than decorative.
+  (duration, resolution) become load-bearing rather than decorative. *(Amended
+  2026-09-21: the unlinked state is a dashed outline. `MediaRegistry`'s duration sets a
+  dropped clip's initial `dur`, rounded to whole seconds (#100), but renders do not rely
+  on it: they measure each source with ffprobe when they start; see Amendments.)*
 - `docs/PROJECT_FORMAT.md` is currently stale: it documents neither the shipped
   `timeline` key nor these fields, and its version history is out of date. It has to be
-  corrected in the same change.
+  corrected in the same change. *(Resolved: the format document specifies the timeline
+  and these fields, and #17 is closed.)*
 
 ## Security / privacy impact
 
@@ -115,6 +124,13 @@ sharing becomes a supported flow, the media-table alternative above is the place
 path redaction or relinking.
 
 No credentials or tokens are involved.
+
+*(Amended 2026-09-13, a60fec6: a path in a project is also an instruction to open
+something, and the project may not be the user's. A UNC `sourcePath` would make Windows
+authenticate to the host it names when the render checks or opens the file, and a URL
+would be read by ffmpeg as an input of the file author's choosing. `sourcePath` must
+therefore be a local, drive-absolute path; see Amendments and PROJECT_FORMAT.md, section
+11.2.)*
 
 ## Validation plan
 
@@ -131,9 +147,69 @@ Model tests, none of which need ffmpeg:
 Runtime check: drop a media file from the bin onto the timeline, save, reopen, and
 confirm the clip still resolves to the same file.
 
+*(2026-09-21: these are covered in `tests/model_tests.cpp` by
+`editorClipRoundTripPreservesSourceReference`, `editorLegacyClipLoadsAsUnlinked`,
+`timelineTrimKeepsSourceInSync`, `timelineSplitDerivesRightHandSourceIn` and
+`timelineGraphRefusesWhatItCannotRender`, and contract 1 by
+`timelineGraphClampsClipsThatRunPastTheirSource` and, with ffmpeg and ffprobe present,
+`renderJobReportsAClipCutAtTheEndOfItsSource`.)*
+
 ## Rollback or migration notes
 
 No migration runs on load: absent keys mean unlinked, which is the correct reading of an
 older file. Rollback is removing the keys again; files written in the meantime stay
 loadable because unknown keys are ignored. Nothing rewrites existing project files until
 the user saves.
+
+## Amendments
+
+Dated records of where the implementation refines or extends the decision. The decision
+above is unchanged by them.
+
+**2026-09-06, 7fe0923: implementation.** The trim and split arithmetic lives in
+`src/ui/workspaces/TimelineEdits.h` as pure functions. Details the decision left open:
+a left-edge trim of a linked clip stops where `sourceIn` would become negative, while an
+unlinked clip has no such stop; a trim never makes a clip shorter than 0.25 seconds; a
+split is not made within 0.1 seconds of either end of a clip. The demo clips were removed
+and the timeline starts empty.
+
+**2026-09-13, a60fec6: media path policy (extends contract 4).** When a render starts,
+a `sourcePath` must also be a local, drive-absolute path (`MediaPathPolicy::isAllowed`).
+This is checked before the file's existence, because asking whether a UNC path exists is
+what makes Windows authenticate to the host it names. A clip that names anything else
+fails the render with the clip named. The path is still not checked or rewritten when the
+project is opened.
+
+**2026-09-13, bd75eb0: bounds on clip numbers.** Before any render arithmetic, `dur` must
+be finite and in (0, 86400] seconds, `start` and `sourceIn` finite and in [0, 86400],
+`transform.scale` finite and in [1, 10000] percent, `transform.opacity` in [0, 100] and
+`audioParams.gainDb` in [-60, 30], and `speed.factor` must be finite as well as in the
+[0.1, 4.0] range the first render slice already required. A clip outside them fails the
+render with the clip named. The ranges keep the arithmetic defined and the output
+bounded; they are not editing limits.
+
+**2026-09-21, ce40a16: placement space.** `transform.x` and `transform.y` are canvas
+pixels on the 1920x1080 canvas, and a render scales them to the output size, as it
+already scaled `transform.scale` as a share of the output.
+
+**2026-09-21, a1bea0f: timeline length.** The editor timeline grows to fit its clips, up
+to 86400 seconds (`TimelineGraphBuilder::kMaxClipSeconds`), the longest clip and latest
+start a render accepts, so a clip the editor places whole also renders whole.
+
+**2026-09-21, a47c7bb: contract 1 implemented (#55).** How the clamp and report work:
+
+- Before ffmpeg starts, `RenderPipeline` measures each distinct `sourcePath` with ffprobe
+  (the container's duration), one file at a time, allowing each 10 seconds.
+  `TimelineGraphBuilder` stays pure: it is given the measured lengths.
+- A clip that needs more than its source has left after `sourceIn`, by more than
+  1 millisecond, is cut to `(length - sourceIn) / speed.factor` seconds. The render
+  continues, and becomes shorter if that clip was the last to end.
+- A clip with less than 1 millisecond of source left after `sourceIn` fails the render,
+  with the clip named, rather than rendering as nothing.
+- The report is the render job's `note`, one line per clip cut, naming it and saying by
+  how much; the Render workspace shows it (ADR-0002, Amendments).
+- A source that cannot be measured, because ffprobe is not installed, times out, fails,
+  or reports no positive length (a still image reports none), is rendered as though it
+  were long enough, with nothing cut and nothing reported.
+- `MediaRegistry`'s cached lengths are not used, because they are rounded to whole
+  seconds.
