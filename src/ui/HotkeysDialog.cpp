@@ -102,7 +102,11 @@ HotkeysDialog::HotkeysDialog(HotkeyManager* manager, AudioController* audio, QWi
     auto* buttons = new QDialogButtonBox(
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
     connect(buttons, &QDialogButtonBox::accepted, this, [this] {
-        applyAndSave();
+        // A shortcut that was refused is not in effect, and saying nothing
+        // would leave the user believing it was.
+        const QString refused = applyPending();
+        if (!refused.isEmpty())
+            QMessageBox::warning(this, tr("Shortcut not available"), refused);
         accept();
     });
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
@@ -160,26 +164,36 @@ void HotkeysDialog::buildTree() {
     }
 }
 
-void HotkeysDialog::applyAndSave() {
-    QStringList refused;
-    for (auto it = m_pending.constBegin(); it != m_pending.constEnd(); ++it) {
-        if (!m_manager->setBinding(it.key(), it.value()) && !it.value().isEmpty())
-            refused << QStringLiteral("%1  (%2)")
-                           .arg(it.key(), it.value().toString(QKeySequence::NativeText));
-    }
+QString HotkeysDialog::applyPending() {
+    const QList<HotkeyManager::Refusal> refusals = m_manager->applyBindings(m_pending);
     m_pending.clear();
+    if (refusals.isEmpty()) return QString();
 
-    // A shortcut Windows refused is not in effect, and saying nothing would
-    // leave the dialog showing it as though it were.
-    if (!refused.isEmpty()) {
-        QMessageBox::warning(
-            this, tr("Shortcut not available"),
-            tr("These shortcuts could not be registered:\n\n%1\n\n"
-               "Another application may already claim them, or the combination "
-               "may not be supported. The previous shortcut was kept where "
-               "there was one.")
-                .arg(refused.join(QStringLiteral("\n"))));
+    // Only a shortcut Windows refused can be blamed on another application.
+    // One that another action here holds is named with that action, since
+    // moving it is what the user has to do.
+    QStringList taken;
+    QStringList refused;
+    for (const HotkeyManager::Refusal& r : refusals) {
+        const QString key = r.key.toString(QKeySequence::NativeText);
+        if (r.heldBy.isEmpty())
+            refused << QStringLiteral("%1  (%2)").arg(displayName(r.actionId), key);
+        else
+            taken << tr("%1  (%2 is already used by %3)")
+                         .arg(displayName(r.actionId), key, displayName(r.heldBy));
     }
+
+    QStringList parts;
+    if (!taken.isEmpty())
+        parts << tr("These shortcuts are already assigned to another action:\n\n%1")
+                     .arg(taken.join(QStringLiteral("\n")));
+    if (!refused.isEmpty())
+        parts << tr("These shortcuts could not be registered:\n\n%1\n\n"
+                    "Another application may already claim them, or the combination "
+                    "may not be supported.")
+                     .arg(refused.join(QStringLiteral("\n")));
+    parts << tr("None of the edits was applied.");
+    return parts.join(QStringLiteral("\n\n"));
 }
 
 // MOC for KeyCaptureEdit (Q_OBJECT defined in this .cpp file).

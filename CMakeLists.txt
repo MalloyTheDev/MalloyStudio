@@ -173,6 +173,8 @@ set(MALLOY_UI_SOURCES
     src/ui/StreamSettingsDialog.h
     src/ui/HotkeysDialog.cpp
     src/ui/HotkeysDialog.h
+    src/ui/HotkeyBindingEdit.cpp
+    src/ui/HotkeyBindingEdit.h
     src/ui/PreviewWidget.cpp
     src/ui/PreviewWidget.h
     src/ui/ScenesPanel.cpp
@@ -288,6 +290,12 @@ qt_add_executable(MalloyStudioTests
     src/ui/shell/StudioStatusBar.h
     src/ui/ControlsBar.cpp
     src/ui/ControlsBar.h
+    # The two places shortcuts are edited, which must apply a swap as one
+    # change and show only the bindings the hotkey manager actually holds.
+    src/ui/HotkeysDialog.cpp
+    src/ui/HotkeysDialog.h
+    src/ui/HotkeyBindingEdit.cpp
+    src/ui/HotkeyBindingEdit.h
 )
 
 # Force console subsystem so CTest captures stdout test output

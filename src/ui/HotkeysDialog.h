@@ -18,11 +18,16 @@ public:
                            AudioController* audio = nullptr,
                            QWidget* parent = nullptr);
 
+    // Applies the shortcuts edited so far as one change, so they can be
+    // swapped or moved between actions, and returns a description of any
+    // that were refused. Empty when every one took effect. OK calls this and
+    // shows the description.
+    QString applyPending();
+
 private:
     void buildTree();
     void onRecordClicked(QTreeWidgetItem* item);
     void onClearClicked(QTreeWidgetItem* item);
-    void applyAndSave();
 
     HotkeyManager*   m_manager = nullptr;
     AudioController* m_audio   = nullptr;

@@ -3,6 +3,8 @@
 #include <QCoreApplication>
 #include <QSettings>
 
+#include <algorithm>
+
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
@@ -22,15 +24,18 @@ UINT qtModsToWin32(Qt::KeyboardModifiers mods) {
 
 // Convert a Qt key value to a Win32 virtual-key code.
 // Returns 0 if the key is not mappable.
-UINT qtKeyToVk(int key) {
+UINT qtKeyToVk(int key, Qt::KeyboardModifiers mods) {
     if (key >= Qt::Key_F1 && key <= Qt::Key_F12)
         return VK_F1 + (key - Qt::Key_F1);
 
     if (key >= Qt::Key_A && key <= Qt::Key_Z)
         return 'A' + (key - Qt::Key_A);
 
+    // Qt reports a numpad digit as the same key as the main-row digit and
+    // marks it with KeypadModifier; Windows gives the two different codes.
     if (key >= Qt::Key_0 && key <= Qt::Key_9)
-        return '0' + (key - Qt::Key_0);
+        return (mods & Qt::KeypadModifier) ? VK_NUMPAD0 + (key - Qt::Key_0)
+                                           : '0' + (key - Qt::Key_0);
 
     switch (key) {
         case Qt::Key_Space:     return VK_SPACE;
@@ -66,11 +71,35 @@ bool decomposeKey(const QKeySequence& seq, Qt::KeyboardModifiers& mods, int& key
     return true;
 }
 
+// The combination Windows would be asked for, or {0, 0} when there is none.
+// Two sequences Qt tells apart can still be one Win32 hotkey (Return and
+// Enter both become VK_RETURN), so duplicates are judged on this.
+QPair<UINT, UINT> win32Combination(const QKeySequence& seq) {
+    Qt::KeyboardModifiers mods;
+    int qtKey = 0;
+    if (!decomposeKey(seq, mods, qtKey)) return {0, 0};
+    const UINT vk = qtKeyToVk(qtKey, mods);
+    if (vk == 0) return {0, 0};
+    return {qtModsToWin32(mods), vk};
+}
+
+HotkeyManager::Registrar win32Registrar() {
+    return {
+        [](int id, unsigned modifiers, unsigned virtualKey) {
+            return ::RegisterHotKey(nullptr, id, modifiers, virtualKey) != 0;
+        },
+        [](int id) { ::UnregisterHotKey(nullptr, id); },
+    };
+}
+
 } // namespace
 
 // ── HotkeyManager ─────────────────────────────────────────────────────────
 
-HotkeyManager::HotkeyManager(QObject* parent) : QObject(parent) {
+HotkeyManager::HotkeyManager(QObject* parent) : HotkeyManager(win32Registrar(), parent) {}
+
+HotkeyManager::HotkeyManager(Registrar registrar, QObject* parent)
+    : QObject(parent), m_registrar(std::move(registrar)) {
     QCoreApplication::instance()->installNativeEventFilter(this);
 }
 
@@ -78,76 +107,142 @@ HotkeyManager::~HotkeyManager() {
     // Unregister all hotkeys.
     for (auto& entry : m_entries) {
         if (entry.registeredId > 0)
-            UnregisterHotKey(nullptr, entry.registeredId);
+            m_registrar.unregisterKey(entry.registeredId);
     }
     QCoreApplication::instance()->removeNativeEventFilter(this);
 }
 
 bool HotkeyManager::registerHotkey(int id, const QKeySequence& key) {
-    Qt::KeyboardModifiers mods;
-    int qtKey = 0;
-    if (!decomposeKey(key, mods, qtKey)) return false;
-
-    const UINT vk = qtKeyToVk(qtKey);
-    if (vk == 0) return false;
-
-    return ::RegisterHotKey(nullptr, id, qtModsToWin32(mods), vk) != 0;
+    const QPair<UINT, UINT> combination = win32Combination(key);
+    if (combination.second == 0) return false;
+    return m_registrar.registerKey(id, combination.first, combination.second);
 }
 
 void HotkeyManager::unregisterById(int registeredId) {
     if (registeredId > 0)
-        ::UnregisterHotKey(nullptr, registeredId);
+        m_registrar.unregisterKey(registeredId);
+}
+
+void HotkeyManager::ensureEntry(const QString& actionId) {
+    if (m_entries.contains(actionId)) return;
+    m_entries[actionId] = {actionId, {}, -1};
+    m_insertionOrder.append(actionId);
 }
 
 bool HotkeyManager::setBinding(const QString& actionId, const QKeySequence& key) {
-    // Ensure entry exists.
-    if (!m_entries.contains(actionId)) {
-        m_entries[actionId] = {actionId, {}, -1};
-        m_insertionOrder.append(actionId);
-    }
-    Entry& entry = m_entries[actionId];
-    const QKeySequence previous = entry.key;
+    return applyBindings({{actionId, key}}).isEmpty();
+}
 
-    // Unregister old binding.
-    if (entry.registeredId > 0) {
-        unregisterById(entry.registeredId);
-        m_idToAction.remove(entry.registeredId);
-        entry.registeredId = -1;
+QList<HotkeyManager::Refusal> HotkeyManager::applyBindings(
+        const QHash<QString, QKeySequence>& bindings) {
+    // Actions new to the manager are added in a fixed order, so registration
+    // order does not depend on hash iteration.
+    QStringList requested = bindings.keys();
+    std::sort(requested.begin(), requested.end());
+    for (const QString& id : std::as_const(requested)) ensureEntry(id);
+
+    QStringList ordered;
+    for (const QString& id : std::as_const(m_insertionOrder))
+        if (bindings.contains(id)) ordered << id;
+
+    auto finalKey = [&](const QString& id) {
+        return bindings.contains(id) ? bindings.value(id) : m_entries.value(id).key;
+    };
+
+    // Two of our own actions on one shortcut is refused before anything is
+    // touched, and reported against the action that has (or would have) it.
+    // Windows cannot be relied on to catch it: RegisterHotKey is documented to
+    // refuse the second registration, but Windows 11 lets one process register
+    // a combination twice, and one key press cannot mean two actions.
+    QList<Refusal> refusals;
+    QList<QPair<UINT, UINT>> reported;
+    for (const QString& id : std::as_const(ordered)) {
+        const QKeySequence key = bindings.value(id);
+        const QPair<UINT, UINT> combination = win32Combination(key);
+        if (combination.second == 0 || reported.contains(combination)) continue;
+        for (const QString& other : std::as_const(m_insertionOrder)) {
+            if (other == id || win32Combination(finalKey(other)) != combination) continue;
+            refusals.append({id, key, other});
+            reported.append(combination);
+            break;
+        }
+    }
+    if (!refusals.isEmpty()) {
+        for (const Refusal& r : std::as_const(refusals))
+            emit bindingFailed(r.actionId, r.key, r.heldBy);
+        return refusals;
     }
 
-    // Register new binding. An empty key means "unbound", which always succeeds.
-    bool ok = true;
-    if (!key.isEmpty()) {
-        const int newId = m_nextId++;
-        ok = registerHotkey(newId, key);
-        if (ok) {
-            entry.registeredId = newId;
-            m_idToAction[newId] = actionId;
+    QStringList changed;
+    for (const QString& id : std::as_const(ordered))
+        if (m_entries.value(id).key != bindings.value(id)) changed << id;
+
+    // Free every shortcut that is about to move before claiming any.
+    QHash<QString, QKeySequence> previous;
+    for (const QString& id : std::as_const(changed)) {
+        Entry& entry = m_entries[id];
+        previous.insert(id, entry.key);
+        if (entry.registeredId > 0) {
+            unregisterById(entry.registeredId);
+            m_idToAction.remove(entry.registeredId);
+            entry.registeredId = -1;
         }
     }
 
-    if (!ok) {
-        // Windows owns this shortcut elsewhere. Keep what was working instead of
-        // storing a binding that cannot fire, and say so.
-        entry.key = QKeySequence();
-        if (!previous.isEmpty()) {
-            const int restoreId = m_nextId++;
-            if (registerHotkey(restoreId, previous)) {
-                entry.key = previous;
-                entry.registeredId = restoreId;
-                m_idToAction[restoreId] = actionId;
+    // An empty key means "unbound", which always succeeds. Every refusal is
+    // collected rather than stopping at the first, so all of them are reported.
+    for (const QString& id : std::as_const(changed)) {
+        const QKeySequence key = bindings.value(id);
+        if (key.isEmpty()) continue;
+        const int newId = m_nextId++;
+        if (registerHotkey(newId, key)) {
+            m_entries[id].registeredId = newId;
+            m_idToAction[newId] = id;
+        } else {
+            refusals.append({id, key, QString()});
+        }
+    }
+
+    if (!refusals.isEmpty()) {
+        // Windows owns a shortcut elsewhere. Put every action back as it was
+        // instead of storing a binding that cannot fire, and say so. The new
+        // registrations are released first: in a swap they hold the very keys
+        // being restored.
+        for (const QString& id : std::as_const(changed)) {
+            Entry& entry = m_entries[id];
+            if (entry.registeredId > 0) {
+                unregisterById(entry.registeredId);
+                m_idToAction.remove(entry.registeredId);
+                entry.registeredId = -1;
             }
         }
-        emit bindingFailed(actionId, key);
-        return false;
+        for (const QString& id : std::as_const(changed)) {
+            Entry& entry = m_entries[id];
+            const QKeySequence old = previous.value(id);
+            entry.key = QKeySequence();
+            if (old.isEmpty()) continue;
+            const int restoreId = m_nextId++;
+            if (registerHotkey(restoreId, old)) {
+                entry.key = old;
+                entry.registeredId = restoreId;
+                m_idToAction[restoreId] = id;
+            } else {
+                // Lost in the meantime: say so rather than leave it looking bound.
+                emit bindingFailed(id, old, QString());
+            }
+        }
+        for (const Refusal& r : std::as_const(refusals))
+            emit bindingFailed(r.actionId, r.key, r.heldBy);
+        return refusals;
     }
-
-    entry.key = key;
 
     // Persist.
     QSettings settings;
-    settings.setValue(QStringLiteral("hotkeys/%1").arg(actionId), key.toString());
-    return true;
+    for (const QString& id : std::as_const(ordered)) {
+        m_entries[id].key = bindings.value(id);
+        settings.setValue(QStringLiteral("hotkeys/%1").arg(id), bindings.value(id).toString());
+    }
+    return {};
 }
 
 QKeySequence HotkeyManager::binding(const QString& actionId) const {

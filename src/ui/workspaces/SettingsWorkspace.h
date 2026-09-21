@@ -1,6 +1,6 @@
 #pragma once
 
-#include <QKeySequence>
+#include <QList>
 #include <QWidget>
 
 class QCheckBox;
@@ -13,6 +13,8 @@ class QPushButton;
 class TwitchAuth;
 class TwitchApi;
 class AudioController;
+class HotkeyBindingEdit;
+class HotkeyManager;
 
 // Settings workspace (secondary.jsx SettingsScreen): a two-pane screen with a
 // group list on the left and a content area on the right. The Recording group
@@ -32,6 +34,10 @@ public:
     // devices instead of guessing.
     void setAudioController(AudioController* audio) { m_audio = audio; }
 
+    // The live hotkey manager. Settings > Hotkeys edits its bindings directly
+    // and shows what it holds, so a refused shortcut is not left on screen.
+    void setHotkeyManager(HotkeyManager* hotkeys);
+
 signals:
     // The Twitch account connection changed, or a stream key was fetched.
     // MainWindow reloads StreamSettings so the new key is used.
@@ -42,9 +48,6 @@ signals:
     // Master-bus limiter changed in Settings ▸ Audio. MainWindow applies it to
     // the live AudioController. thresholdDb is in dBFS (e.g. -3.0).
     void audioLimiterChanged(bool enabled, double thresholdDb);
-    // A global hotkey binding changed in Settings ▸ Hotkeys. MainWindow forwards
-    // it to HotkeyManager::setBinding (which persists + re-registers it).
-    void hotkeyChanged(const QString& actionId, const QKeySequence& seq);
     // The capture backend was changed in Settings ▸ Performance. A running
     // session keeps the backend it was started with, so MainWindow restarts
     // capture: the alternative is a setting that appears to have taken effect
@@ -93,4 +96,5 @@ private:
     QCheckBox* m_autoStart = nullptr;
     QCheckBox* m_autoStop = nullptr;
     QCheckBox* m_saveClip = nullptr;
+    QList<HotkeyBindingEdit*> m_hotkeyEdits;
 };

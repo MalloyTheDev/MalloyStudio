@@ -14,6 +14,8 @@
 #include "ui/PreviewWidget.h"
 #include "ui/InspectorPanel.h"
 #include "ui/AudioMixerPanel.h"
+#include "ui/HotkeyBindingEdit.h"
+#include "ui/HotkeysDialog.h"
 #include "input/HotkeyManager.h"
 #include "model/Canvas.h"
 #include "model/FilterEffect.h"
@@ -91,6 +93,7 @@
 #include <QSpinBox>
 #include <limits>
 #include <QTimer>
+#include <QTreeWidget>
 #include <QtTest/QtTest>
 #include <QUndoStack>
 
@@ -454,6 +457,15 @@ private slots:
     void encoderRedactsTheStreamKeyFromFfmpegOutput();
     void addingAConfiguredLayerIsOneUndoStep();
     void hotkeyManagerReportsRefusedBindings();
+    // Shortcuts are applied as one change, so they can be swapped and moved
+    // between actions; a clash between two actions is named as one, and a
+    // refusal by Windows puts every action back.
+    void hotkeyBindingsSwapAndMoveAsOneChange();
+    void numpadNumbersRegisterAsNumpadKeys();
+    // Both places shortcuts are edited show the binding the manager holds
+    // after a refusal, and the dialog applies its edits as one change.
+    void theHotkeyEditorShowsTheBindingInEffect();
+    void theHotkeysDialogAppliesASwapAndNamesAClash();
     void resamplerPreservesPitchAcrossRates();
     void pcmFifoKeepsTheSampleStreamContinuous();
     void mixerKeepsStereoSeparation();
@@ -5323,6 +5335,249 @@ void MalloyModelTests::hotkeyManagerReportsRefusedBindings() {
     }
 
     QVERIFY(mgr.setBinding(action, QKeySequence()));
+}
+
+namespace {
+// Stands in for RegisterHotKey and UnregisterHotKey, with their documented
+// rule: a combination that is already registered is refused, whoever holds
+// it. Virtual keys in `elsewhere` belong to another application.
+struct FakeHotkeyRegistrar {
+    struct Combination {
+        unsigned modifiers = 0;
+        unsigned virtualKey = 0;
+        bool operator==(const Combination&) const = default;
+    };
+    QHash<int, Combination> held;   // hotkey id -> combination
+    QList<unsigned> elsewhere;
+    QList<unsigned> requested;      // virtual keys asked for, in order
+
+    HotkeyManager::Registrar registrar() {
+        return {
+            [this](int id, unsigned modifiers, unsigned virtualKey) {
+                const Combination c{modifiers, virtualKey};
+                requested.append(virtualKey);
+                if (elsewhere.contains(virtualKey)) return false;
+                for (const Combination& h : std::as_const(held))
+                    if (h == c) return false;
+                held.insert(id, c);
+                return true;
+            },
+            [this](int id) { held.remove(id); },
+        };
+    }
+
+    QList<unsigned> heldKeys() const {
+        QList<unsigned> keys;
+        for (const Combination& c : held) keys << c.virtualKey;
+        std::sort(keys.begin(), keys.end());
+        return keys;
+    }
+};
+
+// Win32 virtual key codes, spelled out rather than including windows.h here.
+constexpr unsigned kVkF5 = 0x74;       // F6, F7 and F8 follow
+constexpr unsigned kVkNumpad0 = 0x60;  // VK_NUMPAD1 to VK_NUMPAD9 follow
+
+// An unlikely combination, so the fake's bindings are nothing a user has.
+QKeySequence testShortcut(Qt::Key key) {
+    return QKeySequence(Qt::ControlModifier | Qt::AltModifier | Qt::ShiftModifier | key);
+}
+
+// Types a shortcut into a field the way a user does, modifiers first.
+void typeShortcut(QWidget* field, Qt::Key key) {
+    QTest::keyClick(field, key, Qt::ControlModifier | Qt::AltModifier | Qt::ShiftModifier);
+}
+
+// Test bindings are persisted like any other. They are removed afterwards so
+// a later loadBindings() does not register them with Windows.
+void forgetTestHotkeys(const QStringList& actions) {
+    QSettings s;
+    for (const QString& a : actions) s.remove(QStringLiteral("hotkeys/") + a);
+}
+}  // namespace
+
+void MalloyModelTests::hotkeyBindingsSwapAndMoveAsOneChange() {
+    const QString record = QStringLiteral("test.swap.record");
+    const QString stream = QStringLiteral("test.swap.stream");
+    const QString replay = QStringLiteral("test.swap.replay");
+    const auto cleanup = qScopeGuard([&] { forgetTestHotkeys({record, stream, replay}); });
+    const QKeySequence f5 = testShortcut(Qt::Key_F5);
+    const QKeySequence f6 = testShortcut(Qt::Key_F6);
+    const QKeySequence f7 = testShortcut(Qt::Key_F7);
+    const QKeySequence f8 = testShortcut(Qt::Key_F8);
+
+    FakeHotkeyRegistrar windows;
+    HotkeyManager mgr(windows.registrar());
+    QVERIFY(mgr.setBinding(record, f5));
+    QVERIFY(mgr.setBinding(stream, f6));
+    QSignalSpy failed(&mgr, &HotkeyManager::bindingFailed);
+
+    // A swap. Taken one action at a time, each new key is still held by the
+    // other action and is refused, so both have to be released first.
+    QVERIFY(mgr.applyBindings({{record, f6}, {stream, f5}}).isEmpty());
+    QCOMPARE(mgr.binding(record), f6);
+    QCOMPARE(mgr.binding(stream), f5);
+    QCOMPARE(windows.heldKeys(), (QList<unsigned>{kVkF5, kVkF5 + 1}));
+    QCOMPARE(failed.count(), 0);
+    {
+        const QSettings s;
+        QCOMPARE(QKeySequence(s.value(QStringLiteral("hotkeys/") + record).toString()), f6);
+        QCOMPARE(QKeySequence(s.value(QStringLiteral("hotkeys/") + stream).toString()), f5);
+    }
+
+    // A move: record's key goes to an action that had none, and record takes
+    // a new one, in either order the hash happens to hold them.
+    QVERIFY(mgr.applyBindings({{replay, f6}, {record, f7}}).isEmpty());
+    QCOMPARE(mgr.binding(record), f7);
+    QCOMPARE(mgr.binding(replay), f6);
+    QCOMPARE(mgr.binding(stream), f5);
+    QCOMPARE(windows.heldKeys(), (QList<unsigned>{kVkF5, kVkF5 + 1, kVkF5 + 2}));
+
+    // Asking for a key another action here holds is a clash with that action,
+    // not a refusal by some other application, and changes nothing.
+    const QList<HotkeyManager::Refusal> clash = mgr.applyBindings({{stream, f7}});
+    QCOMPARE(clash.size(), 1);
+    QCOMPARE(clash.first().actionId, stream);
+    QCOMPARE(clash.first().key, f7);
+    QCOMPARE(clash.first().heldBy, record);
+    QCOMPARE(mgr.binding(stream), f5);
+    QCOMPARE(failed.count(), 1);
+    QCOMPARE(failed.first().at(2).toString(), record);
+    QVERIFY(!mgr.setBinding(replay, f5));
+    QCOMPARE(mgr.binding(replay), f6);
+
+    // So is giving two actions the same new key in one change.
+    const QList<HotkeyManager::Refusal> both = mgr.applyBindings({{stream, f8}, {replay, f8}});
+    QCOMPARE(both.size(), 1);
+    QVERIFY(!both.first().heldBy.isEmpty());
+    QCOMPARE(mgr.binding(stream), f5);
+    QCOMPARE(mgr.binding(replay), f6);
+
+    // When Windows refuses one key, the change is undone as a whole: the swap
+    // that did register is put back, and nothing is saved.
+    windows.elsewhere << kVkF5 + 3;
+    const QList<HotkeyManager::Refusal> refused =
+        mgr.applyBindings({{record, f5}, {stream, f7}, {replay, f8}});
+    QCOMPARE(refused.size(), 1);
+    QCOMPARE(refused.first().actionId, replay);
+    QVERIFY(refused.first().heldBy.isEmpty());
+    QCOMPARE(mgr.binding(record), f7);
+    QCOMPARE(mgr.binding(stream), f5);
+    QCOMPARE(mgr.binding(replay), f6);
+    QCOMPARE(windows.heldKeys(), (QList<unsigned>{kVkF5, kVkF5 + 1, kVkF5 + 2}));
+    {
+        const QSettings s;
+        QCOMPARE(QKeySequence(s.value(QStringLiteral("hotkeys/") + record).toString()), f7);
+        QCOMPARE(QKeySequence(s.value(QStringLiteral("hotkeys/") + stream).toString()), f5);
+        QCOMPARE(QKeySequence(s.value(QStringLiteral("hotkeys/") + replay).toString()), f6);
+    }
+}
+
+void MalloyModelTests::numpadNumbersRegisterAsNumpadKeys() {
+    const QString numpad = QStringLiteral("test.numpad");
+    const QString mainRow = QStringLiteral("test.mainrow");
+    const auto cleanup = qScopeGuard([&] { forgetTestHotkeys({numpad, mainRow}); });
+
+    FakeHotkeyRegistrar windows;
+    HotkeyManager mgr(windows.registrar());
+    for (int digit = 0; digit <= 9; ++digit) {
+        const QKeySequence key(Qt::ControlModifier | Qt::KeypadModifier
+                               | Qt::Key(Qt::Key_0 + digit));
+        QVERIFY(mgr.setBinding(numpad, key));
+        QCOMPARE(windows.requested.last(), kVkNumpad0 + digit);
+    }
+
+    // The main-row digit is another key, so both can be bound at once.
+    QVERIFY(mgr.setBinding(mainRow, QKeySequence(Qt::ControlModifier | Qt::Key_9)));
+    QCOMPARE(windows.requested.last(), unsigned('9'));
+    QCOMPARE(windows.heldKeys(), (QList<unsigned>{unsigned('9'), kVkNumpad0 + 9}));
+
+    // The numpad binding is still the numpad key when it is read back.
+    const QKeySequence stored(QSettings().value(QStringLiteral("hotkeys/") + numpad).toString());
+    QVERIFY(stored[0].keyboardModifiers() & Qt::KeypadModifier);
+}
+
+void MalloyModelTests::theHotkeyEditorShowsTheBindingInEffect() {
+    const QString record = QStringLiteral("test.editor.record");
+    const QString stream = QStringLiteral("test.editor.stream");
+    const auto cleanup = qScopeGuard([&] { forgetTestHotkeys({record, stream}); });
+    const QKeySequence f5 = testShortcut(Qt::Key_F5);
+    const QKeySequence f6 = testShortcut(Qt::Key_F6);
+    const QKeySequence f7 = testShortcut(Qt::Key_F7);
+
+    FakeHotkeyRegistrar windows;
+    windows.elsewhere << kVkF5 + 3;   // F8 belongs to another application
+    HotkeyManager mgr(windows.registrar());
+    QVERIFY(mgr.setBinding(record, f5));
+    QVERIFY(mgr.setBinding(stream, f6));
+
+    HotkeyBindingEdit field(record);
+    QVERIFY(!field.isEnabled());
+    field.setManager(&mgr);
+    QVERIFY(field.isEnabled());
+    QCOMPARE(field.keySequence(), f5);
+
+    // Windows refuses F8. The field shows F5 again, because F5 is what still
+    // fires; the field emptying itself as the key went down unbound nothing.
+    typeShortcut(&field, Qt::Key_F8);
+    QCOMPARE(mgr.binding(record), f5);
+    QCOMPARE(field.keySequence(), f5);
+
+    // Another action's key is refused as a clash, with the same result.
+    typeShortcut(&field, Qt::Key_F6);
+    QCOMPARE(mgr.binding(record), f5);
+    QCOMPARE(mgr.binding(stream), f6);
+    QCOMPARE(field.keySequence(), f5);
+
+    // A free key is applied and shown.
+    typeShortcut(&field, Qt::Key_F7);
+    QCOMPARE(mgr.binding(record), f7);
+    QCOMPARE(field.keySequence(), f7);
+
+    // A change made elsewhere is picked up when the field is shown again.
+    QVERIFY(mgr.setBinding(record, f5));
+    field.showHeldBinding();
+    QCOMPARE(field.keySequence(), f5);
+}
+
+void MalloyModelTests::theHotkeysDialogAppliesASwapAndNamesAClash() {
+    const QString first = QStringLiteral("test.dialog.first");
+    const QString second = QStringLiteral("test.dialog.second");
+    const auto cleanup = qScopeGuard([&] { forgetTestHotkeys({first, second}); });
+    const QKeySequence f5 = testShortcut(Qt::Key_F5);
+    const QKeySequence f6 = testShortcut(Qt::Key_F6);
+
+    FakeHotkeyRegistrar windows;
+    HotkeyManager mgr(windows.registrar());
+    QVERIFY(mgr.setBinding(first, f5));
+    QVERIFY(mgr.setBinding(second, f6));
+
+    HotkeysDialog dialog(&mgr);
+    auto field = [&dialog](const QString& actionId) -> QWidget* {
+        auto* tree = dialog.findChild<QTreeWidget*>();
+        for (int i = 0; tree && i < tree->topLevelItemCount(); ++i) {
+            QTreeWidgetItem* item = tree->topLevelItem(i);
+            if (item->data(0, Qt::UserRole).toString() == actionId)
+                return tree->itemWidget(item, 1);
+        }
+        return nullptr;
+    };
+    QVERIFY(field(first) && field(second));
+
+    typeShortcut(field(first), Qt::Key_F6);
+    typeShortcut(field(second), Qt::Key_F5);
+    QCOMPARE(dialog.applyPending(), QString());
+    QCOMPARE(mgr.binding(first), f6);
+    QCOMPARE(mgr.binding(second), f5);
+
+    // A key another action here holds is reported against that action, and
+    // not blamed on another application.
+    typeShortcut(field(first), Qt::Key_F5);
+    const QString message = dialog.applyPending();
+    QVERIFY2(message.contains(second), qPrintable(message));
+    QVERIFY2(!message.contains(QStringLiteral("Another application")), qPrintable(message));
+    QCOMPARE(mgr.binding(first), f6);
+    QCOMPARE(mgr.binding(second), f5);
 }
 
 void MalloyModelTests::addingAConfiguredLayerIsOneUndoStep() {

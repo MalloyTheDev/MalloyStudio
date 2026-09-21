@@ -94,11 +94,16 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // exists, behind an if that was therefore always false: a refused shortcut
     // was never reported, at startup or when rebinding, and simply did nothing.
     connect(m_hotkeys, &HotkeyManager::bindingFailed, this,
-            [this](const QString& actionId, const QKeySequence& key) {
-        flash(tr("Shortcut %1 could not be registered for %2 (another application may claim it)")
-                  .arg(key.toString(QKeySequence::NativeText), actionId), 6000);
+            [this](const QString& actionId, const QKeySequence& key, const QString& heldBy) {
+        const QString shortcut = key.toString(QKeySequence::NativeText);
+        flash(heldBy.isEmpty()
+                  ? tr("Shortcut %1 could not be registered for %2 (another application may claim it)")
+                        .arg(shortcut, actionId)
+                  : tr("Shortcut %1 is already used by %2, so it was not given to %3")
+                        .arg(shortcut, heldBy, actionId), 6000);
     });
     m_hotkeys->loadBindings();
+    m_settings->setHotkeyManager(m_hotkeys);
 
     setupMenus();
     connectModelSignals();
@@ -308,7 +313,6 @@ void MainWindow::setupUi() {
         m_audio->setLimiterThresholdDb(static_cast<float>(
             limiterSettings.value(QStringLiteral("audio/limiterThresholdDb"), -3.0).toDouble()));
     }
-    // Settings ▸ Hotkeys rebinds global shortcuts on the live HotkeyManager.
     // Changing the capture backend restarts capture rather than waiting for the
     // next time a source happens to be rebuilt, so the setting means what it
     // says the moment it is changed.
@@ -320,12 +324,6 @@ void MainWindow::setupUi() {
                   .arg(CaptureBackend::displayName(CaptureBackend::effective())), 4000);
     });
 
-    connect(m_settings, &SettingsWorkspace::hotkeyChanged, this,
-            [this](const QString& actionId, const QKeySequence& seq) {
-        if (m_hotkeys) m_hotkeys->setBinding(actionId, seq);
-    });
-    // A shortcut Windows refuses is not in effect; the status bar says so rather
-    // than leaving the user to discover it by pressing it.
     m_shell->addWorkspace(QStringLiteral("settings"), m_settings);
 
     setCentralWidget(m_shell);

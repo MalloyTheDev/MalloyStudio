@@ -11,6 +11,7 @@
 #include <QDesktopServices>
 #include "platform/TwitchAuth.h"
 #include "platform/TwitchApi.h"
+#include "ui/HotkeyBindingEdit.h"
 #include "ui/IconFactory.h"
 #include "ui/Theme.h"
 #include "recording/OutputSettings.h"
@@ -23,7 +24,6 @@
 #include <QFileDialog>
 #include <QFrame>
 #include <QHBoxLayout>
-#include <QKeySequenceEdit>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -798,11 +798,15 @@ QWidget* SettingsWorkspace::buildStoragePage() {
     return scroll;
 }
 
+void SettingsWorkspace::setHotkeyManager(HotkeyManager* hotkeys) {
+    for (HotkeyBindingEdit* edit : std::as_const(m_hotkeyEdits))
+        edit->setManager(hotkeys);
+}
+
 QWidget* SettingsWorkspace::buildHotkeysPage() {
     QWidget* scroll = nullptr;
     auto* col = makePage(&scroll, tr("Hotkeys"),
                          tr("System-wide shortcuts — they fire even when MalloyStudio isn't focused."));
-    QSettings s;
     struct HK { QString id, label, hint; };
     const QVector<HK> hks = {
         {QStringLiteral("record.toggle"),     tr("Start / stop recording"), tr("Toggles the recorder.")},
@@ -812,12 +816,9 @@ QWidget* SettingsWorkspace::buildHotkeysPage() {
     };
     QVector<Item> items;
     for (const HK& hk : hks) {
-        auto* edit = new QKeySequenceEdit(
-            QKeySequence(s.value(QStringLiteral("hotkeys/%1").arg(hk.id)).toString()));
+        auto* edit = new HotkeyBindingEdit(hk.id);
         edit->setFixedWidth(200);
-        const QString id = hk.id;
-        connect(edit, &QKeySequenceEdit::keySequenceChanged, this,
-                [this, id](const QKeySequence& seq) { emit hotkeyChanged(id, seq); });
+        m_hotkeyEdits.append(edit);
         items.append({hk.label, hk.hint, edit});
     }
     col->addWidget(settingsBlock(tr("Global shortcuts"), items));
