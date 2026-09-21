@@ -1,6 +1,7 @@
 #include "ui/workspaces/SettingsWorkspace.h"
 #include "platform/SmartConfig.h"
 #include "ui/SmartConfigDialog.h"
+#include <algorithm>
 #include <cmath>
 #include <QStyle>
 #include <QMessageBox>
@@ -31,6 +32,7 @@
 #include <QScrollArea>
 #include <QSettings>
 #include <QShowEvent>
+#include <QSignalBlocker>
 #include <QStandardItemModel>
 #include <QSpinBox>
 #include <QStackedWidget>
@@ -260,10 +262,22 @@ QWidget* SettingsWorkspace::buildRecordingPage() {
     // item data is the ffmpeg codec id stored in OutputSettings.videoCodec.
     m_encoderCombo = new QComboBox;
     m_encoderCombo->setFixedWidth(260);
-    for (const auto& e : EncoderRegistry::available())
-        m_encoderCombo->addItem(e.display, e.id);
+    for (const auto& [id, label] : EncoderRegistry::choices(OutputSettings::load().videoCodec))
+        m_encoderCombo->addItem(label, id);
     connect(m_encoderCombo, &QComboBox::currentIndexChanged, this,
             [this](int) { updateEncoderDerived(); });
+    // Hardware encoders are offered once they have passed a trial encode on
+    // this machine, which finishes after this page is built. The list is
+    // refilled then, keeping whatever is selected.
+    connect(EncoderRegistry::notifier(), &EncoderRegistryNotifier::hardwareChecked,
+            m_encoderCombo, [combo = m_encoderCombo] {
+        const QString chosen = combo->currentData().toString();
+        const QSignalBlocker quiet(combo);
+        combo->clear();
+        for (const auto& [id, label] : EncoderRegistry::choices(chosen))
+            combo->addItem(label, id);
+        combo->setCurrentIndex(std::max(0, int(combo->findData(chosen))));
+    });
 
     // Rate control is derived from where the media is going rather than chosen
     // here, so it is shown and not editable. This page configures recordings,

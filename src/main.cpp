@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 #include "platform/FrameProfile.h"
+#include "recording/EncoderRegistry.h"
 #include "ui/Theme.h"
 
 #include <QApplication>
@@ -27,6 +28,11 @@ int main(int argc, char* argv[]) {
     if (profile) qInfo("frame profiling on");
 
     Theme::applyTheme(app);
+
+    // Which hardware encoders this machine can actually run. It takes a few
+    // seconds and runs in the background; until it reports, only the
+    // software encoders are offered or recommended.
+    EncoderRegistry::startHardwareCheck(EncoderRegistry::systemProbe());
 
     MainWindow w;
     w.show();

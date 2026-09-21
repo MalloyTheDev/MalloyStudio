@@ -315,8 +315,7 @@ namespace {
 // The label the settings page would show for a codec id, so the health panel
 // names the encoder the same way the rest of the app does.
 QString encoderDisplayName(const QString& codecId) {
-    for (const EncoderRegistry::Encoder& e : EncoderRegistry::available())
-        if (e.id == codecId) return e.display;
+    if (const EncoderRegistry::Encoder* e = EncoderRegistry::find(codecId)) return e->display;
     return codecId;
 }
 }  // namespace

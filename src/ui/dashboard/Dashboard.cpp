@@ -194,6 +194,10 @@ Dashboard::Dashboard(SceneCollection* scenes,
         connect(m_clips, &ClipsRegistry::changed, this, &Dashboard::refreshClips);
     if (m_projects)
         connect(m_projects, &ProjectRegistry::changed, this, &Dashboard::refreshProjects);
+    // Whether the configured encoder runs here is known only once the
+    // hardware check, started at launch, has reported.
+    connect(EncoderRegistry::notifier(), &EncoderRegistryNotifier::hardwareChecked,
+            this, &Dashboard::refreshSystemStatus);
     if (m_audio) {
         connect(m_audio, &AudioController::inputsChanged, this, &Dashboard::rebuildMeterRows);
         connect(m_audio, &AudioController::levelsUpdated, this, &Dashboard::onLevels);
@@ -904,10 +908,10 @@ void Dashboard::refreshSystemStatus() {
 
     // Encoder: whether the configured codec is one this machine can run.
     {
-        const EncoderRegistry::Encoder* encoder = EncoderRegistry::find(out.videoCodec);
         checks.push_back({QStringLiteral("cpu"), tr("Encoder"),
-                          encoder ? encoder->display : tr("%1 (unavailable)").arg(out.videoCodec),
-                          encoder != nullptr});
+                          EncoderRegistry::label(out.videoCodec),
+                          EncoderRegistry::support(out.videoCodec)
+                              == EncoderRegistry::Support::Works});
     }
 
     // Storage: free space on the volume holding the recording folder. Asked

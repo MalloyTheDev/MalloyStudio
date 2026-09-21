@@ -2,7 +2,11 @@
 #include "recording/OutputSettings.h"
 
 #include <QList>
+#include <QObject>
+#include <QPair>
+#include <QSet>
 #include <QString>
+#include <QStringList>
 
 #include <functional>
 
@@ -10,15 +14,22 @@
 // EncoderRegistry — discovers which ffmpeg video encoders are available on
 // this machine and exposes them with display names and arg-builder lambdas.
 //
-// Detection happens once, lazily, by spawning:
-//   ffmpeg -encoders -hide_banner -loglevel error
-// and scanning for known codec IDs. Results are cached for the process lifetime.
+// What ffmpeg was built with is not what this machine can run: the common
+// Windows builds include NVENC, Quick Sync and AMF whatever GPU is installed,
+// and offering one the machine lacks meant a recording or stream that failed
+// the moment it started. So a hardware encoder is offered only once a short
+// trial encode with it has succeeded here. startHardwareCheck() runs that
+// check once per session, on a worker thread, and each trial has a time
+// limit; until it reports, no hardware encoder is offered.
 //
 // Software encoders (libx264, libx265) are always listed — even when ffmpeg
 // isn't on PATH the defaults are included so the dialog is never empty.
-// Hardware encoders (NVENC / QSV / AMF) are appended only when ffmpeg
-// reports them as available.
+// find() knows every encoder this application can drive, verified or not,
+// so a codec saved earlier, or chosen before the check reported, still gets
+// its own arguments rather than libx264's.
 // ---------------------------------------------------------------------------
+class EncoderRegistryNotifier;
+
 class EncoderRegistry {
 public:
     // Where the encoded media is going, which is what decides what the rate
@@ -57,9 +68,67 @@ public:
         QString streamingTune;
     };
 
-    // Returns the cached list of available encoders (lazy-initialised).
+    // Whether this machine can run an encoder. Software encoders always
+    // work; a hardware one is Unchecked until the check has tried it.
+    enum class Support { Unchecked, Works, Unavailable };
+
+    // How the check reaches ffmpeg. Tests replace it, so that no test runs a
+    // trial encode on the hardware of whatever machine it happens to be on.
+    struct Probe {
+        // The encoder ids the ffmpeg build includes; empty without ffmpeg.
+        std::function<QSet<QString>()> builtIn;
+        // Whether a short trial encode with this encoder succeeded. It runs
+        // on the check's worker thread and must bound its own time.
+        std::function<bool(const QString& id)> trial;
+    };
+
+    // The check as shipped: `program -encoders`, then a trial encode of a
+    // fraction of a second of blank test video per candidate. Each run is
+    // stopped, with everything it started, once it outlasts timeoutMs.
+    // `leadingArgs` go before ffmpeg's own, so a test can stand another
+    // program in for ffmpeg.
+    static Probe ffmpegProbe(const QString& program, const QStringList& leadingArgs = {},
+                             int timeoutMs = 10000);
+    // ffmpeg from PATH, found the way the recording pipelines find it.
+    static Probe systemProbe();
+
+    // Runs the check on a worker thread and returns at once. Once per
+    // session: later calls do nothing. Call from the GUI thread; the results
+    // are applied there, and then notifier() emits hardwareChecked().
+    static void startHardwareCheck(Probe probe);
+    static EncoderRegistryNotifier* notifier();
+
+    // The encoders to offer and to recommend: the software ones, and each
+    // hardware one that has passed its trial on this machine. GUI thread. The
+    // list is replaced when the check reports, so do not hold on to it
+    // across the event loop.
     static const QList<Encoder>& available();
 
-    // Convenience: find by id. Returns nullptr if not found.
+    // Any encoder this application can drive, whether or not this machine
+    // can run it. Returns nullptr for an id it does not know. Safe from any
+    // thread: the entries never change.
     static const Encoder* find(const QString& id);
+
+    static Support support(const QString& id);
+
+    // An encoder's name, saying so when this machine cannot run it or it has
+    // not been checked yet.
+    static QString label(const QString& id);
+
+    // What a picker should list, as (id, label): the available encoders,
+    // and `keep` after them when it is not one of those. A saved choice that
+    // is not offered stays visible, marked, rather than being replaced by
+    // the first entry and written back as a different encoder.
+    static QList<QPair<QString, QString>> choices(const QString& keep);
+
+    // Forgets the check and its results, so a test can run it again. A check
+    // still running when this is called reports into nothing.
+    static void resetForTesting();
+};
+
+// Emits on the GUI thread once the hardware check has been applied.
+class EncoderRegistryNotifier : public QObject {
+    Q_OBJECT
+signals:
+    void hardwareChecked();
 };

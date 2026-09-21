@@ -468,10 +468,27 @@ explicit.
 
 ### EncoderRegistry (v6) + per-encoder streaming tune (v7)
 
-`EncoderRegistry::available()` lazily probes `ffmpeg -encoders` once per process
-and returns a list of `Encoder` records: `{id, display, isHardware, buildArgs,
-streamingTune}`. Software encoders (libx264, libx265) are always listed even
-when ffmpeg isn't present, so the Output Settings dialog is never empty.
+`EncoderRegistry::find()` knows every encoder the application can drive and
+returns its `Encoder` record, `{id, display, isHardware, buildArgs,
+streamingTune}`, whether or not this machine can run it, so a saved codec always
+gets its own arguments. `EncoderRegistry::available()` is what is offered and
+recommended: libx264 and libx265 always, even when ffmpeg isn't present, and a
+hardware encoder only once it has passed a trial encode on this machine. The
+common Windows ffmpeg builds include NVENC, Quick Sync and AMF whatever GPU is
+installed, so `ffmpeg -encoders` alone is not evidence of the hardware.
+
+`main()` starts the check with `startHardwareCheck(systemProbe())`. It runs once
+per session on a worker thread: it lists what the ffmpeg build includes, then
+encodes a fifth of a second of blank test video with each candidate
+(`-f lavfi -i color=... -c:v <id> -f null -`), each run bounded by a 10 second
+timeout that ends its process tree. A family whose H.264 encoder fails has its
+HEVC encoder marked unavailable without a trial. Until the check reports only
+the software encoders are offered, so Smart Config never recommends an
+unverified encoder; `notifier()` then emits `hardwareChecked()` on the GUI
+thread and the Settings page and the dashboard refresh. Pickers fill from
+`choices(saved)`, which keeps a saved codec that is not offered, marked as not
+checked yet or not available here, rather than replacing it with the first
+entry. Tests pass their own `Probe`, so no test runs a trial encode.
 
 Each `Encoder::buildArgs` is a
 `std::function<QStringList(const OutputSettings&, EncoderRegistry::Destination)>`

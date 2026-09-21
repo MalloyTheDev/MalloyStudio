@@ -284,6 +284,8 @@ private slots:
     void perSourceAudioReconcileActivates();
     // v6 Sub-A new tests
     void encoderRegistryAlwaysListsLibx264();
+    void hardwareEncodersAreOfferedOnlyOnceTheyHaveRunHere();
+    void aHardwareTrialThatHangsIsStopped();
     void streamSettingsRtmpUrlTemplatesExpandCorrectly();
     // v6 Sub-B/C/D new tests
     void encoderPipelineFactoryDispatchesByTarget();
@@ -1757,6 +1759,144 @@ void MalloyModelTests::encoderRegistryAlwaysListsLibx264() {
     QCOMPARE(added.size(), 4);
     QCOMPARE(added.at(0), QStringLiteral("-maxrate"));
     QCOMPARE(added.at(2), QStringLiteral("-bufsize"));
+}
+
+void MalloyModelTests::hardwareEncodersAreOfferedOnlyOnceTheyHaveRunHere() {
+    EncoderRegistry::resetForTesting();
+    const auto forget = qScopeGuard([] { EncoderRegistry::resetForTesting(); });
+    using Support = EncoderRegistry::Support;
+    const auto offered = [] {
+        QStringList ids;
+        for (const EncoderRegistry::Encoder& e : EncoderRegistry::available()) ids << e.id;
+        return ids;
+    };
+    const QStringList software{QStringLiteral("libx264"), QStringLiteral("libx265")};
+    const QString nvenc = QStringLiteral("h264_nvenc");
+
+    // Nothing checked yet, so nothing offered or recommended on the strength
+    // of ffmpeg having been built with it. The hardware encoders are still
+    // known, so a saved choice keeps its own arguments.
+    QCOMPARE(offered(), software);
+    QVERIFY(EncoderRegistry::find(nvenc) != nullptr);
+    QCOMPARE(EncoderRegistry::support(nvenc), Support::Unchecked);
+    QCOMPARE(SystemProbe::detect().preferredEncoderId(), QStringLiteral("libx264"));
+
+    // A saved choice that is not offered stays in a picker, marked, rather
+    // than being replaced by the first entry and saved back as that.
+    {
+        const auto entries = EncoderRegistry::choices(nvenc);
+        QCOMPARE(entries.size(), 3);
+        QCOMPARE(entries.last().first, nvenc);
+        QCOMPARE(entries.last().second, EncoderRegistry::label(nvenc));
+        QVERIFY(entries.last().second != EncoderRegistry::find(nvenc)->display);
+    }
+
+    // A build with NVENC, Quick Sync and AMF on a machine with only an NVIDIA
+    // GPU, and without HEVC AMF. Every trial waits until the test lets it go.
+    struct Trials {
+        QMutex mutex;
+        QStringList tried;
+        QSet<QThread*> threads;
+        QSemaphore go;
+    };
+    auto trials = std::make_shared<Trials>();
+    EncoderRegistry::Probe probe;
+    probe.builtIn = [] {
+        return QSet<QString>{QStringLiteral("h264_nvenc"), QStringLiteral("hevc_nvenc"),
+                             QStringLiteral("h264_qsv"),   QStringLiteral("hevc_qsv"),
+                             QStringLiteral("h264_amf")};
+    };
+    probe.trial = [trials](const QString& id) {
+        trials->go.tryAcquire(1, 3000);
+        QMutexLocker lock(&trials->mutex);
+        trials->tried << id;
+        trials->threads << QThread::currentThread();
+        return id.endsWith(QStringLiteral("_nvenc"));
+    };
+
+    QSignalSpy checked(EncoderRegistry::notifier(), &EncoderRegistryNotifier::hardwareChecked);
+    QElapsedTimer clock;
+    clock.start();
+    EncoderRegistry::startHardwareCheck(probe);
+    // Starting the check does not wait for it, and nothing changes until it
+    // reports.
+    QVERIFY2(clock.elapsed() < 1000, qPrintable(QString::number(clock.elapsed())));
+    QCOMPARE(checked.size(), 0);
+    QCOMPARE(offered(), software);
+
+    trials->go.release(16);
+    QVERIFY(checked.wait(10000));
+    {
+        QMutexLocker lock(&trials->mutex);
+        // Each candidate the build includes, off the GUI thread, except the
+        // HEVC encoder of a family whose H.264 encoder failed.
+        QCOMPARE(trials->tried, (QStringList{QStringLiteral("h264_nvenc"), QStringLiteral("hevc_nvenc"),
+                                             QStringLiteral("h264_qsv"), QStringLiteral("h264_amf")}));
+        QVERIFY(!trials->threads.contains(QThread::currentThread()));
+    }
+    QCOMPARE(offered(), (software + QStringList{nvenc, QStringLiteral("hevc_nvenc")}));
+    QCOMPARE(EncoderRegistry::support(nvenc), Support::Works);
+    for (const QString id : {QStringLiteral("h264_qsv"), QStringLiteral("hevc_qsv"),
+                             QStringLiteral("h264_amf"), QStringLiteral("hevc_amf")})
+        QVERIFY2(EncoderRegistry::support(id) == Support::Unavailable, qPrintable(id));
+    QCOMPARE(SystemProbe::detect().preferredEncoderId(), nvenc);
+
+    // Offered now, so not listed a second time; one that failed is still
+    // named, and marked, when it is the saved choice.
+    QCOMPARE(EncoderRegistry::choices(nvenc).size(), 4);
+    QCOMPARE(EncoderRegistry::choices(QStringLiteral("h264_qsv")).last().second,
+             EncoderRegistry::label(QStringLiteral("h264_qsv")));
+    QVERIFY(EncoderRegistry::label(QStringLiteral("h264_qsv"))
+            != EncoderRegistry::find(QStringLiteral("h264_qsv"))->display);
+    QCOMPARE(EncoderRegistry::label(nvenc), EncoderRegistry::find(nvenc)->display);
+
+    // Once per session.
+    EncoderRegistry::startHardwareCheck(probe);
+    QVERIFY(!checked.wait(1000));
+    QMutexLocker lock(&trials->mutex);
+    QCOMPARE(trials->tried.size(), 4);
+}
+
+void MalloyModelTests::aHardwareTrialThatHangsIsStopped() {
+    // cmd.exe stands in for ffmpeg, so nothing here encodes on this machine's
+    // hardware: `/c pause & rem` waits on its input for ever, and the rem
+    // swallows the ffmpeg arguments that follow.
+    const QString shell = QStandardPaths::findExecutable(QStringLiteral("cmd"));
+    if (shell.isEmpty()) QSKIP("cmd.exe not found");
+    const auto standIn = [&shell](const QStringList& command, int timeoutMs) {
+        return EncoderRegistry::ffmpegProbe(
+            shell, QStringList{QStringLiteral("/c")} + command
+                       + QStringList{QStringLiteral("&"), QStringLiteral("rem")},
+            timeoutMs);
+    };
+    const quint32 self = quint32(QCoreApplication::applicationPid());
+    const QList<quint32> before = ProcessTree::descendants(self);
+    const auto leftOver = [&] {
+        QStringList names;
+        for (quint32 pid : ProcessTree::descendants(self))
+            if (!before.contains(pid)) names << ProcessTree::imageName(pid);
+        return names;
+    };
+
+    QElapsedTimer clock;
+    clock.start();
+    QVERIFY(!standIn({QStringLiteral("pause")}, 300).trial(QStringLiteral("h264_nvenc")));
+    QVERIFY(standIn({QStringLiteral("pause")}, 300).builtIn().isEmpty());
+    QVERIFY2(clock.elapsed() < 8000, qPrintable(QString::number(clock.elapsed())));
+    QTRY_VERIFY2(leftOver().isEmpty(), qPrintable(leftOver().join(u' ')));
+
+    // A clean exit passes a trial and any other status fails it.
+    QVERIFY(standIn({QStringLiteral("exit"), QStringLiteral("0")}, 10000)
+                .trial(QStringLiteral("h264_nvenc")));
+    QVERIFY(!standIn({QStringLiteral("exit"), QStringLiteral("1")}, 10000)
+                 .trial(QStringLiteral("h264_nvenc")));
+
+    // The build's list is read from what ffmpeg prints.
+    const QSet<QString> listed = standIn({QStringLiteral("echo"), QStringLiteral("V....."),
+                                          QStringLiteral("h264_nvenc"), QStringLiteral("NVIDIA")},
+                                         10000).builtIn();
+    QVERIFY2(listed.contains(QStringLiteral("h264_nvenc")),
+             qPrintable(QStringList(listed.values()).join(u' ')));
 }
 
 void MalloyModelTests::streamSettingsRtmpUrlTemplatesExpandCorrectly() {
@@ -8043,15 +8183,11 @@ void MalloyModelTests::captureStatsAccumulateAcrossSessionChurn() {
 }
 
 void MalloyModelTests::rateControlFollowsWhereTheMediaIsGoing() {
-    // Hardware encoders are only present when this machine has them, so the
-    // test asserts on whichever it finds rather than requiring one.
-    const EncoderRegistry::Encoder* hardware = nullptr;
-    for (const auto& e : EncoderRegistry::available()) {
-        if (e.isHardware) { hardware = &e; break; }
-    }
-    if (!hardware) {
-        QSKIP("no hardware encoder on this machine");
-    }
+    // Found by id: the arguments do not depend on whether this machine can
+    // run the encoder, which is for the hardware check to say.
+    const EncoderRegistry::Encoder* hardware = EncoderRegistry::find(QStringLiteral("h264_nvenc"));
+    QVERIFY(hardware != nullptr);
+    QVERIFY(hardware->isHardware);
 
     OutputSettings s;
     s.bitrateKbps = 4500;
@@ -9493,6 +9629,13 @@ void MalloyModelTests::theOutputDialogHandsBackWhatItWasGiven() {
         in.container = container;
         QCOMPARE(OutputSettingsDialog(in).settings().container, container);
     }
+
+    // An encoder the list does not offer, here a hardware one that has not
+    // been checked on this machine, is kept rather than swapped for the
+    // first entry.
+    EncoderRegistry::resetForTesting();
+    in.videoCodec = QStringLiteral("hevc_nvenc");
+    QCOMPARE(OutputSettingsDialog(in).settings().videoCodec, QStringLiteral("hevc_nvenc"));
 }
 
 void MalloyModelTests::theStreamDialogRefusesAnUnusableCustomUrl() {

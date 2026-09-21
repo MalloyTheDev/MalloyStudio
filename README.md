@@ -23,7 +23,7 @@ and records to MP4/MKV/MOV via **ffmpeg**.
 | Source Filters (Crop, Opacity, Color Correction) | v5 |
 | Per-source microphone input (model layer) | v5 |
 | Encoder / output settings dialog | v5 |
-| Hardware encoders (NVENC / QSV / AMF via EncoderRegistry) | v6 |
+| Hardware encoders (NVENC / QSV / AMF via EncoderRegistry, each offered only after a trial encode succeeds on this machine) | v6 |
 | RTMP streaming (Twitch / YouTube / Custom) | v6 |
 | Replay buffer (in-memory ring + save-on-demand) | v6 |
 | **Microphone & Window Capture in the Add menu** | **v7** |

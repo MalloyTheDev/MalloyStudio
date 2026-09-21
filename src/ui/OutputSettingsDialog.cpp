@@ -103,9 +103,8 @@ OutputSettingsDialog::OutputSettingsDialog(const OutputSettings& s, QWidget* par
 
     // ── Video codec (from EncoderRegistry) ──────────────────────────────────
     m_videoCodec = new QComboBox(this);
-    const auto& encoders = EncoderRegistry::available();
-    for (const auto& enc : encoders)
-        m_videoCodec->addItem(enc.display, enc.id);
+    for (const auto& [id, label] : EncoderRegistry::choices(s.videoCodec))
+        m_videoCodec->addItem(label, id);
     {
         const int idx = m_videoCodec->findData(s.videoCodec);
         m_videoCodec->setCurrentIndex(idx >= 0 ? idx : 0);
