@@ -189,6 +189,12 @@ void SceneCollection::restoreSnapshot(const QJsonObject& snapshot) {
 }
 
 void SceneCollection::pushSnapshotCommand(const QString& text, const QJsonObject& before, const QJsonObject& after) {
+    // A command recorded while an edit session is open takes the session's
+    // changes so far with it, and the session carries on from here. Otherwise
+    // committing the session later would record a step whose "before" predates
+    // this command, and undoing that step would undo this one as well.
+    // commitEditSession closes its session before it comes through here.
+    if (m_editSessionActive) m_editSessionBefore = after;
     if (!m_undoStack || m_restoring || !m_recordUndo || sameJson(before, after)) return;
     m_undoStack->push(new SnapshotCommand(this, text, before, after));
 }
@@ -351,6 +357,14 @@ bool SceneCollection::loadFromJson(const QJsonObject& root, QString* error,
             }
         }
     }
+
+    // An edit session is a change to the state being replaced, measured from a
+    // snapshot of it. Kept open across the replacement, its commit would push
+    // that snapshot as the "before" of a step in whatever is loaded now, and
+    // undoing the step would restore the old state, even another project's,
+    // into this one. Undo and redo end it the same way.
+    m_editSessionActive = false;
+    m_editSessionBefore = {};
 
     const bool oldRecordUndo = m_recordUndo;
     m_recordUndo = false;

@@ -361,6 +361,8 @@ private slots:
     void loadedProjectHoldsItsDevicesUntilAllowed();
     void undoAndRedoKeepADeclinedDeviceHeld();
     void sourceIdsNearTheTopDoNotOverflow();
+    void anEditSessionEndsWithTheStateItBeganIn();
+    void aCommandDuringAnEditSessionKeepsItsOwnUndoStep();
     void fileDevicesAreHeldBeforeTheLoadIsAnnounced();
     void userChosenSharePathSurvivesUndo();
     void everyMicChangeIsAnnouncedStructurally();
@@ -5436,6 +5438,64 @@ void MalloyModelTests::sourceIdsNearTheTopDoNotOverflow() {
     SceneCollection reopened;
     QVERIFY2(reopened.loadFromJson(scenes.toJson(), &error), qPrintable(error));
     QCOMPARE(reopened.sources().size(), 3);
+}
+
+void MalloyModelTests::anEditSessionEndsWithTheStateItBeganIn() {
+    SceneCollection scenes;
+    QUndoStack undo;
+    scenes.setUndoStack(&undo);
+    QString error;
+    QVERIFY(scenes.loadFromJson(projectWithSource(1), &error));
+    scenes.selectCurrentItemAt(0);
+    undo.clear();
+
+    // A slider moved with the wheel opens a session that nothing commits.
+    scenes.beginEditSession();
+    scenes.setCurrentSourceText(0, QStringLiteral("changed"), false);
+
+    // Another project is opened. The session belonged to the old one.
+    QJsonObject other = projectWithSource(7);
+    QVERIFY(scenes.loadFromJson(other, &error, SceneCollection::LoadOrigin::File));
+    QVERIFY(!scenes.editSessionActive());
+
+    // A drag in the new project begins and commits its own edit. Before, the
+    // begin was a no-op on the stale session, so the step recorded carried the
+    // old project as its "before", and undoing it brought that project back.
+    scenes.selectCurrentItemAt(0);
+    scenes.beginEditSession();
+    scenes.setCurrentItemTransform(0, QRectF(10, 10, 200, 100), false);
+    scenes.commitEditSession(QStringLiteral("Transform Layer"));
+    QCOMPARE(undo.count(), 1);
+    undo.undo();
+    QCOMPARE(scenes.sources().size(), 1);
+    QCOMPARE(scenes.sources().first()->id(), 7);
+
+    // Undo and redo end a session too.
+    scenes.beginEditSession();
+    undo.redo();
+    QVERIFY(!scenes.editSessionActive());
+}
+
+void MalloyModelTests::aCommandDuringAnEditSessionKeepsItsOwnUndoStep() {
+    SceneCollection scenes;
+    QUndoStack undo;
+    scenes.setUndoStack(&undo);
+    QString error;
+    QVERIFY(scenes.loadFromJson(projectWithSource(1), &error));
+    scenes.selectCurrentItemAt(0);
+    undo.clear();
+
+    scenes.beginEditSession();
+    scenes.setCurrentSourceText(0, QStringLiteral("a"), false);
+    // A discrete, recorded command lands while the session is open.
+    scenes.setCurrentItemVisible(0, false);
+    scenes.setCurrentSourceText(0, QStringLiteral("b"), false);
+    scenes.commitEditSession(QStringLiteral("Edit Text"));
+
+    // Undoing the text edit takes back the text, not the hiding as well.
+    undo.undo();
+    QVERIFY(!scenes.currentScene()->itemAt(0)->isVisible());
+    QCOMPARE(scenes.sources().first()->text(), QStringLiteral("a"));
 }
 
 QTEST_MAIN(MalloyModelTests)

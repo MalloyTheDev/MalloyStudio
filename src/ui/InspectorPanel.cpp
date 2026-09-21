@@ -403,9 +403,16 @@ InspectorPanel::InspectorPanel(SceneCollection* scenes,
     }
 
     // Opacity slider
+    // A drag is one edit, committed on release. The wheel, the keyboard and a
+    // click in the groove move a slider with no press or release at all, so
+    // each such step is committed as it happens; waiting for a release left
+    // the edit session open indefinitely.
     connect(m_opacitySlider, &QSlider::valueChanged, this, [this](int v) {
         m_opacityLabel->setText(QStringLiteral("%1%").arg(v));
-        if (!m_updating) applyCurrentFilterProps();
+        if (m_updating) return;
+        applyCurrentFilterProps();
+        if (!m_opacitySlider->isSliderDown())
+            m_scenes->commitEditSession(QStringLiteral("Edit Opacity Filter"));
     });
     connect(m_opacitySlider, &QSlider::sliderReleased, this, [this] {
         if (!m_updating) m_scenes->commitEditSession(QStringLiteral("Edit Opacity Filter"));
@@ -415,8 +422,10 @@ InspectorPanel::InspectorPanel(SceneCollection* scenes,
     auto connectCCSlider = [&](QSlider* slider, QLabel* label) {
         connect(slider, &QSlider::valueChanged, this, [this, slider, label](int v) {
             label->setText(QStringLiteral("%1").arg(v / 100.0, 0, 'f', 2));
-            Q_UNUSED(slider);
-            if (!m_updating) applyCurrentFilterProps();
+            if (m_updating) return;
+            applyCurrentFilterProps();
+            if (!slider->isSliderDown())
+                m_scenes->commitEditSession(QStringLiteral("Edit Color Correction"));
         });
         connect(slider, &QSlider::sliderReleased, this, [this] {
             if (!m_updating) m_scenes->commitEditSession(QStringLiteral("Edit Color Correction"));
@@ -446,8 +455,10 @@ InspectorPanel::InspectorPanel(SceneCollection* scenes,
     auto connectCKSlider = [&](QSlider* slider, QLabel* label, const QString& suffix) {
         connect(slider, &QSlider::valueChanged, this, [this, slider, label, suffix](int v) {
             label->setText(QStringLiteral("%1%2").arg(v).arg(suffix));
-            Q_UNUSED(slider);
-            if (!m_updating) applyCurrentFilterProps();
+            if (m_updating) return;
+            applyCurrentFilterProps();
+            if (!slider->isSliderDown())
+                m_scenes->commitEditSession(QStringLiteral("Edit Chroma Key"));
         });
         connect(slider, &QSlider::sliderReleased, this, [this] {
             if (!m_updating) m_scenes->commitEditSession(QStringLiteral("Edit Chroma Key"));
@@ -459,7 +470,10 @@ InspectorPanel::InspectorPanel(SceneCollection* scenes,
     // Blur
     connect(m_blurRadiusSlider, &QSlider::valueChanged, this, [this](int v) {
         m_blurRadiusLabel->setText(QStringLiteral("%1 px").arg(v));
-        if (!m_updating) applyCurrentFilterProps();
+        if (m_updating) return;
+        applyCurrentFilterProps();
+        if (!m_blurRadiusSlider->isSliderDown())
+            m_scenes->commitEditSession(QStringLiteral("Edit Blur"));
     });
     connect(m_blurRadiusSlider, &QSlider::sliderReleased, this, [this] {
         if (!m_updating) m_scenes->commitEditSession(QStringLiteral("Edit Blur"));
