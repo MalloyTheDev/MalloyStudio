@@ -54,6 +54,14 @@ public:
     void setRecordingActive(bool active);
     void setStreamingActive(bool active);
 
+    // The clock that content moving on its own is recomposed on, which is the
+    // output frame rate, so a recording gets a new picture for each frame it
+    // encodes. Only a scroll filter with a speed moves on its own today.
+    void setOutputFrameRate(int fps);
+    // Whether that clock is running, because the last composition drew such
+    // content and somebody is consuming frames.
+    bool animatingContent() const;
+
     // Whether a composition should happen, given who is watching.
     //
     // Pure so the rule can be tested without a window, because the rule is the
@@ -188,6 +196,17 @@ private:
 
     // Only the program pane buffers replays; see setReplayBufferSeconds.
     bool replayActive() const { return m_role == Role::Program && m_replaySeconds > 0; }
+
+    // A scroll filter advances only when the scene is composed, and nothing
+    // time driven marked the scene changed, so a ticker on an otherwise still
+    // scene held one picture until something unrelated recomposed it. While
+    // the last composition drew moving content this timer marks the content
+    // changed at the output rate. See #68.
+    void updateAnimation(bool animated);
+    QTimer* m_animationTimer = nullptr;
+    int     m_outputFps = 30;
+    // Set by drawItem while composing, when it draws content that moves.
+    bool    m_drewAnimatedContent = false;
 
     bool m_recordingActive = false;
     bool m_streamingActive = false;

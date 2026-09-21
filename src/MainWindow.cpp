@@ -104,6 +104,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // Apply persisted replay buffer duration to both live sources at startup.
     m_preview->setReplayBufferSeconds(m_outputSettings.replayBufferSeconds);
     m_audio->setReplayBufferSeconds(m_outputSettings.replayBufferSeconds);
+    // Content that moves on its own is recomposed at the rate the output
+    // encodes, in both panes.
+    m_preview->setOutputFrameRate(m_outputSettings.fps);
+    m_stagePreview->setOutputFrameRate(m_outputSettings.fps);
 
     // One line a second describing the stages of the frame path, for as
     // long as profiling is on. It lives here rather than in the recording
@@ -270,6 +274,8 @@ void MainWindow::setupUi() {
         const int secs = m_outputSettings.replayBufferSeconds;
         m_preview->setReplayBufferSeconds(secs);
         m_audio->setReplayBufferSeconds(secs);
+        m_preview->setOutputFrameRate(m_outputSettings.fps);
+        m_stagePreview->setOutputFrameRate(m_outputSettings.fps);
         flash(tr("Recording settings applied"), 2500);
     });
     // Settings ▸ Audio drives the live master-bus limiter.
@@ -411,6 +417,8 @@ void MainWindow::setupMenus() {
             const int secs = m_outputSettings.replayBufferSeconds;
             m_preview->setReplayBufferSeconds(secs);
             m_audio->setReplayBufferSeconds(secs);
+            m_preview->setOutputFrameRate(m_outputSettings.fps);
+            m_stagePreview->setOutputFrameRate(m_outputSettings.fps);
         }
     });
 

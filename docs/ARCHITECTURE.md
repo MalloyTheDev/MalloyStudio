@@ -348,6 +348,11 @@ scene, from the last item to item 0, so item 0 is drawn last and is on top. Coor
   non-Opacity filters in chain order, accumulates Opacity values, calls
   `painter.setOpacity(accumulated)`, draws the image
 
+A Scroll filter with a speed moves without any other input, so while a composition
+draws one, a timer marks the content changed at the output frame rate
+(`setOutputFrameRate()`) and the scene keeps being recomposed. The timer stops once
+nothing drawn moves, or at its next tick when nothing is consuming frames.
+
 **Frame caching** — two `QHash` caches keyed by `"adapter:output"` and `HWND` hold
 the most recent frames from each capture worker. Protected by `m_frameMutex`.
 `cachedComposedFrame()` returns the last fully-painted canvas (protected by `m_composedMutex`);

@@ -1,6 +1,7 @@
 #include "PreviewWidget.h"
 #include "platform/FrameProfile.h"
 
+#include <algorithm>
 #include <optional>
 #include "model/Canvas.h"
 #include "model/FilterEffect.h"
@@ -23,6 +24,12 @@
 
 namespace {
 constexpr qreal HandleCanvasSize = 20.0;
+
+// Rounded down, so the picture changes at least as often as the output
+// samples it rather than now and then being sampled twice.
+int animationIntervalMs(int fps) {
+    return std::max(1, 1000 / std::max(1, fps));
+}
 }
 
 PreviewWidget::PreviewWidget(SceneCollection* scenes, Role role, QWidget* parent)
@@ -266,6 +273,41 @@ void PreviewWidget::setStreamingActive(bool active) {
     if (active) scheduleComposition();
 }
 
+void PreviewWidget::setOutputFrameRate(int fps) {
+    m_outputFps = std::max(1, fps);
+    if (m_animationTimer) m_animationTimer->setInterval(animationIntervalMs(m_outputFps));
+}
+
+bool PreviewWidget::animatingContent() const {
+    return m_animationTimer && m_animationTimer->isActive();
+}
+
+void PreviewWidget::updateAnimation(bool animated) {
+    if (!animated) {
+        if (m_animationTimer) m_animationTimer->stop();
+        return;
+    }
+    if (!m_animationTimer) {
+        m_animationTimer = new QTimer(this);
+        // A coarse timer may run 5% slow, and each late tick is a frame the
+        // encoder repeats.
+        m_animationTimer->setTimerType(Qt::PreciseTimer);
+        m_animationTimer->setInterval(animationIntervalMs(m_outputFps));
+        connect(m_animationTimer, &QTimer::timeout, this, [this] {
+            markContentChanged();
+            // With nobody consuming frames nothing is composed, so ticking
+            // would be work for no one. The content is already marked changed,
+            // so the composition scheduled when a consumer returns draws the
+            // moving content again and restarts the clock from there.
+            if (!consumersPresent()) m_animationTimer->stop();
+        });
+    }
+    // Not restarted when already running: every composition comes through
+    // here, and captured frames arriving faster than the interval would
+    // otherwise keep pushing the next tick back.
+    if (!m_animationTimer->isActive()) m_animationTimer->start();
+}
+
 bool PreviewWidget::consumersPresent() const {
     // The replay buffer counts. It samples the composed frame five times a
     // second whether or not the window is on screen, and a replay buffer is
@@ -332,6 +374,7 @@ void PreviewWidget::composeNow() {
     // be, because this is what the recorder consumes.
     QImage composed(MalloyCanvas::Width, MalloyCanvas::Height, QImage::Format_ARGB32_Premultiplied);
     composed.fill(QColor(0, 0, 0));
+    m_drewAnimatedContent = false;
     if (scene) {
         QPainter p(&composed);
         p.setRenderHint(QPainter::SmoothPixmapTransform);
@@ -349,6 +392,7 @@ void PreviewWidget::composeNow() {
             p.setOpacity(1.0);
         }
     }
+    updateAnimation(m_drewAnimatedContent);
 
     QMutexLocker lock(&m_composedMutex);
     m_composedFrame = composed;
@@ -595,8 +639,12 @@ void PreviewWidget::drawItem(QPainter& painter, SceneItem* item, Source* source,
         for (FilterEffect* f : filters) {
             if (!f->isEnabled()) continue;
             if (f->type() == FilterEffect::Type::Opacity) continue;
-            if (f->type() == FilterEffect::Type::Scroll)
-                static_cast<const ScrollFilter*>(f)->advance(nowUs);
+            if (f->type() == FilterEffect::Type::Scroll) {
+                const auto* scroll = static_cast<const ScrollFilter*>(f);
+                scroll->advance(nowUs);
+                if (scroll->speedX() != 0.0f || scroll->speedY() != 0.0f)
+                    m_drewAnimatedContent = true;
+            }
             f->apply(img);
         }
 

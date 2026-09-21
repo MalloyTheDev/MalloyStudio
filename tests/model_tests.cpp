@@ -507,6 +507,9 @@ private slots:
     // Composition happens because somebody consumes it, never because a
     // widget was painted. The rule that decides is this one.
     void compositionFollowsConsumersNotPaintEvents();
+    // A layer that moves on its own keeps a still scene composing at the
+    // output rate, and stops doing so once nothing moves.
+    void aScrollingLayerMovesWithNothingElseChanging();
     // rawvideo cannot express a stride, so a padded frame has to be sent a
     // row at a time rather than as one block.
     void rawVideoDeclarationCoversSizeNotOnlyFormat();
@@ -6811,6 +6814,59 @@ void MalloyModelTests::compositionFollowsConsumersNotPaintEvents() {
     // watching. This is what keeps a repaint from being mistaken for new media.
     QVERIFY(!PreviewWidget::compositionRequired(true, true, true, /*contentAdvanced=*/false));
     QVERIFY(!PreviewWidget::compositionRequired(false, false, true, false));
+}
+
+void MalloyModelTests::aScrollingLayerMovesWithNothingElseChanging() {
+    // A "starting soon" scene: one text layer and no capture source, so no
+    // frame ever arrives and nothing else ever changes it.
+    SceneCollection scenes;
+    scenes.ensureCurrentScene();
+    // Never shown: recording is what makes it compose.
+    PreviewWidget preview(&scenes, PreviewWidget::Role::Program);
+    preview.setOutputFrameRate(50);
+    preview.setRecordingActive(true);
+    SceneItem* ticker = scenes.addNewSourceToCurrent(QStringLiteral("Ticker"), Source::Type::Text,
+                                                     QStringLiteral("Starting soon"));
+    QVERIFY(ticker != nullptr);
+    QCoreApplication::processEvents();
+
+    // Still content is composed once and then left alone, and a scroll filter
+    // with no speed is still content.
+    auto* scroll = new ScrollFilter;
+    ticker->addFilter(scroll);
+    QCoreApplication::processEvents();
+    QVERIFY(!preview.animatingContent());
+    const quint64 still = preview.compositionSequence();
+    QTest::qWait(200);
+    QCOMPARE(preview.compositionSequence(), still);
+
+    // Given a speed, the ticker keeps the composition moving with no other
+    // input. It used to be composed once and held until an unrelated change.
+    scroll->setSpeedX(100.0f);
+    QCoreApplication::processEvents();
+    const quint64 first = preview.compositionSequence();
+    const QImage firstPicture = preview.cachedComposedFrame();
+    QTRY_VERIFY_WITH_TIMEOUT(preview.compositionSequence() >= first + 5, 2000);
+    QVERIFY2(preview.cachedComposedFrame() != firstPicture, "the text must have moved");
+    QVERIFY(preview.animatingContent());
+
+    // With nobody consuming frames the clock stops at its next tick, and it
+    // starts again when a consumer comes back.
+    preview.setRecordingActive(false);
+    QTRY_VERIFY_WITH_TIMEOUT(!preview.animatingContent(), 2000);
+    preview.setRecordingActive(true);
+    QCoreApplication::processEvents();
+    QVERIFY(preview.animatingContent());
+    const quint64 resumed = preview.compositionSequence();
+    QTRY_VERIFY_WITH_TIMEOUT(preview.compositionSequence() >= resumed + 3, 2000);
+
+    // Once the filter goes, nothing moves and nothing is recomposed.
+    ticker->removeFilterAt(0);
+    QCoreApplication::processEvents();
+    QVERIFY(!preview.animatingContent());
+    const quint64 settled = preview.compositionSequence();
+    QTest::qWait(300);
+    QCOMPARE(preview.compositionSequence(), settled);
 }
 
 void MalloyModelTests::rawVideoDeclarationCoversSizeNotOnlyFormat() {
