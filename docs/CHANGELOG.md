@@ -77,6 +77,8 @@ finding again.
   audio ran ahead of the picture (cdac802).
 - Sound dropped because ffmpeg stopped reading is logged when it starts and totalled as
   AUDIO DROP in the run summary (2874669).
+- A stream's repeats of an unchanged picture are counted as REPEAT, with a file's still
+  floor, rather than as composed pictures.
 - The video clock ticks at the configured rate. A timer repeating in whole milliseconds
   ran 60 fps at 58.8 Hz and 120 at 125 Hz, which a stream's ingest saw as duplicated or
   dropped frames.

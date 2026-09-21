@@ -269,7 +269,7 @@ public:
     // late frame is repeated rather than left out. This keeps that property at
     // a tenth of a second rather than every frame, because each frame here
     // crosses a pipe at eight megabytes rather than staying on the GPU. The
-    // repeats are counted (STILL), not reported as composed pictures.
+    // repeats are counted (REPEAT), not reported as composed pictures.
     static constexpr int kStillFloorMs = 100;
 
 public:
@@ -341,9 +341,10 @@ private:
     // look like it was shedding nine frames in ten.
     int m_idleTicks = 0;
 
-    // Frames written only to keep a file's video moving through a still
-    // scene; see kStillFloorMs. Not composed pictures, so not ENC ACCEPT.
-    int m_stillRepeats = 0;
+    // Frames that repeat the picture already written (REPEAT): a file's still
+    // floor (see kStillFloorMs), or a stream holding its rate. Not composed
+    // pictures, so not ENC ACCEPT.
+    int m_repeats = 0;
     // The sink's clock: when the run started, how many ticks it has had, and
     // how many it missed by arriving more than a period late (TICK LATE).
     QElapsedTimer m_videoClock;

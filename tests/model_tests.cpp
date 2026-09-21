@@ -224,6 +224,7 @@ private slots:
     void stoppingKeepsTheSoundAlreadyHandedOver();
     void soundTheEncoderNeverTookIsReported();
     void theSinkTicksAtItsConfiguredRate();
+    void aStreamsRepeatsAreNotCountedAsPictures();
     void soundAndPictureStayTogether();
     void killingAProcessEndsWhatItStarted();
     void audioControllerHasDefaultLoopbackInput();
@@ -1198,6 +1199,33 @@ void MalloyModelTests::theSinkTicksAtItsConfiguredRate() {
         QVERIFY2(std::abs(rate - fps) / fps < 0.012,
                  qPrintable(QStringLiteral("%1 fps ticked at %2 Hz").arg(fps).arg(rate)));
     }
+}
+
+void MalloyModelTests::aStreamsRepeatsAreNotCountedAsPictures() {
+    RecorderPipeline pipeline;
+    if (!pipeline.ffmpegAvailable()) QSKIP("Real encoder lifecycle requires ffmpeg in PATH");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    StillTestFrames frames;
+    RecordingTestAudio audio;
+    EncoderPipeline::Target target;
+    target.output = recordingTestSettings();
+    // A stream's cadence, written to a file so no ingest is needed: the
+    // cadence follows the target's kind, and the recorder writes a file
+    // whatever the kind says.
+    target.kind = EncoderPipeline::Target::Kind::Rtmp;
+    target.destination = dir.filePath(QStringLiteral("stream.mp4"));
+    QString error;
+
+    // One picture, repeated at the stream's rate for two seconds. It goes out
+    // as the pipe's priming frame, which PIPE WRITE counts and ENC ACCEPT
+    // does not, so nothing is composed after it and every later write is a
+    // repeat. Streams used to count each repeat as a composed picture.
+    QTest::ignoreMessage(QtInfoMsg, QRegularExpression(QStringLiteral(
+        "COMPOSED 0  ENC ACCEPT 0 .* REPEAT [1-9][0-9]+ ")));
+    QVERIFY2(pipeline.start(target, &frames, &audio, &error), qPrintable(error));
+    QTest::qWait(2000);
+    pipeline.stop();
 }
 
 void MalloyModelTests::soundAndPictureStayTogether() {

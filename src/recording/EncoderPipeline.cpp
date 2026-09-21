@@ -746,7 +746,7 @@ bool EncoderPipeline::start(const Target& target,
     m_composedFramesAccepted = 0;
     m_cfrDuplicates = 0;
     m_idleTicks = 0;
-    m_stillRepeats = 0;
+    m_repeats = 0;
     m_audioBytesDropped = 0;
     m_lastVideoWrite.invalidate();
     m_longestDropBurstMs = 0;
@@ -1027,7 +1027,8 @@ void EncoderPipeline::stop() {
     // against accepted is what this application refused to hand over, and CFR
     // DUP is what the output side invented to hold a cadence. Idle ticks are
     // timer opportunities where nothing new existed, and are not loss of any
-    // kind. TICK LATE is ticks the sink's clock missed because this thread was
+    // kind. REPEAT is the picture already written, written again, for a
+    // file's still floor or a stream's rate. TICK LATE is ticks the sink's clock missed because this thread was
     // busy for more than a frame period. AUDIO DROP is sound discarded because
     // ffmpeg stopped reading for longer than the audio queue holds, and is
     // time missing from the sound.
@@ -1044,13 +1045,13 @@ void EncoderPipeline::stop() {
     constexpr double kPcmBytesPerSecond = 48000.0 * 2 * 2;
     qInfo("capture stages: SOURCE RX %d  CAP DROP %d  COMPOSED %d  ENC ACCEPT %d  "
           "PIPE WRITE %d  ENC DROP %d  ENC DROP BURST MAX %.2f s  "
-          "CFR DUP %d  IDLE %d  STILL %d  TICK LATE %d  AUDIO DROP %.2f s",
+          "CFR DUP %d  IDLE %d  REPEAT %d  TICK LATE %d  AUDIO DROP %.2f s",
           sourceNow.framesProduced - m_sourceStatsAtStart.framesProduced,
           sourceNow.framesDropped  - m_sourceStatsAtStart.framesDropped,
           m_composedFramesAccepted + m_composedFramesRejected,
           m_composedFramesAccepted, piped, m_composedFramesRejected,
           double(m_longestDropBurstMs) / 1000.0,
-          m_cfrDuplicates, m_idleTicks, m_stillRepeats, m_lateTicks,
+          m_cfrDuplicates, m_idleTicks, m_repeats, m_lateTicks,
           double(m_audioBytesDropped) / kPcmBytesPerSecond);
 
     if (FrameProfile::enabled())
@@ -1206,7 +1207,7 @@ void EncoderPipeline::onTickVideo() {
     //
     // A stream skips this test: its ingest expects frames at the negotiated
     // rate whether or not anything moved, so the latest picture is repeated.
-    bool stillRepeat = false;
+    bool repeat = false;
     {
         // The timer only fires when this sink's clock says a frame is due, so
         // reaching here is what "due" means today.
@@ -1219,9 +1220,11 @@ void EncoderPipeline::onTickVideo() {
             ++m_idleTicks;
             return;
         }
-        stillRepeat = m_cadence == Cadence::FollowSource
-                      && seq != TimedFrameSource::kUnsequenced
-                      && seq == m_lastSentSequence;
+        // The picture already written, written again: a file's still floor,
+        // or a stream holding its rate. Either way it is not a composed
+        // picture. Streams used to count theirs as ENC ACCEPT, so a stream of
+        // a still scene reported composing sixty pictures a second.
+        repeat = seq != TimedFrameSource::kUnsequenced && seq == m_lastSentSequence;
         m_lastSentSequence = seq;
     }
 
@@ -1263,7 +1266,7 @@ void EncoderPipeline::onTickVideo() {
     if (m_videoWriter->queuedFrames() >= VideoPipeWriter::kMaxQueuedFrames) {
         // A repeat that finds no room is not lost media: the transport is
         // busy with pictures, which keeps the video moving by itself.
-        if (!stillRepeat) {
+        if (!repeat) {
             ++m_composedFramesRejected;
             noteFrameRejected();
         }
@@ -1299,7 +1302,7 @@ void EncoderPipeline::onTickVideo() {
     {
         FrameProfile::Scoped timing(FrameProfile::Stage::EncoderWrite);
         if (!m_videoWriter->trySubmit(std::move(out))) {
-            if (!stillRepeat) {
+            if (!repeat) {
                 ++m_composedFramesRejected;
                 noteFrameRejected();
             }
@@ -1307,8 +1310,8 @@ void EncoderPipeline::onTickVideo() {
         }
     }
     m_lastVideoWrite.start();
-    if (stillRepeat) {
-        ++m_stillRepeats;
+    if (repeat) {
+        ++m_repeats;
         return;
     }
     ++m_composedFramesAccepted;
