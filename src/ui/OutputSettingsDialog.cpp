@@ -173,6 +173,9 @@ OutputSettingsDialog::OutputSettingsDialog(const OutputSettings& s, QWidget* par
     m_container = new QComboBox(this);
     m_container->addItem(QStringLiteral("MP4  (.mp4)"), QStringLiteral("mp4"));
     m_container->addItem(QStringLiteral("Matroska (.mkv)"), QStringLiteral("mkv"));
+    // Offered by Settings as well. Without it a MOV showed here as MP4 and
+    // was written back as MP4 when this dialog was accepted.
+    m_container->addItem(QStringLiteral("QuickTime (.mov)"), QStringLiteral("mov"));
     {
         const int idx = m_container->findData(s.container);
         m_container->setCurrentIndex(idx >= 0 ? idx : 0);

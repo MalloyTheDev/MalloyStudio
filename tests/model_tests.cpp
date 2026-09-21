@@ -6562,6 +6562,13 @@ void MalloyModelTests::theOutputDialogHandsBackWhatItWasGiven() {
     const OutputSettings odd = OutputSettingsDialog(in).settings();
     QCOMPARE(odd.width % 2, 0);
     QCOMPARE(odd.height % 2, 0);
+
+    // Every container Settings offers comes back as chosen: a MOV the box
+    // could not show was handed back as MP4.
+    for (const QString& container : {QStringLiteral("mkv"), QStringLiteral("mp4"), QStringLiteral("mov")}) {
+        in.container = container;
+        QCOMPARE(OutputSettingsDialog(in).settings().container, container);
+    }
 }
 
 void MalloyModelTests::audioFromARemovedInputIsNotKept() {

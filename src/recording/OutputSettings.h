@@ -104,30 +104,39 @@ struct OutputSettings {
         };
         if (!codecs.contains(o.videoCodec)) o.videoCodec = QStringLiteral("libx264");
 
-        QStringList presets;
-        QString defaultPreset;
+        // Only the software encoders hand the preset to ffmpeg. The hardware
+        // builders in EncoderRegistry choose their own (NVENC runs p4) or pass
+        // none, so a hardware codec keeps the software preset already stored.
+        // Replacing it bought nothing, and the replacement was saved back, so
+        // switching to a hardware encoder and back lost the user's preset.
+        QStringList presets{QStringLiteral("ultrafast"), QStringLiteral("superfast"),
+                            QStringLiteral("veryfast"),  QStringLiteral("faster"),
+                            QStringLiteral("fast"),      QStringLiteral("medium"),
+                            QStringLiteral("slow"),      QStringLiteral("slower"),
+                            QStringLiteral("veryslow")};
+        QString defaultPreset = QStringLiteral("veryfast");
         if (o.videoCodec.endsWith(QStringLiteral("_nvenc"))) {
-            presets = {QStringLiteral("p1"), QStringLiteral("p2"), QStringLiteral("p3"),
-                       QStringLiteral("p4"), QStringLiteral("p5"), QStringLiteral("p6"),
-                       QStringLiteral("p7")};
+            presets << QStringLiteral("p1") << QStringLiteral("p2") << QStringLiteral("p3")
+                    << QStringLiteral("p4") << QStringLiteral("p5") << QStringLiteral("p6")
+                    << QStringLiteral("p7");
             defaultPreset = QStringLiteral("p4");
         } else if (o.videoCodec.endsWith(QStringLiteral("_amf"))) {
-            presets = {QStringLiteral("speed"), QStringLiteral("balanced"), QStringLiteral("quality")};
+            presets << QStringLiteral("speed") << QStringLiteral("balanced") << QStringLiteral("quality");
             defaultPreset = QStringLiteral("balanced");
-        } else {
-            presets = {QStringLiteral("veryfast"), QStringLiteral("faster"),
-                       QStringLiteral("fast"), QStringLiteral("medium"),
-                       QStringLiteral("slow"), QStringLiteral("slower"), QStringLiteral("veryslow")};
-            defaultPreset = o.videoCodec.endsWith(QStringLiteral("_qsv"))
-                ? QStringLiteral("medium") : QStringLiteral("veryfast");
-            if (!o.videoCodec.endsWith(QStringLiteral("_qsv")))
-                presets << QStringLiteral("ultrafast") << QStringLiteral("superfast");
+        } else if (o.videoCodec.endsWith(QStringLiteral("_qsv"))) {
+            defaultPreset = QStringLiteral("medium");
         }
         if (!presets.contains(o.preset)) o.preset = defaultPreset;
         const QStringList audioCodecs{QStringLiteral("aac"), QStringLiteral("libopus"), QStringLiteral("opus")};
         if (!audioCodecs.contains(o.audioCodec)) o.audioCodec = QStringLiteral("aac");
-        if (o.container != QLatin1String("mp4") && o.container != QLatin1String("mkv"))
-            o.container = QStringLiteral("mp4");
+        // Every container Settings offers. The muxer follows the output file's
+        // extension in both the recording and the render path.
+        const QStringList containers{QStringLiteral("mp4"), QStringLiteral("mkv"), QStringLiteral("mov")};
+        if (!containers.contains(o.container)) o.container = QStringLiteral("mp4");
+        // ffmpeg muxes Opus into MP4 and Matroska but refuses it in MOV ("opus
+        // only supported in MP4"), so the file would never be written. MOV is
+        // the narrower, deliberate choice; its sound is AAC.
+        if (o.container == QLatin1String("mov")) o.audioCodec = QStringLiteral("aac");
         return o;
     }
 

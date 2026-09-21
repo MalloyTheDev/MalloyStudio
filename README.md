@@ -2,7 +2,7 @@
 
 A C++ OBS-style streaming studio built on **Qt 6** and the Windows **DXGI / WASAPI** capture stack.
 It composites multiple source layers into a 1920×1080 canvas, lets you add visual filters per layer,
-and records to MP4/MKV via **ffmpeg**.
+and records to MP4/MKV/MOV via **ffmpeg**.
 
 ---
 

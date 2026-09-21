@@ -303,7 +303,8 @@ QWidget* SettingsWorkspace::buildRecordingPage() {
                                 "A stream holds the bitrate its service expects."), m_rateCombo},
         {tr("Quality"), tr("Lower is better quality and a larger file. 18 to 23 is typical."),
          m_crfEdit},
-        {tr("Container"), tr("MKV survives crashes; MP4 is more compatible."), m_containerCombo},
+        {tr("Container"), tr("MKV survives crashes; MP4 is more compatible. MOV records its "
+                             "sound as AAC."), m_containerCombo},
     }));
 
     col->addWidget(settingsBlock(tr("Resolution & Framerate"), {

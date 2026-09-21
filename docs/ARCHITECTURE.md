@@ -248,6 +248,9 @@ bounded, and a value that is not a number is replaced with a default.
 Header-only POD + QSettings load/save. Not per-project: stored under
 `HKCU\Software\MalloyStudio\MalloyStudio\output\*`. `normalized()` bounds every field
 (even dimensions, 1 to 1000 fps, and so on), and every writer is expected to go through it.
+It replaces only values that are out of range: the container is MP4, MKV or MOV (a MOV
+records AAC, because ffmpeg will not put Opus in MOV), and a software preset is kept while
+a hardware encoder is selected, since only the software encoders pass it to ffmpeg.
 
 ### `MediaController`
 

@@ -19,7 +19,9 @@ private slots:
     void malformedNumbersUseDefaults();
     void codecPresets_data();
     void codecPresets();
+    void softwarePresetSurvivesAHardwareEncoder();
     void unknownOutputStrings();
+    void everyOfferedContainerIsKept();
     void jsonUsesTheSameContract();
     void customFrameRatesSurvive();
     void streamingValuesAreBounded();
@@ -131,10 +133,13 @@ void OutputSettingsTests::codecPresets_data() {
     row("x265-kept", "libx265", "veryslow", "libx265", "veryslow");
     row("x264-wrong-family", "libx264", "p5", "libx264", "veryfast");
     row("nvenc-kept", "h264_nvenc", "p5", "h264_nvenc", "p5");
-    row("nvenc-default", "hevc_nvenc", "veryfast", "hevc_nvenc", "p4");
+    row("nvenc-keeps-software", "hevc_nvenc", "veryfast", "hevc_nvenc", "veryfast");
+    row("nvenc-default", "hevc_nvenc", "bad", "hevc_nvenc", "p4");
     row("qsv-kept", "h264_qsv", "slow", "h264_qsv", "slow");
-    row("qsv-default", "hevc_qsv", "ultrafast", "hevc_qsv", "medium");
+    row("qsv-keeps-software", "hevc_qsv", "ultrafast", "hevc_qsv", "ultrafast");
+    row("qsv-default", "hevc_qsv", "p5", "hevc_qsv", "medium");
     row("amf-kept", "h264_amf", "quality", "h264_amf", "quality");
+    row("amf-keeps-software", "h264_amf", "superfast", "h264_amf", "superfast");
     row("amf-default", "hevc_amf", "bad", "hevc_amf", "balanced");
     row("unknown", "unknown_encoder", "p5", "libx264", "veryfast");
     row("option-like", "-some-option", "-some-option", "libx264", "veryfast");
@@ -159,6 +164,38 @@ void OutputSettingsTests::codecPresets() {
     QCOMPARE(json.preset, expectedPreset);
 }
 
+void OutputSettingsTests::softwarePresetSurvivesAHardwareEncoder() {
+    // Every Settings control saves by loading, changing one field and writing
+    // the whole struct back, so whatever load() puts in the preset while a
+    // hardware encoder is selected is what the software encoder gets later.
+    const QStringList hardware{
+        QStringLiteral("h264_nvenc"), QStringLiteral("hevc_nvenc"),
+        QStringLiteral("h264_qsv"),   QStringLiteral("hevc_qsv"),
+        QStringLiteral("h264_amf"),   QStringLiteral("hevc_amf")};
+    for (const QString& codec : hardware) {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        QSettings settings(directory.filePath(QStringLiteral("settings.ini")), QSettings::IniFormat);
+        settings.setValue(QStringLiteral("output/videoCodec"), QStringLiteral("libx264"));
+        settings.setValue(QStringLiteral("output/preset"), QStringLiteral("ultrafast"));
+
+        // The encoder is switched to a hardware one...
+        settings.setValue(QStringLiteral("output/videoCodec"), codec);
+        const OutputSettings onHardware = OutputSettings::load(settings);
+        QCOMPARE(onHardware.preset, QStringLiteral("ultrafast"));
+        // ...an unrelated change writes the preset back as loaded...
+        settings.setValue(QStringLiteral("output/preset"), onHardware.preset);
+        // ...and the encoder is switched back.
+        settings.setValue(QStringLiteral("output/videoCodec"), QStringLiteral("libx264"));
+        const OutputSettings back = OutputSettings::load(settings);
+        QCOMPARE(back.videoCodec, QStringLiteral("libx264"));
+        QCOMPARE(back.preset, QStringLiteral("ultrafast"));
+
+        // The render job's JSON form carries the same rule.
+        QCOMPARE(OutputSettings::fromJson(onHardware.toJson()).preset, QStringLiteral("ultrafast"));
+    }
+}
+
 void OutputSettingsTests::unknownOutputStrings() {
     QTemporaryDir directory;
     QVERIFY(directory.isValid());
@@ -174,6 +211,33 @@ void OutputSettingsTests::unknownOutputStrings() {
         const OutputSettings supported = OutputSettings::load(settings);
         QCOMPARE(supported.audioCodec, codec);
         QCOMPARE(supported.container, QStringLiteral("mkv"));
+    }
+}
+
+void OutputSettingsTests::everyOfferedContainerIsKept() {
+    // SettingsWorkspace offers MKV, MP4 and MOV, and saves what it offers.
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    QSettings settings(directory.filePath(QStringLiteral("settings.ini")), QSettings::IniFormat);
+    for (const QString& container : {QStringLiteral("mkv"), QStringLiteral("mp4"), QStringLiteral("mov")}) {
+        settings.setValue(QStringLiteral("output/container"), container);
+        settings.setValue(QStringLiteral("output/audioCodec"), QStringLiteral("aac"));
+        QCOMPARE(OutputSettings::load(settings).container, container);
+        QCOMPARE(OutputSettings::fromJson({{QStringLiteral("container"), container}}).container, container);
+    }
+
+    // ffmpeg refuses Opus in MOV, so a MOV keeps its container and records
+    // AAC; the containers that take Opus keep it.
+    for (const QString& opus : {QStringLiteral("libopus"), QStringLiteral("opus")}) {
+        settings.setValue(QStringLiteral("output/audioCodec"), opus);
+        settings.setValue(QStringLiteral("output/container"), QStringLiteral("mov"));
+        const OutputSettings mov = OutputSettings::load(settings);
+        QCOMPARE(mov.container, QStringLiteral("mov"));
+        QCOMPARE(mov.audioCodec, QStringLiteral("aac"));
+        for (const QString& container : {QStringLiteral("mkv"), QStringLiteral("mp4")}) {
+            settings.setValue(QStringLiteral("output/container"), container);
+            QCOMPARE(OutputSettings::load(settings).audioCodec, opus);
+        }
     }
 }
 
