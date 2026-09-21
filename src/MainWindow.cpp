@@ -246,10 +246,6 @@ void MainWindow::setupUi() {
     connect(m_dashboard, &Dashboard::openProjectRequested, this, [this](const QString& path) {
         if (maybeSave()) loadProject(path);
     });
-    connect(m_media, &MediaController::recordingFinished,
-            m_dashboard, [this](const QString&, qint64) { m_dashboard->refreshRecordings(); });
-    connect(m_media, &MediaController::replaySaved,
-            m_dashboard, [this](const QString&) { m_dashboard->refreshRecordings(); });
     m_shell->addWorkspace(QStringLiteral("dashboard"), m_dashboard);
     m_shell->addWorkspace(QStringLiteral("record"), recording);
     m_streamStudio = new StreamingWorkspace(m_audio, this);
@@ -690,6 +686,15 @@ void MainWindow::connectModelSignals() {
         m_mediaRegistry->addSearchDir(QFileInfo(path).absolutePath());
         flash(tr("Saved %1 (%2 KB)").arg(QFileInfo(path).fileName()).arg(bytes / 1024), 5000);
     });
+    // The Dashboard lists the recording folder only when it is shown, so one
+    // left on screen while a recording or replay was saved would go on listing
+    // the files from before it. Connected here, not where the Dashboard is
+    // built: setupUi() runs before m_media exists, and a connection from a
+    // null sender is refused at run time with nothing but a logged warning.
+    connect(m_media, &MediaController::recordingFinished,
+            m_dashboard, [this](const QString&, qint64) { m_dashboard->refreshRecordings(); });
+    connect(m_media, &MediaController::replaySaved,
+            m_dashboard, [this](const QString&) { m_dashboard->refreshRecordings(); });
 
     // ControlsBar → MediaController (streaming)
     connect(m_controlsBar, &ControlsBar::streamingStarted, this, [this] {
