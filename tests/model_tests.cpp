@@ -273,6 +273,8 @@ private slots:
     void timelineGraphBoundsNumbersBeforeArithmetic();
     void restoredRenderJobsAreValidatedLikeEnqueuedOnes();
     void clipsLongerThanTheTimelineArePlacedNotAborted();
+    void undoKeepsTheLiveCaptureFrameOnAir();
+    void theReplayBufferIsAFrameConsumer();
     void spinBoxesAndTextFieldsKeepTheirDigits();
     void editorClipRoundTripPreservesSourceReference();
     void editorLegacyClipLoadsAsUnlinked();
@@ -2665,6 +2667,62 @@ void MalloyModelTests::renderQueueRejectsUnrenderableRequests() {
     QVERIFY(!q.enqueue(makeRenderRequest(dir.filePath(QStringLiteral("d.mp4"))), &error).isEmpty());
     QVERIFY(error.isEmpty());
     QCOMPARE(q.jobs().size(), 1);
+}
+
+void MalloyModelTests::undoKeepsTheLiveCaptureFrameOnAir() {
+    SceneCollection scenes;
+    QUndoStack undo;
+    scenes.setUndoStack(&undo);
+    scenes.ensureCurrentScene();
+    QVERIFY(scenes.addNewSourceToCurrent(QStringLiteral("Screen"), Source::Type::DisplayCapture,
+                                         QString(), QColor(), 0, 0) != nullptr);
+    undo.clear();
+
+    // Never shown: recording is what makes it compose.
+    PreviewWidget preview(&scenes, PreviewWidget::Role::Program);
+    preview.setRecordingActive(true);
+
+    QImage red(64, 36, QImage::Format_ARGB32_Premultiplied);
+    red.fill(QColor(255, 0, 0));
+    preview.updateFrame(0, 0, red);
+    QCoreApplication::processEvents();
+    const QPoint centre(int(MalloyCanvas::Width / 2), int(MalloyCanvas::Height / 2));
+    QCOMPARE(preview.cachedComposedFrame().pixelColor(centre), QColor(255, 0, 0));
+
+    // Any edit, then undo. The session is still running, so no new frame will
+    // arrive on a still desktop; the one already delivered must stay on air
+    // rather than being replaced by the waiting placeholder.
+    scenes.setCurrentItemLocked(0, true);
+    undo.undo();
+    QCoreApplication::processEvents();
+    QVERIFY2(preview.cachedComposedFrame().pixelColor(centre) == QColor(255, 0, 0),
+             "undo must not blank a live capture in the recorded output");
+}
+
+void MalloyModelTests::theReplayBufferIsAFrameConsumer() {
+    // The pure rule: with the picture moving and only the replay buffer
+    // interested, composition must still happen.
+    QVERIFY(PreviewWidget::compositionRequired(false, false, /*previewVisible=*/false,
+                                               /*contentAdvanced=*/true, /*replayActive=*/true));
+    QVERIFY(!PreviewWidget::compositionRequired(false, false, false, true, false));
+    QVERIFY(!PreviewWidget::compositionRequired(false, false, false, /*contentAdvanced=*/false, true));
+
+    // The widget: not shown, not recording, not streaming, which is the state
+    // of a minimized window or another workspace. With the buffer on it still
+    // wants frames, and asks for them.
+    SceneCollection scenes;
+    scenes.ensureCurrentScene();
+    PreviewWidget preview(&scenes, PreviewWidget::Role::Program);
+    bool wanted = false;
+    QObject::connect(&preview, &PreviewWidget::consumerDemandChanged, &preview,
+                     [&wanted](bool w) { wanted = w; });
+    QVERIFY(!preview.consumersPresent());
+    preview.setReplayBufferSeconds(30);
+    QVERIFY2(preview.consumersPresent(), "a replay buffer needs frames with the window hidden");
+    QVERIFY(wanted);
+    preview.setReplayBufferSeconds(0);
+    QVERIFY(!preview.consumersPresent());
+    QVERIFY(!wanted);
 }
 
 void MalloyModelTests::clipsLongerThanTheTimelineArePlacedNotAborted() {

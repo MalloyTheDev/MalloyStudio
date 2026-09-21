@@ -61,8 +61,13 @@ public:
     // events, focus, minimization or occlusion, and the preview must not cause
     // work when nobody can see it either. 36000 readbacks were thrown away in
     // one measured run for want of the second half of that.
+    // replayActive is the replay buffer, which samples the composed frame on
+    // its own timer and so is a consumer like any other. It defaults to false
+    // only so the rule reads naturally in tests about the other three; the
+    // widget always passes it.
     static bool compositionRequired(bool recordingActive, bool streamingActive,
-                                    bool previewVisible, bool contentAdvanced);
+                                    bool previewVisible, bool contentAdvanced,
+                                    bool replayActive = false);
 
     // Whether anything wants frames at all, which is the same question minus
     // the part about whether the picture moved. Capture is driven by this and
@@ -180,6 +185,9 @@ private:
         m_contentSequence.fetch_add(1, std::memory_order_release);
         scheduleComposition();
     }
+
+    // Only the program pane buffers replays; see setReplayBufferSeconds.
+    bool replayActive() const { return m_role == Role::Program && m_replaySeconds > 0; }
 
     bool m_recordingActive = false;
     bool m_streamingActive = false;

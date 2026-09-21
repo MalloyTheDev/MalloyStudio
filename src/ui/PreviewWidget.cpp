@@ -48,9 +48,17 @@ PreviewWidget::PreviewWidget(SceneCollection* scenes, Role role, QWidget* parent
     connect(m_scenes, &SceneCollection::previewChanged, this,
             [this](int){ markContentChanged(); update(); });
     connect(m_scenes, &SceneCollection::itemSelectionChanged, this, [this](int){ update(); });
+    // A reset replaces the document; it does not stop capture. Undo, redo and a
+    // cancelled edit all reset the collection, and clearing the capture frames
+    // here put a "waiting" placeholder into the program output and the
+    // recording until each source happened to deliver again, which on a still
+    // desktop could be a long time. The controller clears a source's frame
+    // itself when its session actually stops. Images are document state and
+    // are dropped; the scene is recomposed either way.
     connect(m_scenes, &SceneCollection::collectionReset, this, [this]{
         m_imageCache.clear();
-        clearFrames();
+        markContentChanged();
+        update();
     });
 }
 
@@ -227,12 +235,13 @@ PreviewWidget::DragMode PreviewWidget::handleAtCanvasPoint(SceneItem* item, cons
 }
 
 bool PreviewWidget::compositionRequired(bool recordingActive, bool streamingActive,
-                                       bool previewVisible, bool contentAdvanced) {
+                                       bool previewVisible, bool contentAdvanced,
+                                       bool replayActive) {
     // Nothing to compose if the picture has not moved.
     if (!contentAdvanced) return false;
-    // Somebody is recording it, streaming it, or looking at it. Otherwise the
-    // frame would be composed for nobody.
-    return recordingActive || streamingActive || previewVisible;
+    // Somebody is recording it, streaming it, buffering it for a replay, or
+    // looking at it. Otherwise the frame would be composed for nobody.
+    return recordingActive || streamingActive || replayActive || previewVisible;
 }
 
 void PreviewWidget::setRecordingActive(bool active) {
@@ -250,7 +259,12 @@ void PreviewWidget::setStreamingActive(bool active) {
 }
 
 bool PreviewWidget::consumersPresent() const {
-    return m_recordingActive || m_streamingActive || previewVisible();
+    // The replay buffer counts. It samples the composed frame five times a
+    // second whether or not the window is on screen, and a replay buffer is
+    // used precisely while the window is minimized or another workspace is
+    // showing. Leaving it out stopped capture and composition then, and a saved
+    // replay held one frozen picture for its whole length.
+    return m_recordingActive || m_streamingActive || replayActive() || previewVisible();
 }
 
 void PreviewWidget::reportDemand() {
@@ -285,7 +299,7 @@ void PreviewWidget::composeIfNeeded() {
         m_composedSequence.load(std::memory_order_acquire);
 
     if (compositionRequired(m_recordingActive, m_streamingActive,
-                            previewVisible(), contentAdvanced)) {
+                            previewVisible(), contentAdvanced, replayActive())) {
         composeNow();
         // The picture changed, so anyone looking at it needs a repaint. If the
         // window is down this does nothing, which is the point: the preview
@@ -728,6 +742,9 @@ void PreviewWidget::setReplayBufferSeconds(int seconds) {
         QMutexLocker lock(&m_replayMutex);
         m_replayFrames.clear();
     }
+    // Turning the buffer on or off changes whether anyone needs frames.
+    reportDemand();
+    if (replayActive()) markContentChanged();
 }
 
 void PreviewWidget::captureReplayFrame() {
