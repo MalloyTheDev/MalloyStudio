@@ -87,6 +87,15 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         return m_captureController ? m_captureController->captureStats() : CaptureStats{};
     });
     m_hotkeys = new HotkeyManager(this);
+    // Connected here, between creating the manager and loading its bindings.
+    // It used to be connected in setupUi(), which runs before the manager
+    // exists, behind an if that was therefore always false: a refused shortcut
+    // was never reported, at startup or when rebinding, and simply did nothing.
+    connect(m_hotkeys, &HotkeyManager::bindingFailed, this,
+            [this](const QString& actionId, const QKeySequence& key) {
+        flash(tr("Shortcut %1 could not be registered for %2 (another application may claim it)")
+                  .arg(key.toString(QKeySequence::NativeText), actionId), 6000);
+    });
     m_hotkeys->loadBindings();
 
     setupMenus();
@@ -293,13 +302,6 @@ void MainWindow::setupUi() {
     });
     // A shortcut Windows refuses is not in effect; the status bar says so rather
     // than leaving the user to discover it by pressing it.
-    if (m_hotkeys) {
-        connect(m_hotkeys, &HotkeyManager::bindingFailed, this,
-                [this](const QString& actionId, const QKeySequence& key) {
-            flash(tr("Shortcut %1 could not be registered for %2 (another application may claim it)")
-                      .arg(key.toString(QKeySequence::NativeText), actionId), 6000);
-        });
-    }
     m_shell->addWorkspace(QStringLiteral("settings"), m_settings);
 
     setCentralWidget(m_shell);
@@ -324,10 +326,10 @@ void MainWindow::setupUi() {
                             [this, id] { m_shell->setCurrentWorkspace(id); }});
         }
         cmds.push_back({QStringLiteral("rec.toggle"), tr("Start / Stop Recording"),
-                        tr("Capture · F9"), QStringLiteral("record"),
+                        tr("Capture"), QStringLiteral("record"),
                         [this] { m_controlsBar->toggleRecord(); }});
         cmds.push_back({QStringLiteral("stream.toggle"), tr("Go Live / End Stream"),
-                        tr("Capture · F8"), QStringLiteral("stream"),
+                        tr("Capture"), QStringLiteral("stream"),
                         [this] { m_controlsBar->toggleStream(); }});
         cmds.push_back({QStringLiteral("proj.new"), tr("New Project"),
                         tr("Project · Ctrl+N"), QStringLiteral("plus"),
@@ -406,6 +408,11 @@ void MainWindow::setupMenus() {
 
     auto* streamSettingsAction = editMenu->addAction(tr("Stream Settings…"));
     connect(streamSettingsAction, &QAction::triggered, this, [this] {
+        // Fresh from storage, because the Settings and Streaming workspaces
+        // write it directly. Seeded from the startup copy, pressing OK wrote
+        // that stale copy back over everything, including the key relay
+        // opt-in.
+        m_streamSettings = StreamSettings::load();
         StreamSettingsDialog dlg(m_streamSettings, this);
         if (dlg.exec() == QDialog::Accepted) {
             m_streamSettings = dlg.settings();
@@ -642,6 +649,13 @@ void MainWindow::connectModelSignals() {
             return;
         }
 
+        // Read now rather than trusting the copy taken at startup. The Settings
+        // and Streaming workspaces write these directly, so the cached copy
+        // sent the title and category from launch, ignored a changed service,
+        // and ignored the key relay opt-in until the next restart, leaving the
+        // key on ffmpeg's command line after the user asked for it not to be.
+        m_streamSettings = StreamSettings::load();
+
         // Prompt to configure if key is missing
         if (m_streamSettings.streamKey.isEmpty()) {
             StreamSettingsDialog dlg(m_streamSettings, this);
@@ -749,8 +763,14 @@ void MainWindow::connectModelSignals() {
 
     connect(m_media, &MediaController::errorOccurred,
             this, [this](const QString& origin, const QString& msg) {
-        const QString title = (origin == QStringLiteral("recording"))
-            ? tr("Recording Error") : tr("Streaming Error");
+        // Three origins, handled as three. A failed replay save used to fall
+        // into the streaming branch: titled as a streaming error, and it reset
+        // the stream button while the stream carried on live.
+        const bool recording = origin == QStringLiteral("recording");
+        const bool streaming = origin == QStringLiteral("streaming");
+        const QString title = recording ? tr("Recording Error")
+                            : streaming ? tr("Streaming Error")
+                                        : tr("Replay Error");
         // EncoderPipeline appends "\n\nLast stderr:\n<tail>" when ffmpeg
         // produced stderr output. Split that off into setDetailedText so the
         // wall of ffmpeg output hides behind a "Show Details" button — the
@@ -769,22 +789,25 @@ void MainWindow::connectModelSignals() {
         if (!detail.isEmpty()) box.setDetailedText(detail);
         box.setStandardButtons(QMessageBox::Ok);
         box.exec();
-        if (origin == QStringLiteral("recording"))
+        if (recording)
             m_controlsBar->forceStopRecording();
-        else
+        else if (streaming)
             m_controlsBar->forceStopStreaming();
     });
 
     // ── Hotkey dispatch ────────────────────────────────────────────────────
     connect(m_hotkeys, &HotkeyManager::triggered, this,
             [this](const QString& actionId) {
+        // Through the buttons' own click path, which is what actually starts
+        // and stops the pipeline. forceStop* only resets how the button looks:
+        // calling it here left ffmpeg recording or publishing while the button
+        // said stopped, and every later click then took the start branch and
+        // was refused, so nothing short of quitting could end it. It also made
+        // the start half of the toggle do nothing at all.
         if (actionId == QLatin1String(HotkeyManager::kRecordToggle)) {
-            if (m_media->isRecording())
-                m_controlsBar->forceStopRecording();
-            // trigger the start flow via the button's click logic
+            m_controlsBar->toggleRecord();
         } else if (actionId == QLatin1String(HotkeyManager::kStreamToggle)) {
-            if (m_media->isStreaming())
-                m_controlsBar->forceStopStreaming();
+            m_controlsBar->toggleStream();
         } else if (actionId == QLatin1String(HotkeyManager::kStudioTransition)) {
             m_transitionBtn->click();
         } else if (actionId == QLatin1String(HotkeyManager::kReplaySave)) {
