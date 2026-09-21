@@ -249,6 +249,8 @@ private slots:
     void rtmpRelayTransportFollowsTheScheme();
     void loadedProjectHoldsItsDevicesUntilAllowed();
     void undoAndRedoKeepADeclinedDeviceHeld();
+    void fileDevicesAreHeldBeforeTheLoadIsAnnounced();
+    void userChosenSharePathSurvivesUndo();
     void projectMediaPathsMustBeLocalFiles();
     void encoderRedactsTheStreamKeyFromFfmpegOutput();
     void addingAConfiguredLayerIsOneUndoStep();
@@ -3402,6 +3404,85 @@ void MalloyModelTests::projectMediaPathsMustBeLocalFiles() {
     QVERIFY(loaded != nullptr);
     QVERIFY2(loaded->imagePath().isEmpty(),
              "a UNC image path must not survive the load into the model");
+}
+
+void MalloyModelTests::fileDevicesAreHeldBeforeTheLoadIsAnnounced() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString path = dir.filePath(QStringLiteral("announced.malloy.json"));
+    {
+        SceneCollection authored;
+        authored.ensureCurrentScene();
+        QVERIFY(authored.addCameraToCurrent(QStringLiteral("Front Camera"),
+                                            QStringLiteral("\\\\?\\usb#vid_dead&pid_beef"),
+                                            QStringLiteral("Front Camera")) != nullptr);
+        QVERIFY(authored.addNewSourceToCurrent(QStringLiteral("Screen"),
+                                               Source::Type::DisplayCapture) != nullptr);
+        QVERIFY(ProjectDocument::saveToFile(authored, path));
+    }
+
+    // The capture reconciler is connected directly to these signals, so it runs
+    // inside the emit. Whatever the hold says at that moment is what decides
+    // whether the camera and the screen capture start. The hold used to be
+    // applied only after the load returned, which was after these had fired.
+    SceneCollection opened;
+    bool announced = false;
+    bool heldWhenAnnounced = true;
+    const auto check = [&] {
+        announced = true;
+        for (const Source* s : opened.sources()) {
+            if (!s) continue;
+            const bool device = s->type() == Source::Type::Camera
+                                || s->type() == Source::Type::AudioInput
+                                || s->type() == Source::Type::DisplayCapture
+                                || s->type() == Source::Type::WindowCapture;
+            if (device && !opened.deviceHeld(s->id())) heldWhenAnnounced = false;
+        }
+    };
+    QObject::connect(&opened, &SceneCollection::collectionReset, &opened, check);
+    QObject::connect(&opened, &SceneCollection::sourcesChanged, &opened, check);
+    QObject::connect(&opened, &SceneCollection::itemsChanged, &opened, check);
+
+    QString error;
+    QVERIFY2(ProjectDocument::loadFromFile(opened, path, &error), qPrintable(error));
+    QVERIFY(announced);
+    QVERIFY2(heldWhenAnnounced,
+             "a file's devices must already be held when the load is first announced");
+    QVERIFY(opened.deviceConsentPending());
+}
+
+void MalloyModelTests::userChosenSharePathSurvivesUndo() {
+    // A path the user picked in the file dialog is their choice. The local-only
+    // rule is for paths arriving in someone else's file, and applying it to this
+    // application's own undo snapshots silently discarded a network share the
+    // user had chosen.
+    SceneCollection scenes;
+    QUndoStack undo;
+    scenes.setUndoStack(&undo);
+    scenes.ensureCurrentScene();
+    SceneItem* item = scenes.addNewSourceToCurrent(QStringLiteral("Logo"), Source::Type::Image);
+    QVERIFY(item != nullptr);
+    const int sourceId = item->sourceId();
+
+    const QString share = QStringLiteral("//nas/media/logo.png");
+    scenes.setCurrentSourceImagePath(0, share);
+    QCOMPARE(scenes.sourceById(sourceId)->imagePath(), share);
+
+    // Any later edit, then undo it: the restore goes through loadFromJson.
+    scenes.setCurrentItemLocked(0, true);
+    undo.undo();
+    QVERIFY(scenes.sourceById(sourceId) != nullptr);
+    QCOMPARE(scenes.sourceById(sourceId)->imagePath(), share);
+    undo.redo();
+    QCOMPARE(scenes.sourceById(sourceId)->imagePath(), share);
+
+    // Undoing the image change itself goes back to the previous value rather
+    // than to nothing.
+    undo.undo();   // the lock
+    undo.undo();   // the image path
+    QVERIFY(scenes.sourceById(sourceId)->imagePath().isEmpty());
+    undo.redo();
+    QCOMPARE(scenes.sourceById(sourceId)->imagePath(), share);
 }
 
 void MalloyModelTests::undoAndRedoKeepADeclinedDeviceHeld() {

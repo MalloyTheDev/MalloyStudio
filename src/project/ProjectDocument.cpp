@@ -85,11 +85,7 @@ bool ProjectDocument::loadFromFile(SceneCollection& scenes, QJsonArray* timeline
     const QJsonObject obj = doc.object();
     if (timeline)
         *timeline = obj.value(QStringLiteral("timeline")).toArray();   // empty for v1/v2 files
-    if (!scenes.loadFromJson(obj, error)) return false;
+    if (!scenes.loadFromJson(obj, error, SceneCollection::LoadOrigin::File)) return false;
 
-    // Loaded from a file, so the devices it names wait for the user. Applied
-    // here rather than inside loadFromJson because undo snapshots and new
-    // projects use that function too and are not someone else's file.
-    scenes.holdDeviceConsent();
     return true;
 }

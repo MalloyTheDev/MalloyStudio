@@ -282,7 +282,8 @@ QJsonObject SceneCollection::toJson() const {
     };
 }
 
-bool SceneCollection::loadFromJson(const QJsonObject& root, QString* error) {
+bool SceneCollection::loadFromJson(const QJsonObject& root, QString* error,
+                                   LoadOrigin origin) {
     const QString app = root.value(QStringLiteral("app")).toString(QStringLiteral("MalloyStudio"));
     if (app != QStringLiteral("MalloyStudio")) {
         if (error) *error = QStringLiteral("This is not a MalloyStudio project.");
@@ -371,12 +372,16 @@ bool SceneCollection::loadFromJson(const QJsonObject& root, QString* error) {
             }
 
             const QString imagePath = sourceObject.value(QStringLiteral("imagePath")).toString();
-            // Dropped rather than carried, so a path the policy refuses cannot
-            // be reached later by composition. The source loads and stays
-            // empty: the rest of the project is still the user's, and refusing
-            // to open it at all over one image would be out of proportion.
+            // From a file, dropped rather than carried, so a path the policy
+            // refuses cannot be reached later by composition. The source loads
+            // and stays empty: the rest of the project is still the user's, and
+            // refusing to open it over one image would be out of proportion.
+            //
+            // Not applied to this application's own snapshots. A network share
+            // the user picked in the file dialog is their choice, and applying
+            // the file rule on undo silently threw it away.
             if (!imagePath.isEmpty()) {
-                if (MediaPathPolicy::isAllowed(imagePath)) {
+                if (origin == LoadOrigin::Internal || MediaPathPolicy::isAllowed(imagePath)) {
                     source->setImagePath(imagePath);
                 } else {
                     qWarning("project names an image path that will not be opened: %s",
@@ -461,20 +466,29 @@ bool SceneCollection::loadFromJson(const QJsonObject& root, QString* error) {
     m_restoring = false;
     m_recordUndo = oldRecordUndo;
 
-    // The device hold is deliberately left alone here. Undo, redo and a
-    // cancelled edit session all restore through this function, so clearing
-    // it would let an undo start devices the user declined. A new project
-    // clears it in clear(); a file load replaces it in holdDeviceConsent().
+    // A file's devices are held here, before anything below is announced.
+    // Those signals drive the capture reconciler synchronously, so a hold
+    // applied after them came too late: the camera, window and screen captures
+    // a file named had already started, and were only stopped again once the
+    // hold arrived.
     //
-    // Nor is it pruned to the sources that exist after the restore. Deleting a
-    // held source, undoing, redoing and undoing again would then bring it back
-    // unheld. An id with no source behind it is inert, because both
-    // reconcilers only consider sources present in the scene.
+    // Any other load leaves the hold alone. Undo, redo and a cancelled edit
+    // session all restore through this function, so clearing it would let an
+    // undo start devices the user declined; a new project clears it in clear().
+    // Nor is it pruned to the sources that survive a restore: deleting a held
+    // source, undoing, redoing and undoing again would then bring it back
+    // unheld. An id with no source behind it is inert, because both reconcilers
+    // only consider sources present in the scene.
+    const bool holdChanged = origin == LoadOrigin::File
+                             && m_heldDeviceSources != deviceBackedSourceIds();
+    if (origin == LoadOrigin::File) m_heldDeviceSources = deviceBackedSourceIds();
+
     emit collectionReset();
     emit currentChanged(m_currentIndex);
     emit sourcesChanged();
     emit itemsChanged();
     emit itemSelectionChanged(currentItemIndex());
+    if (holdChanged) emit deviceConsentChanged();
 
     if (error) error->clear();
     return true;
@@ -914,11 +928,16 @@ QStringList SceneCollection::pendingDeviceRequests() const {
     return out;
 }
 
-void SceneCollection::holdDeviceConsent() {
-    QSet<int> wanted;
+QSet<int> SceneCollection::deviceBackedSourceIds() const {
+    QSet<int> ids;
     for (const Source* source : m_sources) {
-        if (source && needsDeviceConsent(source->type())) wanted.insert(source->id());
+        if (source && needsDeviceConsent(source->type())) ids.insert(source->id());
     }
+    return ids;
+}
+
+void SceneCollection::holdDeviceConsent() {
+    const QSet<int> wanted = deviceBackedSourceIds();
     if (m_heldDeviceSources == wanted) return;
     m_heldDeviceSources = wanted;
     emit deviceConsentChanged();

@@ -58,7 +58,17 @@ public:
     bool editSessionActive() const { return m_editSessionActive; }
 
     QJsonObject toJson() const;
-    bool loadFromJson(const QJsonObject& root, QString* error = nullptr);
+    // Where a load came from, which decides the rules it gets.
+    //
+    // A file is someone else's content: its media paths are checked and its
+    // devices are held, and both happen before anything is announced, because
+    // the signals a load emits drive capture synchronously. Everything else
+    // (undo, redo, a cancelled edit, a new project) is this application's own
+    // state and gets neither, since applying file rules there both drops paths
+    // the user chose and, for the hold, arrives too late to matter.
+    enum class LoadOrigin { Internal, File };
+    bool loadFromJson(const QJsonObject& root, QString* error = nullptr,
+                      LoadOrigin origin = LoadOrigin::Internal);
 
     // Consent to open the devices a project names.
     //
@@ -192,6 +202,8 @@ private:
     QList<Source*> m_sources;
     // Source ids waiting for the user. Empty means nothing is held.
     QSet<int> m_heldDeviceSources;
+    // Every source whose type reaches a device or the screen.
+    QSet<int> deviceBackedSourceIds() const;
     QList<Scene*> m_scenes;
     int           m_currentIndex = -1;
     int           m_programIndex = -1;   // on-air (TimedFrameSource renders this)
