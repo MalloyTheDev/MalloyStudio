@@ -5,13 +5,23 @@
 #include <QMutex>
 #include <QQueue>
 
+#include <functional>
+
 // Replays a snapshot of the PreviewWidget replay ring through the
 // TimedFrameSource interface. Used by MediaController::saveReplay() to
 // feed the EncoderPipeline with pre-recorded JPEG-compressed frames.
 //
-// Each call to currentFrame() advances to the next JPEG in the queue,
-// decoding it on demand. When the queue is exhausted, exhausted() is emitted
-// (once) and currentFrame() continues returning the last decoded frame.
+// Frames are served by their timestamps, in real time from the first call:
+// currentFrame() returns the newest buffered frame whose time has come,
+// decoding it on demand, however often it is asked. Once the last frame has
+// had its time on screen, exhausted() is emitted (once) and currentFrame()
+// goes on returning that frame.
+//
+// It used to hand out the next frame on every call. The buffer is filled at
+// five frames a second and the encoder asks at its own rate, so a 30 second
+// buffer was consumed in five seconds of ticks: the saved replay was a few
+// seconds of video at several times normal speed, and ending there cut the
+// real-time audio short with it.
 class RingTimedFrameSource : public QObject, public TimedFrameSource {
     Q_OBJECT
 public:
@@ -20,16 +30,22 @@ public:
                                   QObject* parent = nullptr);
 
     // TimedFrameSource
-    // Serves the buffered frames in order, so each call consumes one and the
-    // last decoded frame is repeated once they run out. That is a different
-    // meaning from a live source, where the same call returns whatever is
-    // currently composed and consumes nothing, and it is why a caller that
-    // merely wants to look at the picture takes a frame off the replay.
+    // The buffered frame due at this moment of the replay, which starts on the
+    // first call. Unlike a live source this has a clock of its own, so the
+    // first call, which is the encoder priming its pipe, starts the replay.
     //
     // Thread-safe, as the interface requires: the encoder calls this from
     // whichever thread its tick runs on, and priming calls it once before that
     // thread exists.
     QImage currentFrame() override;
+
+    // Advances only when a new buffered frame is served, so an encoder that
+    // follows its source does not write the same picture again on every tick.
+    // Never kUnsequenced: that would tell the encoder to write every tick.
+    quint64 compositionSequence() const override;
+
+    // Replaces the real-time clock, in microseconds. For tests.
+    void setClockForTesting(std::function<qint64()> nowUs);
     int nativeWidth()  const override { return m_width; }
     int nativeHeight() const override { return m_height; }
 
@@ -51,4 +67,11 @@ private:
     int                 m_total   = 0;
     int                 m_served  = 0;
     bool                m_exhausted = false;
+
+    std::function<qint64()> m_nowUs;       // microseconds, monotonic
+    qint64  m_startUs  = -1;               // clock at the first call
+    qint64  m_firstPts = 0;                // pts of the first buffered frame
+    qint64  m_lastSpan = 0;                // last pts minus first pts
+    qint64  m_holdUs   = 200000;           // how long the last frame is shown
+    quint64 m_sequence = 1;                // bumped per served frame
 };

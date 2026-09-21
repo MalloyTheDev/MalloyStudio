@@ -28,6 +28,7 @@
 #include "recording/RingTimedPcmSource.h"
 #include "recording/StreamSettings.h"
 #include "recording/RtmpKeyRelay.h"
+#include "recording/RingTimedFrameSource.h"
 #include "platform/TwitchAuth.h"
 #include "platform/TwitchApi.h"
 #include "platform/SmartConfig.h"
@@ -48,6 +49,7 @@
 #include <QProcess>
 #include <QSettings>
 #include <QSignalSpy>
+#include <QBuffer>
 #include <QTemporaryDir>
 #include <QDoubleSpinBox>
 #include <QPushButton>
@@ -274,6 +276,7 @@ private slots:
     void restoredRenderJobsAreValidatedLikeEnqueuedOnes();
     void clipsLongerThanTheTimelineArePlacedNotAborted();
     void undoKeepsTheLiveCaptureFrameOnAir();
+    void aSavedReplayPlaysInRealTime();
     void theReplayBufferIsAFrameConsumer();
     void spinBoxesAndTextFieldsKeepTheirDigits();
     void editorClipRoundTripPreservesSourceReference();
@@ -2667,6 +2670,57 @@ void MalloyModelTests::renderQueueRejectsUnrenderableRequests() {
     QVERIFY(!q.enqueue(makeRenderRequest(dir.filePath(QStringLiteral("d.mp4"))), &error).isEmpty());
     QVERIFY(error.isEmpty());
     QCOMPARE(q.jobs().size(), 1);
+}
+
+void MalloyModelTests::aSavedReplayPlaysInRealTime() {
+    // A 30 second replay buffer as the preview fills it: five frames a second,
+    // each tagged with its capture time.
+    constexpr int kFrames = 150;
+    constexpr qint64 kSpacingUs = 200000;
+    QQueue<ReplayFrame> ring;
+    for (int i = 0; i < kFrames; ++i) {
+        QImage img(32, 18, QImage::Format_RGB32);
+        img.fill(QColor(i % 256, 0, 0));
+        QByteArray jpeg;
+        QBuffer buf(&jpeg);
+        buf.open(QIODevice::WriteOnly);
+        QVERIFY(img.save(&buf, "JPEG"));
+        ring.enqueue(ReplayFrame{jpeg, 1000000 + i * kSpacingUs});
+    }
+
+    RingTimedFrameSource source(ring, 32, 18);
+    qint64 now = 0;
+    source.setClockForTesting([&now] { return now; });
+    int finishedAt = -1;
+    QObject::connect(&source, &RingTimedFrameSource::exhausted, &source,
+                     [&finishedAt, &now] { finishedAt = int(now / 1000); });
+
+    // Asking repeatedly at one instant must not advance the replay. This is
+    // exactly what it used to do: one frame per call, whatever the time.
+    source.currentFrame();
+    const quint64 atStart = source.compositionSequence();
+    for (int i = 0; i < 20; ++i) source.currentFrame();
+    QCOMPARE(source.compositionSequence(), atStart);
+    QCOMPARE(source.servedFrames(), 1);
+
+    // The encoder ticking at 30 Hz for 40 seconds.
+    int distinct = 1;
+    quint64 last = source.compositionSequence();
+    for (int tick = 1; tick <= 1200 && finishedAt < 0; ++tick) {
+        now = qint64(tick) * 1000000 / 30;
+        source.currentFrame();
+        const quint64 seq = source.compositionSequence();
+        if (seq != last) { ++distinct; last = seq; }
+        QVERIFY2(seq != TimedFrameSource::kUnsequenced,
+                 "kUnsequenced would make a file encoder write every tick");
+    }
+
+    QCOMPARE(source.servedFrames(), kFrames);
+    QCOMPARE(distinct, kFrames);
+    // It ends once the last frame, at 29.8 s, has had its 200 ms on screen:
+    // about 30 s of playback, not the 5 s it took to consume one per tick.
+    QVERIFY2(finishedAt >= 29900 && finishedAt <= 30100,
+             qPrintable(QStringLiteral("replay ended at %1 ms").arg(finishedAt)));
 }
 
 void MalloyModelTests::undoKeepsTheLiveCaptureFrameOnAir() {
