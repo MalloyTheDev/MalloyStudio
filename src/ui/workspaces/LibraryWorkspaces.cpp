@@ -539,6 +539,7 @@ void RenderWorkspace::rebuild() {
         auto* bar = new QProgressBar; bar->setRange(0, 100); bar->setValue(j.progress);
         bar->setTextVisible(false); bar->setFixedHeight(6);
         cv->addWidget(bar);
+        if (!j.note.isEmpty()) cv->addWidget(lbl(j.note, QStringLiteral("warn"), 11));
         bv->addWidget(card);
     }
 
@@ -596,6 +597,12 @@ void RenderWorkspace::rebuild() {
             auto* ck = new QLabel; ck->setPixmap(Icons::pixmap(QStringLiteral("check"), Theme::Success, 14));
             h->addWidget(ck);
             h->addWidget(lbl(j.name, QString(), 13));
+            if (!j.note.isEmpty()) {
+                // The render differs from the timeline; say how on hover.
+                auto* cut = Theme::makeTag(tr("clips cut"), QStringLiteral("warn"));
+                cut->setToolTip(j.note);
+                h->addWidget(cut);
+            }
             h->addStretch();
             h->addWidget(lbl(j.target, QStringLiteral("mute"), 11, false, true));
             h->addWidget(lbl(j.finishedAt.toString(QStringLiteral("MMM d · h:mm AP")), QStringLiteral("mute"), 11));

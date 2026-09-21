@@ -5,28 +5,45 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonObject>
 #include <QProcess>
 #include <QSaveFile>
 #include <QStandardPaths>
+#include <QTimer>
 #include <QUuid>
 
 #include <algorithm>
+#include <cmath>
 
 namespace {
 // Cap on the ffmpeg stderr we keep for failure messages.
 constexpr int kStderrTailChars = 4000;
 // How long to wait for a terminated ffmpeg before killing it.
 constexpr int kTerminateGraceMs = 2000;
+// How long one source may take to report its length. A local file answers in
+// well under a second; this is for a file ffprobe hangs on, which is then
+// rendered as though it were long enough rather than holding the queue.
+constexpr int kProbeTimeoutMs = 10000;
 }  // namespace
 
-RenderPipeline::RenderPipeline(QObject* parent) : QObject(parent) {
+RenderPipeline::RenderPipeline(QObject* parent)
+    : QObject(parent), m_probeTimeoutMs(kProbeTimeoutMs) {
     // Same discovery the capture pipeline uses, so both agree on which ffmpeg
-    // this install is running.
+    // this install is running. The resolved paths are kept rather than bare
+    // names, so a launch never depends on the process search order.
     m_ffmpegPath = QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
+    m_ffprobePath = QStandardPaths::findExecutable(QStringLiteral("ffprobe"));
 }
 
 RenderPipeline::~RenderPipeline() {
-    if (m_proc) cancel();
+    if (isRunning()) cancel();
+}
+
+void RenderPipeline::setProbeCommandForTesting(const QString& program,
+                                               const QStringList& leadingArgs, int timeoutMs) {
+    m_ffprobePath = program;
+    m_probeLeadingArgs = leadingArgs;
+    m_probeTimeoutMs = timeoutMs;
 }
 
 bool RenderPipeline::start(const RenderJob& job, QString* error) {
@@ -35,7 +52,7 @@ bool RenderPipeline::start(const RenderJob& job, QString* error) {
         return false;
     };
 
-    if (m_proc)
+    if (isRunning())
         return fail(tr("A render is already running."));
     if (m_ffmpegPath.isEmpty())
         return fail(tr("ffmpeg was not found on PATH, so nothing can be rendered."));
@@ -45,7 +62,112 @@ bool RenderPipeline::start(const RenderJob& job, QString* error) {
         return fail(tr("The output file already exists: %1")
                         .arg(QDir::toNativeSeparators(job.outputPath)));
 
-    const RenderGraph graph = TimelineGraphBuilder::build(job.timeline, job.output);
+    // Everything that can be refused without knowing how long the sources are
+    // is refused here, so the caller still hears about it from start(). It is
+    // also what vouches for every sourcePath before one is handed to ffprobe:
+    // present, local, and not unlinked.
+    const RenderGraph check = TimelineGraphBuilder::build(job.timeline, job.output);
+    if (!check.ok)
+        return fail(check.error);
+
+    m_job = job;
+    m_sourceSeconds.clear();
+    m_toProbe.clear();
+
+    if (m_ffprobePath.isEmpty()) {
+        // Without ffprobe nothing can be measured, and the render goes ahead
+        // as it did before lengths were checked: nothing is cut or reported.
+        QString launchError;
+        if (!launch(&launchError))
+            return fail(launchError);
+        if (error) error->clear();
+        return true;
+    }
+
+    for (const QJsonValue& v : job.timeline) {
+        const QString path = v.toObject().value(QStringLiteral("sourcePath")).toString();
+        if (!m_toProbe.contains(path)) m_toProbe << path;
+    }
+    m_probing = true;
+    const quint64 run = ++m_run;
+    // Queued, so nothing the probes lead to, a failure or the encoder
+    // starting, can be emitted before the caller has heard that start()
+    // succeeded and recorded which job is running.
+    QMetaObject::invokeMethod(this, [this, run] { probeNext(run); }, Qt::QueuedConnection);
+    if (error) error->clear();
+    return true;
+}
+
+void RenderPipeline::probeNext(quint64 run) {
+    if (run != m_run || !m_probing) return;   // cancelled, or a later job
+
+    if (m_toProbe.isEmpty()) {
+        m_probing = false;
+        QString error, note;
+        if (!launch(&error, &note)) {
+            emit failed(error);
+            return;
+        }
+        if (!note.isEmpty()) emit adjusted(note);
+        return;
+    }
+
+    const QString path = m_toProbe.takeFirst();
+    auto* proc = new QProcess(this);
+    m_probe = proc;
+    // Every way a probe can end comes through here once: it answered, it
+    // failed, it was killed for taking too long, or it never started. Only an
+    // answer records a length; anything else leaves the source unmeasured.
+    const auto done = [this, proc, run, path](bool answered) {
+        if (m_probe != proc) return;          // cancel() has taken it over
+        m_probe = nullptr;
+        if (answered) {
+            // Whatever the file says about itself, so it is parsed rather than
+            // trusted; "N/A", which a still image gives, is not a number.
+            bool ok = false;
+            const double seconds = QString::fromLatin1(proc->readAllStandardOutput())
+                                       .trimmed().toDouble(&ok);
+            if (ok && std::isfinite(seconds) && seconds > 0.0)
+                m_sourceSeconds.insert(path, seconds);
+        }
+        proc->deleteLater();
+        probeNext(run);
+    };
+    connect(proc, &QProcess::finished, this, [done](int code, QProcess::ExitStatus status) {
+        done(status == QProcess::NormalExit && code == 0);
+    });
+    connect(proc, &QProcess::errorOccurred, this, [done](QProcess::ProcessError e) {
+        if (e == QProcess::FailedToStart) done(false);   // the others still finish
+    });
+    // Set up before the start, which can fail synchronously into done().
+    QTimer::singleShot(m_probeTimeoutMs, proc, [proc] {
+        // The whole tree, or a launcher's real ffprobe stays hung; see
+        // ProcessTree. finished follows.
+        if (proc->state() != QProcess::NotRunning) ProcessTree::kill(quint32(proc->processId()));
+    });
+    proc->start(m_ffprobePath,
+                m_probeLeadingArgs + QStringList{
+                    QStringLiteral("-v"), QStringLiteral("error"),
+                    QStringLiteral("-show_entries"), QStringLiteral("format=duration"),
+                    QStringLiteral("-of"), QStringLiteral("default=noprint_wrappers=1:nokey=1"),
+                    path});
+}
+
+bool RenderPipeline::launch(QString* error, QString* note) {
+    auto fail = [error](const QString& message) {
+        if (error) *error = message;
+        return false;
+    };
+
+    // Asked again: measuring the sources takes time, and ffmpeg failing on a
+    // file that appeared meanwhile would have that file removed as partial
+    // output.
+    if (QFileInfo::exists(m_job.outputPath))
+        return fail(tr("The output file already exists: %1")
+                        .arg(QDir::toNativeSeparators(m_job.outputPath)));
+
+    const RenderGraph graph = TimelineGraphBuilder::build(m_job.timeline, m_job.output,
+                                                          m_sourceSeconds);
     if (!graph.ok)
         return fail(graph.error);
 
@@ -75,9 +197,10 @@ bool RenderPipeline::start(const RenderJob& job, QString* error) {
     args << graph.inputArgs;                       // media paths, argv only
     args << QStringLiteral("-filter_complex_script") << m_graphPath;
     args << graph.outputArgs;
-    args << job.outputPath;
+    args << m_job.outputPath;
 
-    m_outputPath = job.outputPath;
+    if (note) *note = TimelineGraphBuilder::describeClamps(graph.clamped);
+    m_outputPath = m_job.outputPath;
     m_totalUs = graph.durationSecs * 1000000.0;
     m_percent = 0;
     m_cancelled = false;
@@ -101,6 +224,23 @@ bool RenderPipeline::start(const RenderJob& job, QString* error) {
 }
 
 void RenderPipeline::cancel() {
+    if (m_probing) {
+        // Still measuring: nothing has been written, so there is nothing to
+        // remove, only the probe to end. Bumping the run drops the queued
+        // first probe too, if it has not started yet.
+        m_probing = false;
+        ++m_run;
+        if (QProcess* probe = m_probe) {
+            m_probe = nullptr;
+            probe->disconnect(this);
+            if (probe->state() != QProcess::NotRunning) {
+                ProcessTree::kill(quint32(probe->processId()));   // see ProcessTree
+                probe->waitForFinished(kTerminateGraceMs);
+            }
+            probe->deleteLater();
+        }
+        return;
+    }
     if (!m_proc) return;
     m_cancelled = true;
     // Ended at once, with everything it started. terminate() asks a process

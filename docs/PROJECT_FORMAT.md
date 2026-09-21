@@ -236,6 +236,12 @@ A clip occupies `[start, start + dur)` on the timeline and consumes
 `start`, `dur` and `sourceIn` together; trimming the right edge changes `dur` only.
 Splitting at time `t` gives the right-hand clip `sourceIn + (t - start) * speed.factor`.
 
+When a render starts, each source is measured with ffprobe. A clip that asks for more than
+its source has is cut where the source ends, and the render job records which clip was cut
+and by how much; a clip whose `sourceIn` is at or past the end of its source fails the
+render. A source that cannot be measured, because ffprobe is missing, times out or reports
+no length (a still image), is rendered as though it were long enough.
+
 ### Placement
 
 `transform.x` and `transform.y` place the clip's top left corner in canvas pixels, on the

@@ -40,6 +40,12 @@ constexpr double kMaxScalePercent = 10000.0;
 constexpr int    kMinGainDb       = -60;
 constexpr int    kMaxGainDb       = 30;
 
+// How far past the end of its source a clip may run before it is cut and
+// reported. ffprobe gives lengths to the microsecond and dur * speed picks up
+// rounding, and a millisecond is well under a frame at any rate the encoder
+// takes, so cutting less than that is not worth telling anyone about.
+constexpr double kClampToleranceSecs = 0.001;
+
 QString clipName(const Clip& c) {
     return c.label.isEmpty() ? QStringLiteral("clip %1").arg(c.index + 1) : c.label;
 }
@@ -48,6 +54,11 @@ QString clipName(const Clip& c) {
 // with a locale-aware formatter, so pin the format explicitly.
 QString num(double v) {
     return QString::number(v, 'f', 6);
+}
+
+// Seconds as a person reads them in a message.
+QString secs(double v) {
+    return QString::number(v, 'f', 3);
 }
 
 // atempo only accepts 0.5 to 2.0, so a larger change is a chain of them.
@@ -69,7 +80,8 @@ QStringList atempoChain(double factor) {
 
 }  // namespace
 
-RenderGraph TimelineGraphBuilder::build(const QJsonArray& timeline, const OutputSettings& output) {
+RenderGraph TimelineGraphBuilder::build(const QJsonArray& timeline, const OutputSettings& output,
+                                        const QHash<QString, double>& sourceSeconds) {
     RenderGraph g;
     auto fail = [&g](const QString& message) {
         g.ok = false;
@@ -158,6 +170,23 @@ RenderGraph TimelineGraphBuilder::build(const QJsonArray& timeline, const Output
         if (c.channels != 0)
             return fail(QStringLiteral("Channel mapping is not supported yet (\"%1\").")
                             .arg(clipName(c)));
+
+        // ADR-0001, contract 1. Left alone, trim asks for source past the end
+        // of the file, the clip's layer simply stops, and whatever lies beneath
+        // it fills the rest of its time with nothing said. Cut it where the
+        // source ends instead, and record that it was cut. Runs after the
+        // bounds above, so sourceIn and speed are finite and speed is positive.
+        const auto length = sourceSeconds.constFind(c.sourcePath);
+        if (length != sourceSeconds.constEnd() && std::isfinite(*length) && *length > 0.0) {
+            const double available = (*length - c.sourceIn) / c.speed;
+            if (available < kClampToleranceSecs)
+                return fail(QStringLiteral("\"%1\" starts %2 s into its source, which is only %3 s long.")
+                                .arg(clipName(c), secs(c.sourceIn), secs(*length)));
+            if (c.dur > available + kClampToleranceSecs) {
+                g.clamped.push_back(ClampedClip{c.index, clipName(c), c.dur, available});
+                c.dur = available;
+            }
+        }
 
         clips.push_back(c);
         g.durationSecs = std::max(g.durationSecs, c.start + c.dur);
@@ -278,4 +307,15 @@ RenderGraph TimelineGraphBuilder::build(const QJsonArray& timeline, const Output
 
     g.ok = true;
     return g;
+}
+
+QString TimelineGraphBuilder::describeClamps(const QVector<ClampedClip>& clamped) {
+    QStringList lines;
+    for (const ClampedClip& c : clamped) {
+        lines << QStringLiteral("\"%1\" runs %2 s past the end of its source, so it was cut "
+                                "from %3 s to %4 s.")
+                     .arg(c.name, secs(c.requestedSecs - c.renderedSecs),
+                          secs(c.requestedSecs), secs(c.renderedSecs));
+    }
+    return lines.join(QLatin1Char('\n'));
 }

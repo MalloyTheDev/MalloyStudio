@@ -27,6 +27,7 @@
 #include "project/ProjectRegistry.h"
 #include "project/MediaRegistry.h"
 #include "project/RecentRecordings.h"
+#include "recording/RenderPipeline.h"
 #include "recording/RenderQueue.h"
 #include "recording/TimelineGraphBuilder.h"
 #include "recording/OutputSettings.h"
@@ -445,6 +446,11 @@ private slots:
     void timelineGraphPlacesTrimsAndScalesClips();
     // Clip positions are stored in canvas pixels and rendered in output pixels.
     void timelineGraphScalesPositionsFromCanvasToOutput();
+    // A clip that runs past the end of its source is cut there and reported
+    // (ADR-0001, contract 1): in the graph, on the job, and in the file.
+    void timelineGraphClampsClipsThatRunPastTheirSource();
+    void renderJobReportsAClipCutAtTheEndOfItsSource();
+    void aRenderIsNotHeldUpByAProberThatHangs();
     void timelineGraphMixesAudioAndKeepsPathsOutOfTheGraph();
     void timelineGraphRefusesWhatItCannotRender();
     void timelineGraphBoundsNumbersBeforeArithmetic();
@@ -4041,6 +4047,227 @@ void MalloyModelTests::timelineGraphScalesPositionsFromCanvasToOutput() {
     g = placed(100, -50, 1280, 720);
     QVERIFY2(g.ok, qPrintable(g.error));
     QVERIFY2(g.filterGraph.contains(QStringLiteral("overlay=67:-33:")), qPrintable(g.filterGraph));
+}
+
+void MalloyModelTests::timelineGraphClampsClipsThatRunPastTheirSource() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString media = makeMediaFile(dir.filePath(QStringLiteral("ten-seconds.mp4")));
+    const QString other = makeMediaFile(dir.filePath(QStringLiteral("unmeasured.mp4")));
+    QVERIFY(!media.isEmpty() && !other.isEmpty());
+    OutputSettings out;
+    out.width = 1920; out.height = 1080; out.fps = 30;
+    // What the caller measured. The builder is given lengths, it never probes.
+    const QHash<QString, double> lengths{{media, 10.0}};
+
+    // Thirty seconds asked of a ten second source, placed at timeline 2 s.
+    QJsonObject longTake = makeClip(media, 2.0, 30.0);
+    longTake.insert(QStringLiteral("label"), QStringLiteral("Long take"));
+    RenderGraph g = TimelineGraphBuilder::build(QJsonArray{longTake}, out, lengths);
+    QVERIFY2(g.ok, qPrintable(g.error));
+    QCOMPARE(g.clamped.size(), 1);
+    QCOMPARE(g.clamped.first().index, 0);
+    QCOMPARE(g.clamped.first().name, QStringLiteral("Long take"));
+    QCOMPARE(g.clamped.first().requestedSecs, 30.0);
+    QCOMPARE(g.clamped.first().renderedSecs, 10.0);
+    // Cut where the source ends, and the render ends with it rather than
+    // running twenty seconds of whatever lies beneath the clip.
+    QVERIFY2(g.filterGraph.contains(QStringLiteral("trim=start=0.000000:end=10.000000")),
+             qPrintable(g.filterGraph));
+    QCOMPARE(g.durationSecs, 12.0);
+    QVERIFY(g.outputArgs.contains(QStringLiteral("12.000000")));
+    // The report names the clip and says how much of it was cut.
+    const QString report = TimelineGraphBuilder::describeClamps(g.clamped);
+    QVERIFY2(report.contains(QStringLiteral("Long take")), qPrintable(report));
+    QVERIFY2(report.contains(QStringLiteral("20.000 s past the end")), qPrintable(report));
+    QVERIFY2(report.contains(QStringLiteral("from 30.000 s to 10.000 s")), qPrintable(report));
+
+    // The in-point and the speed count: from 4 s in at double speed, a ten
+    // second source has three seconds of timeline left in it.
+    QJsonObject fast = makeClip(media, 0.0, 5.0, 4.0);
+    fast.insert(QStringLiteral("speed"), QJsonObject{{QStringLiteral("factor"), 2.0}});
+    g = TimelineGraphBuilder::build(QJsonArray{fast}, out, lengths);
+    QVERIFY2(g.ok, qPrintable(g.error));
+    QCOMPARE(g.clamped.size(), 1);
+    QCOMPARE(g.clamped.first().renderedSecs, 3.0);
+    QVERIFY2(g.filterGraph.contains(QStringLiteral("trim=start=4.000000:end=10.000000")),
+             qPrintable(g.filterGraph));
+
+    // Sound is cut the same way, and each clip is judged on its own.
+    g = TimelineGraphBuilder::build(
+        QJsonArray{makeClip(media, 0.0, 10.0), makeClip(media, 0.0, 12.0, 0.0, true)}, out, lengths);
+    QVERIFY2(g.ok, qPrintable(g.error));
+    QCOMPARE(g.clamped.size(), 1);
+    QCOMPARE(g.clamped.first().index, 1);
+    QVERIFY(g.filterGraph.contains(QStringLiteral("atrim=start=0.000000:end=10.000000")));
+
+    // A clip that fits, exactly or to within a rounding error, is left alone
+    // and nothing is reported.
+    for (const double length : {10.0, 9.9995}) {
+        g = TimelineGraphBuilder::build(QJsonArray{makeClip(media, 0.0, 10.0)}, out,
+                                        {{media, length}});
+        QVERIFY2(g.ok, qPrintable(g.error));
+        QVERIFY(g.clamped.isEmpty());
+        QVERIFY(TimelineGraphBuilder::describeClamps(g.clamped).isEmpty());
+    }
+
+    // A source with no usable length, unmeasured or measured as nothing, is
+    // rendered as asked, which is what a render without ffprobe does.
+    for (const double unknown : {0.0, -1.0, std::numeric_limits<double>::quiet_NaN(),
+                                 std::numeric_limits<double>::infinity()}) {
+        g = TimelineGraphBuilder::build(QJsonArray{makeClip(media, 0.0, 30.0)}, out,
+                                        {{media, unknown}});
+        QVERIFY2(g.ok, qPrintable(g.error));
+        QVERIFY(g.clamped.isEmpty());
+        QVERIFY(g.filterGraph.contains(QStringLiteral("trim=start=0.000000:end=30.000000")));
+    }
+    g = TimelineGraphBuilder::build(QJsonArray{makeClip(other, 0.0, 30.0)}, out, lengths);
+    QVERIFY2(g.ok, qPrintable(g.error));
+    QVERIFY(g.clamped.isEmpty());
+
+    // A clip that starts at the end of its source has nothing to show, and is
+    // refused by name rather than rendered as nothing.
+    QJsonObject late = makeClip(media, 0.0, 5.0, 10.0);
+    late.insert(QStringLiteral("label"), QStringLiteral("Too late"));
+    g = TimelineGraphBuilder::build(QJsonArray{late}, out, lengths);
+    QVERIFY(!g.ok);
+    QVERIFY2(g.error.contains(QStringLiteral("Too late")), qPrintable(g.error));
+}
+
+// Runs a tool to completion, giving back its standard output. An overrun ends
+// the tool with everything it started, because ffmpeg and ffprobe are often a
+// package manager's launcher whose child outlives a plain kill.
+static bool runToolForTest(const QString& program, const QStringList& args,
+                           QByteArray* output = nullptr) {
+    QProcess p;
+    p.start(program, args);
+    if (!p.waitForFinished(30000)) {
+        if (p.state() != QProcess::NotRunning) {
+            ProcessTree::kill(quint32(p.processId()));
+            p.waitForFinished(3000);
+        }
+        return false;
+    }
+    if (output) *output = p.readAllStandardOutput();
+    return p.exitStatus() == QProcess::NormalExit && p.exitCode() == 0;
+}
+
+void MalloyModelTests::renderJobReportsAClipCutAtTheEndOfItsSource() {
+    const QString ffmpeg = QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
+    const QString ffprobe = QStandardPaths::findExecutable(QStringLiteral("ffprobe"));
+    if (ffmpeg.isEmpty() || ffprobe.isEmpty())
+        QSKIP("A real render needs ffmpeg and ffprobe in PATH");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    // One second of picture.
+    const QString source = dir.filePath(QStringLiteral("one-second.mp4"));
+    QVERIFY(runToolForTest(ffmpeg, {
+        QStringLiteral("-hide_banner"), QStringLiteral("-loglevel"), QStringLiteral("error"),
+        QStringLiteral("-nostdin"), QStringLiteral("-f"), QStringLiteral("lavfi"),
+        QStringLiteral("-i"), QStringLiteral("testsrc=size=160x120:rate=10:duration=1"),
+        QStringLiteral("-c:v"), QStringLiteral("libx264"), QStringLiteral("-pix_fmt"),
+        QStringLiteral("yuv420p"), source}));
+
+    // A clip that asks it for three.
+    QJsonObject clip = makeClip(source, 0.0, 3.0);
+    clip.insert(QStringLiteral("label"), QStringLiteral("Short source"));
+    RenderRequest request;
+    request.name = QStringLiteral("clamped.mp4");
+    request.outputPath = dir.filePath(QStringLiteral("clamped.mp4"));
+    request.output = recordingTestSettings();
+    request.timeline = QJsonArray{clip};
+
+    const QString store = dir.filePath(QStringLiteral("rq.json"));
+    QString note;
+    {
+        RenderQueue q;
+        q.setStorePath(store);
+        QString error;
+        QVERIFY2(!q.enqueue(request, &error).isEmpty(), qPrintable(error));
+        QTRY_VERIFY_WITH_TIMEOUT(q.countOfState(RenderJob::Completed)
+                                     + q.countOfState(RenderJob::Failed) == 1, 60000);
+        const RenderJob& j = q.jobs().first();
+        QVERIFY2(j.state == RenderJob::Completed, qPrintable(j.error));
+        // The job says which clip was cut, and by how much.
+        note = j.note;
+        QVERIFY2(note.contains(QStringLiteral("Short source")), qPrintable(note));
+        QVERIFY2(note.contains(QStringLiteral("2.000 s past the end")), qPrintable(note));
+        QVERIFY2(note.contains(QStringLiteral("from 3.000 s to 1.000 s")), qPrintable(note));
+    }
+
+    // It is kept with the job, as the rest of its history is.
+    RenderQueue reloaded;
+    reloaded.setStorePath(store);
+    QCOMPARE(reloaded.jobs().size(), 1);
+    QCOMPARE(reloaded.jobs().first().note, note);
+
+    // And the file holds the second the source had, not three seconds of which
+    // two are nothing.
+    QByteArray length;
+    QVERIFY(runToolForTest(ffprobe, {
+        QStringLiteral("-v"), QStringLiteral("error"), QStringLiteral("-show_entries"),
+        QStringLiteral("format=duration"), QStringLiteral("-of"),
+        QStringLiteral("default=noprint_wrappers=1:nokey=1"), request.outputPath}, &length));
+    const double seconds = QString::fromLatin1(length).trimmed().toDouble();
+    QVERIFY2(seconds > 0.5 && seconds < 1.5, qPrintable(QStringLiteral("%1 s").arg(seconds)));
+}
+
+void MalloyModelTests::aRenderIsNotHeldUpByAProberThatHangs() {
+    RenderPipeline pipeline;
+    if (!pipeline.ffmpegAvailable()) QSKIP("Real encoder lifecycle requires ffmpeg in PATH");
+    const QString shell = QStandardPaths::findExecutable(QStringLiteral("cmd"));
+    if (shell.isEmpty()) QSKIP("cmd.exe not found");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    // Not really video, so ffmpeg fails on it at once. The failure is how the
+    // test sees that ffmpeg was reached at all.
+    RenderJob job;
+    job.outputPath = dir.filePath(QStringLiteral("out.mp4"));
+    job.output = recordingTestSettings();
+    job.timeline = QJsonArray{makeClip(makeMediaFile(dir.filePath(QStringLiteral("a.mp4"))),
+                                       0.0, 3.0)};
+
+    // cmd.exe waiting on its input stands in for an ffprobe that never
+    // answers; the rem swallows the ffprobe arguments that follow.
+    const QStringList hang{QStringLiteral("/c"), QStringLiteral("pause"), QStringLiteral("&"),
+                           QStringLiteral("rem")};
+    const auto probesRunning = [] {
+        int n = 0;
+        for (const quint32 pid : ProcessTree::descendants(quint32(QCoreApplication::applicationPid())))
+            if (ProcessTree::imageName(pid).compare(QStringLiteral("cmd.exe"), Qt::CaseInsensitive) == 0)
+                ++n;
+        return n;
+    };
+    const int before = probesRunning();
+
+    // The probe is given its time, then ended, and the render goes on without
+    // the length: nothing measured, so nothing cut.
+    pipeline.setProbeCommandForTesting(shell, hang, 300);
+    QSignalSpy failed(&pipeline, &RenderPipeline::failed);
+    QSignalSpy adjusted(&pipeline, &RenderPipeline::adjusted);
+    QString error;
+    QVERIFY2(pipeline.start(job, &error), qPrintable(error));
+    QVERIFY(pipeline.isRunning());
+    QTRY_VERIFY_WITH_TIMEOUT(!pipeline.isRunning(), 20000);
+    QCOMPARE(failed.size(), 1);
+    QVERIFY2(failed.first().first().toString().contains(QStringLiteral("ffmpeg exited")),
+             qPrintable(failed.first().first().toString()));
+    QCOMPARE(adjusted.size(), 0);
+    QCOMPARE(probesRunning(), before);
+
+    // Cancelled while a probe waits: the probe is ended with everything it
+    // started, and nothing is reported, since the caller asked for this.
+    pipeline.setProbeCommandForTesting(shell, hang, 60000);
+    QVERIFY2(pipeline.start(job, &error), qPrintable(error));
+    QTRY_COMPARE(probesRunning(), before + 1);
+    pipeline.cancel();
+    QVERIFY(!pipeline.isRunning());
+    QCOMPARE(probesRunning(), before);
+    QTest::qWait(200);
+    QCOMPARE(failed.size(), 1);
+    QCOMPARE(adjusted.size(), 0);
 }
 
 void MalloyModelTests::timelineGraphMixesAudioAndKeepsPathsOutOfTheGraph() {

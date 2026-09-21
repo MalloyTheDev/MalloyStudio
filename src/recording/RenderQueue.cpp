@@ -40,6 +40,7 @@ QJsonObject RenderJob::toJson() const {
     o.insert(QStringLiteral("target"), target);
     o.insert(QStringLiteral("outputPath"), outputPath);
     o.insert(QStringLiteral("error"), error);
+    o.insert(QStringLiteral("note"), note);
     o.insert(QStringLiteral("state"), int(state));
     o.insert(QStringLiteral("progress"), progress);
     o.insert(QStringLiteral("finishedAt"), finishedAt.toString(Qt::ISODate));
@@ -57,6 +58,7 @@ RenderJob RenderJob::fromJson(const QJsonObject& o) {
     j.target     = o.value(QStringLiteral("target")).toString();
     j.outputPath = o.value(QStringLiteral("outputPath")).toString();
     j.error      = o.value(QStringLiteral("error")).toString();
+    j.note       = o.value(QStringLiteral("note")).toString();
     j.state      = static_cast<State>(o.value(QStringLiteral("state")).toInt());
     j.progress   = o.value(QStringLiteral("progress")).toInt();
     j.finishedAt = QDateTime::fromString(o.value(QStringLiteral("finishedAt")).toString(), Qt::ISODate);
@@ -74,6 +76,14 @@ RenderQueue::RenderQueue(QObject* parent) : QObject(parent) {
         j->progress = percent;
         // Not persisted: progress changes many times a second and the store now
         // carries a timeline snapshot per job. State transitions do the saving.
+        emit changed();
+    });
+
+    connect(m_pipeline, &RenderPipeline::adjusted, this, [this](const QString& note) {
+        RenderJob* j = jobById(m_activeId);
+        if (!j) return;
+        j->note = note;
+        save();
         emit changed();
     });
 
@@ -260,6 +270,7 @@ void RenderQueue::startNext() {
         QString error;
         j.state = RenderJob::Active;
         j.progress = 0;
+        j.note.clear();   // a retry renders afresh and reports afresh
         if (m_pipeline->start(j, &error)) {
             m_activeId = j.id;
             save();

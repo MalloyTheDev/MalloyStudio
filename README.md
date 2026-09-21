@@ -59,7 +59,7 @@ and records to MP4/MKV/MOV via **ffmpeg**.
 | Qt 6.5 or later | Widgets module; MinGW-w64 or MSVC 2022 toolchain |
 | CMake 3.21+ | Included with Qt installer |
 | **ffmpeg.exe** on `PATH` | `winget install Gyan.FFmpeg` or the full build from ffmpeg.org |
-| ffprobe.exe on `PATH` (optional) | Ships with ffmpeg; used to read media durations and sizes for the Media library |
+| ffprobe.exe on `PATH` (optional) | Ships with ffmpeg; used to read media durations and sizes for the Media library, and each source's length before a render |
 | Ninja | Bundled with CMake; or install via `winget install Ninja-build.Ninja` |
 
 > The project is Windows-only. DXGI, WASAPI, PrintWindow, and named-pipe audio

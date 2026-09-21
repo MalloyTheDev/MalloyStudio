@@ -36,6 +36,10 @@ struct RenderJob {
     QString   target;        // display string derived from `output` at enqueue
     QString   outputPath;    // full path of the file to write, not a directory
     QString   error;         // set when Failed
+    // What the render had to change to render the timeline at all, such as a
+    // clip cut at the end of its source, naming each clip and by how much.
+    // Set when ffmpeg starts, and kept whether the render then succeeds or not.
+    QString   note;
     State     state = Pending;
     int       progress = 0;  // 0..100
     QDateTime finishedAt;

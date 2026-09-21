@@ -2,8 +2,8 @@
 
 ## Status
 
-Accepted, implemented in 7fe0923, except contract 1: a clip that runs past the end of
-its source is not yet clamped or reported at render time. That is tracked in #55.
+Accepted, implemented in 7fe0923. The render-time clamp and report in contract 1 followed
+separately, for #55.
 
 ## Context
 
