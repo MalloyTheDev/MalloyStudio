@@ -252,7 +252,7 @@ waits up to 5 s for ffmpeg to finish, then emits `finished(path, bytes)`.
 The central canvas widget.
 
 **Rendering** — `paintEvent` calls `drawItem()` for each visible item in the current
-scene, back-to-front (item 0 is bottom, last item is top). Coordinate systems:
+scene, from the last item to item 0, so item 0 is drawn last and is on top. Coordinate systems:
 
 - *Canvas coordinates*: 0,0 → 1920,1080 (Source of truth for transforms)
 - *Widget coordinates*: letterboxed into the widget, maintaining 16:9 aspect

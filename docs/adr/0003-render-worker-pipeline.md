@@ -2,7 +2,14 @@
 
 ## Status
 
-Accepted, implemented in d2717d2
+Accepted, implemented in d2717d2, as a first slice narrower than the decision below:
+
+- A clip with a non-zero rotation, audio pan or channel mapping fails the render with a
+  message naming it; those mappings are not built yet.
+- Opacity is applied through `format=yuva420p` and `colorchannelmixer=aa=`.
+- A render takes at most 32 clips.
+- Every `sourcePath` must be a local, drive-absolute path (`MediaPathPolicy`), and
+  numeric clip values are range-checked before any arithmetic; see PROJECT_FORMAT.md.
 
 ## Context
 
