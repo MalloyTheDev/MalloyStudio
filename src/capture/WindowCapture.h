@@ -29,6 +29,9 @@ public:
     }
     CaptureStats stats() const { return m_handoff.stats(); }
 
+    // Whether hwnd names a window that still exists.
+    static bool windowExists(quintptr hwnd);
+
 signals:
     void frameReady(QImage frame);
     void captureError(QString message);

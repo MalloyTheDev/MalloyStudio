@@ -6,7 +6,15 @@
 namespace {
 constexpr int kTargetFps = 30;
 constexpr int kFrameMs   = 1000 / kTargetFps;   // 33 ms
+// Failed captures in a row before the worker gives up and reports it, about a
+// second's worth. A single failure is skipped with the last frame held; a run
+// of them is handed to the controller, which tries again later.
+constexpr int kMaxConsecutiveFailures = kTargetFps;
 } // namespace
+
+bool WindowCapture::windowExists(quintptr hwnd) {
+    return hwnd && IsWindow(reinterpret_cast<HWND>(hwnd));
+}
 
 WindowCapture::WindowCapture(quintptr hwnd, QObject* parent)
     : QThread(parent), m_hwnd(hwnd) {}
@@ -22,15 +30,25 @@ void WindowCapture::requestStop() {
 
 void WindowCapture::run() {
     HWND hwnd = reinterpret_cast<HWND>(m_hwnd);
+    int failures = 0;
 
     while (m_running.load(std::memory_order_relaxed)) {
-        // Check the window is still alive each frame.
-        if (!IsWindow(hwnd) || !IsWindowVisible(hwnd)) {
+        // Only a window that no longer exists ends the capture.
+        if (!IsWindow(hwnd)) {
             emit windowClosed();
             break;
         }
 
         if (!m_delivering.load(std::memory_order_relaxed)) {
+            msleep(kFrameMs);
+            continue;
+        }
+
+        // Hidden or minimised, there is nothing current to copy, but the
+        // window can come back, so the last frame is held. A hidden window
+        // used to be reported as closed, which dropped the source until the
+        // scene was next edited.
+        if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) {
             msleep(kFrameMs);
             continue;
         }
@@ -56,42 +74,49 @@ void WindowCapture::run() {
             continue;
         }
 
-        // Create compatible DC + bitmap.
+        // Create compatible DC + bitmap. Either can fail when the system is
+        // short of GDI resources, which counts as a failed capture.
         HDC wndDC  = GetDC(hwnd);
         if (!wndDC) { msleep(kFrameMs); continue; }
         HDC memDC  = CreateCompatibleDC(wndDC);
-        HBITMAP bmp = CreateCompatibleBitmap(wndDC, w, h);
-        HBITMAP old = static_cast<HBITMAP>(SelectObject(memDC, bmp));
+        HBITMAP bmp = memDC ? CreateCompatibleBitmap(wndDC, w, h) : nullptr;
 
-        // Try PrintWindow first (works for GPU-rendered / DWM-composited windows).
-        // PW_RENDERFULLCONTENT (0x2) captures the fully-composited client buffer.
-        BOOL ok = PrintWindow(hwnd, memDC, 0x2 /*PW_RENDERFULLCONTENT*/);
-        if (!ok) {
-            // Fall back to BitBlt (works for GDI apps, may miss GPU surfaces).
-            BitBlt(memDC, 0, 0, w, h, wndDC, 0, 0, SRCCOPY);
+        QByteArray bits;
+        int lines = 0;
+        if (bmp) {
+            HBITMAP old = static_cast<HBITMAP>(SelectObject(memDC, bmp));
+
+            // Try PrintWindow first (works for GPU-rendered / DWM-composited windows).
+            // PW_RENDERFULLCONTENT (0x2) captures the fully-composited client buffer.
+            BOOL ok = PrintWindow(hwnd, memDC, 0x2 /*PW_RENDERFULLCONTENT*/);
+            if (!ok) {
+                // Fall back to BitBlt (works for GDI apps, may miss GPU surfaces).
+                BitBlt(memDC, 0, 0, w, h, wndDC, 0, 0, SRCCOPY);
+            }
+
+            // Extract raw pixels to a QByteArray via GetDIBits.
+            BITMAPINFOHEADER bmi{};
+            bmi.biSize        = sizeof(BITMAPINFOHEADER);
+            bmi.biWidth       = w;
+            bmi.biHeight      = -h;   // top-down (matches QImage scanline order)
+            bmi.biPlanes      = 1;
+            bmi.biBitCount    = 32;
+            bmi.biCompression = BI_RGB;
+
+            bits = QByteArray(w * h * 4, Qt::Uninitialized);
+            lines = GetDIBits(memDC, bmp, 0, static_cast<UINT>(h),
+                              bits.data(),
+                              reinterpret_cast<BITMAPINFO*>(&bmi),
+                              DIB_RGB_COLORS);
+
+            SelectObject(memDC, old);
+            DeleteObject(bmp);
         }
-
-        // Extract raw pixels to a QByteArray via GetDIBits.
-        BITMAPINFOHEADER bmi{};
-        bmi.biSize        = sizeof(BITMAPINFOHEADER);
-        bmi.biWidth       = w;
-        bmi.biHeight      = -h;   // top-down (matches QImage scanline order)
-        bmi.biPlanes      = 1;
-        bmi.biBitCount    = 32;
-        bmi.biCompression = BI_RGB;
-
-        QByteArray bits(w * h * 4, Qt::Uninitialized);
-        const int lines = GetDIBits(memDC, bmp, 0, static_cast<UINT>(h),
-                                    bits.data(),
-                                    reinterpret_cast<BITMAPINFO*>(&bmi),
-                                    DIB_RGB_COLORS);
-
-        SelectObject(memDC, old);
-        DeleteObject(bmp);
-        DeleteDC(memDC);
+        if (memDC) DeleteDC(memDC);
         ReleaseDC(hwnd, wndDC);
 
         if (lines > 0) {
+            failures = 0;
             // GetDIBits gives BGRA (B, G, R, A) in memory. QImage::Format_ARGB32
             // on little-endian expects the same layout (B@0, G@1, R@2, A@3).
             QImage frame(reinterpret_cast<const uchar*>(bits.constData()),
@@ -103,8 +128,13 @@ void WindowCapture::run() {
                 captured.image = frame.copy();
                 emit frameReady(CaptureFrameHandoff::imageForDelivery(std::move(captured)));
             }
-        } else {
-            emit captureError(QStringLiteral("WindowCapture: GetDIBits failed"));
+        } else if (++failures >= kMaxConsecutiveFailures) {
+            // One failure used to end the session, and with it the source,
+            // for good: a window resized between the size query and the copy
+            // was enough.
+            emit captureError(QStringLiteral("WindowCapture: %1 captures in a row failed")
+                                  .arg(failures));
+            break;
         }
 
         msleep(kFrameMs);

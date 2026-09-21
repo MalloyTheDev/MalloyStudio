@@ -113,6 +113,10 @@ public:
     void setCameraSessionFactoryForTesting(CameraSessionFactory factory) {
         m_cameraFactory = std::move(factory);
     }
+    // The same for window sessions.
+    void setWindowSessionFactoryForTesting(WindowSessionFactory factory) {
+        m_windowFactory = std::move(factory);
+    }
 
 public slots:
     void reconcile();
@@ -159,6 +163,10 @@ private:
     // reconciling then; see m_retryDelayMs.
     void scheduleRetry(const QString& key);
     static QString cameraKey(const QString& deviceId) { return QStringLiteral("camera:") + deviceId; }
+    // Display keys are "adapter:output"; the others are prefixed.
+    static bool isDisplayKey(const QString& key) {
+        return !key.startsWith(QLatin1String("camera:")) && !key.startsWith(QLatin1String("window:"));
+    }
     void setSummary(const QString& summary);
     void setMonitorStatus(const QString& key, const QString& status);
 
@@ -181,9 +189,10 @@ private:
     // blocked. Desktop duplication loses access every time the secure desktop
     // shows (a UAC prompt, the lock screen, Ctrl+Alt+Del) or the display mode
     // changes, and recreating it is the documented recovery; a camera comes
-    // back when it is plugged in again or another application lets go of it.
+    // back when it is plugged in again or another application lets go of it;
+    // a window capture that fails for a second at a time can recover too.
     // The delay doubles while it keeps failing and resets once a frame
-    // arrives. Keys are display keys and cameraKey() values.
+    // arrives. Keys are display keys, cameraKey() values and window keys.
     static constexpr int kFirstRetryMs = 500;
     static constexpr int kMaxRetryMs   = 10000;
     QHash<QString, int>     m_retryDelayMs;   // next delay per display key

@@ -33,7 +33,9 @@ finding again.
   flight to the compositor (47dec02, b594ab9), and outlives late callbacks.
 - A display, camera or microphone that fails is tried again with a backoff instead of
   staying off: after a UAC prompt, the lock screen or an unplugged device (9d6685d,
-  55c39bf, f7e842c).
+  55c39bf, f7e842c). A window capture is too, and a single failed copy no longer ends
+  it; an unrelated scene edit no longer restarts a failing camera ahead of its backoff.
+- A hidden or minimised window holds its last frame instead of being treated as closed.
 - A capture thread that will not stop is detached rather than destroyed, which Qt
   treats as fatal (bfc8a7c); a hung captured window is skipped.
 

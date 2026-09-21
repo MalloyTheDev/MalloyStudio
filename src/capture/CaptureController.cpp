@@ -2,6 +2,7 @@
 #include "CaptureBackend.h"
 #include "DxgiCapture.h"
 #include "WgcCaptureSession.h"
+#include "WindowCapture.h"
 #include "WindowCaptureSession.h"
 #include "WorkerRetirement.h"
 #include "CameraCaptureSession.h"
@@ -165,8 +166,12 @@ void CaptureController::reconcile() {
         if (!required.contains(key)) stopSession(key);
     }
 
+    // Display keys only. Camera and window keys share the set, and clearing
+    // them here restarted a failing camera on every reconcile, whatever its
+    // backoff, and reported the display "camera:<id>" parses as, 0:0, idle.
     const QList<QString> blockedKeys = m_blockedErrorKeys.values();
     for (const QString& key : blockedKeys) {
+        if (!isDisplayKey(key)) continue;
         if (!required.contains(key)) {
             m_blockedErrorKeys.remove(key);
             m_retryTokens.remove(key);
@@ -192,8 +197,17 @@ void CaptureController::reconcile() {
     for (const QString& key : activeWindowKeys) {
         if (!requiredWindows.contains(key)) stopWindowSession(key);
     }
+    for (const QString& key : m_blockedErrorKeys.values()) {
+        if (!key.startsWith(QLatin1String("window:"))) continue;
+        if (!requiredWindows.contains(key)) {
+            m_blockedErrorKeys.remove(key);
+            m_retryTokens.remove(key);
+            m_retryDelayMs.remove(key);
+        }
+    }
     for (const QString& key : requiredWindows) {
         if (m_windowSessions.contains(key)) continue;
+        if (m_blockedErrorKeys.contains(key)) continue;   // closed, or waiting to retry
         // Parse HWND from "window:0x<hex>".
         const QString hexPart = key.mid(9);   // skip "window:0x"
         bool ok = false;
@@ -316,13 +330,20 @@ void CaptureController::startWindowSession(quintptr hwnd) {
     m_windowSessions.insert(key, active);
 
     connect(session, &CaptureSession::frameReady, this, [this, hwnd](QImage frame) {
+        m_retryDelayMs.remove(keyForWindow(hwnd));   // working again
         emit windowFrameReady(hwnd, std::move(frame));
     });
     connect(session, &CaptureSession::captureError, this, [this, hwnd](const QString& /*msg*/) {
-        // Window closed or error — stop the session; reconcile will clean up.
         const QString k = keyForWindow(hwnd);
         stopWindowSession(k);
         emit windowFrameCleared(hwnd);
+        // A window that still exists is tried again later, as displays and
+        // cameras are; the worker only reports a run of failed captures, which
+        // can pass. A window that is gone is not: its handle names nothing
+        // now, and could later name some other window. It stays blocked until
+        // the source stops needing it.
+        if (WindowCapture::windowExists(hwnd)) scheduleRetry(k);
+        else m_blockedErrorKeys.insert(k);
     });
 
     session->startCapture();

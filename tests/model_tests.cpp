@@ -55,6 +55,7 @@
 #include <QProcess>
 #include <QSettings>
 #include <QSignalSpy>
+#include <QWidget>
 #include <QBuffer>
 #include <QTemporaryDir>
 #include <QDoubleSpinBox>
@@ -390,6 +391,8 @@ private slots:
     void aFrameQueuedBeforeAStopIsDropped();
     void aLostDisplayCaptureIsTriedAgain();
     void aCameraThatStopsIsTriedAgain();
+    void aCameraWaitingToRetryIsLeftToItsBackoff();
+    void aWindowCaptureThatFailsIsTriedAgain();
     void projectMediaPathsMustBeLocalFiles();
     void encoderRedactsTheStreamKeyFromFfmpegOutput();
     void addingAConfiguredLayerIsOneUndoStep();
@@ -409,6 +412,7 @@ private slots:
     void aSavedReplayPlaysInRealTime();
     void aWorkerThatWillNotStopIsCutLooseNotDestroyed();
     void aStopRequestedBeforeTheWorkerRunsIsKept();
+    void aHiddenWindowIsHeldRatherThanClosed();
     void aSignOutDuringARefreshStaysSignedOut();
     void aRefreshTwitchDidNotAnswerKeepsTheAccount();
     void aCancelledSignInIgnoresALateCode();
@@ -4334,6 +4338,87 @@ void MalloyModelTests::aCameraThatStopsIsTriedAgain() {
     QCOMPARE(FakeCaptureSession::started.count(cam), 2);
 }
 
+void MalloyModelTests::aCameraWaitingToRetryIsLeftToItsBackoff() {
+    FakeCaptureSession::started.clear();
+    FakeCaptureSession::stopped.clear();
+    FakeCaptureSession::created.clear();
+
+    SceneCollection scenes;
+    scenes.addScene(QStringLiteral("Scene"));
+    CaptureController controller(
+        &scenes,
+        [](int adapterIndex, int outputIndex, QObject* parent) {
+            return new FakeCaptureSession(adapterIndex, outputIndex, parent);
+        });
+    controller.setCameraSessionFactoryForTesting([](const QString&, QObject* parent) {
+        return new FakeCaptureSession(-1, -1, parent);
+    });
+    const QString cam = QStringLiteral("-1:-1");
+    QVERIFY(scenes.addCameraToCurrent(QStringLiteral("Front Camera"),
+                                      QStringLiteral("test-camera-device"),
+                                      QStringLiteral("Front Camera")) != nullptr);
+    QCOMPARE(FakeCaptureSession::started.count(cam), 1);
+
+    QSignalSpy statuses(&controller, &CaptureController::monitorStatusChanged);
+    emit FakeCaptureSession::created.last()->captureError(QStringLiteral("Camera stopped"));
+    QCOMPARE(FakeCaptureSession::stopped.count(cam), 1);
+
+    // Something else in the scene changes before the retry is due. The
+    // display pass of reconcile used to clear every blocked key that was not a
+    // required display, the camera's included, so the camera was restarted at
+    // once whatever its backoff, and the display its key parses as, 0:0, was
+    // reported idle.
+    controller.reconcile();
+    QCOMPARE(FakeCaptureSession::started.count(cam), 1);
+    QCOMPARE(statuses.count(), 0);
+
+    // The retry itself still happens.
+    QTRY_COMPARE_WITH_TIMEOUT(FakeCaptureSession::started.count(cam), 2, 3000);
+}
+
+void MalloyModelTests::aWindowCaptureThatFailsIsTriedAgain() {
+    FakeCaptureSession::started.clear();
+    FakeCaptureSession::stopped.clear();
+    FakeCaptureSession::created.clear();
+
+    SceneCollection scenes;
+    scenes.addScene(QStringLiteral("Scene"));
+    CaptureController controller(
+        &scenes,
+        [](int adapterIndex, int outputIndex, QObject* parent) {
+            return new FakeCaptureSession(adapterIndex, outputIndex, parent);
+        });
+    controller.setWindowSessionFactoryForTesting([](quintptr, QObject* parent) {
+        return new FakeCaptureSession(-2, -2, parent);
+    });
+    const QString win = QStringLiteral("-2:-2");
+
+    // A real window, never shown, so the controller can ask whether it exists.
+    auto* window = new QWidget;
+    const quintptr hwnd = window->winId();
+    QVERIFY(scenes.addWindowCaptureToCurrent(QStringLiteral("Editor"), hwnd,
+                                             QStringLiteral("Editor")) != nullptr);
+    QCOMPARE(FakeCaptureSession::started.count(win), 1);
+
+    // The worker reports a run of failed captures from a window that is still
+    // there. It used to be dropped until the scene was next edited.
+    emit FakeCaptureSession::created.last()->captureError(
+        QStringLiteral("WindowCapture: 30 captures in a row failed"));
+    QCOMPARE(FakeCaptureSession::stopped.count(win), 1);
+    controller.reconcile();   // not before its delay
+    QCOMPARE(FakeCaptureSession::started.count(win), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(FakeCaptureSession::started.count(win), 2, 3000);
+
+    // A window that has gone is not tried again: its handle names nothing now,
+    // and could later name another window.
+    delete window;
+    emit FakeCaptureSession::created.last()->captureError(QStringLiteral("Window closed"));
+    QCOMPARE(FakeCaptureSession::stopped.count(win), 2);
+    controller.reconcile();
+    QTest::qWait(1500);
+    QCOMPARE(FakeCaptureSession::started.count(win), 2);
+}
+
 void MalloyModelTests::everyMicChangeIsAnnouncedStructurally() {
     // MainWindow reconciles microphones on these signals. Only audioInputsChanged
     // used to be connected, and most edits never emit it, so a deleted mic kept
@@ -5600,6 +5685,33 @@ void MalloyModelTests::aStopRequestedBeforeTheWorkerRunsIsKept() {
     worker.start();
     QVERIFY(worker.wait(5000));
     QCOMPARE(closed.load(), 0);
+}
+
+void MalloyModelTests::aHiddenWindowIsHeldRatherThanClosed() {
+    // A window that exists but is not showing: an application hidden to the
+    // tray, or not yet shown. It used to be reported as closed, which ended
+    // the capture. Now the last frame is held until it comes back, and only a
+    // window that no longer exists ends it.
+    auto* window = new QWidget;
+    const quintptr hwnd = window->winId();
+    WindowCapture worker(hwnd);
+    std::atomic<int> closed{0};
+    std::atomic<int> errors{0};
+    QObject::connect(&worker, &WindowCapture::windowClosed, &worker,
+                     [&] { closed.fetch_add(1); }, Qt::DirectConnection);
+    QObject::connect(&worker, &WindowCapture::captureError, &worker,
+                     [&] { errors.fetch_add(1); }, Qt::DirectConnection);
+    worker.start();
+
+    QTest::qWait(500);
+    QCOMPARE(closed.load(), 0);
+    QCOMPARE(errors.load(), 0);
+    QVERIFY(worker.isRunning());
+
+    delete window;
+    QTRY_COMPARE_WITH_TIMEOUT(closed.load(), 1, 3000);
+    QVERIFY(worker.wait(5000));
+    QCOMPARE(errors.load(), 0);
 }
 
 void MalloyModelTests::aSignOutDuringARefreshStaysSignedOut() {

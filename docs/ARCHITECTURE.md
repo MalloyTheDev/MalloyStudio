@@ -158,12 +158,16 @@ worker with `captureError`; the controller recreates it (see below).
 ### `WindowCapture` (QThread worker)
 
 Uses **PrintWindow / BitBlt** to capture one HWND at about 30 fps:
-1. `IsWindow(hwnd)` false → emit `windowClosed` and exit
-2. A window whose application is not responding (`IsHungAppWindow`) is skipped, since
+1. `IsWindow(hwnd)` false → emit `windowClosed` and exit; nothing else ends the worker
+   except a run of failures (step 6)
+2. A hidden or minimised window holds its last frame until it is shown again
+3. A window whose application is not responding (`IsHungAppWindow`) is skipped, since
    PrintWindow waits on that application and would block the worker
-3. `GetClientRect`, a compatible DC and bitmap
-4. `PrintWindow(hwnd, memDC, PW_RENDERFULLCONTENT)`, falling back to `BitBlt`
-5. `GetDIBits` → BGRA → `QImage(Format_ARGB32)` → `frameReady`
+4. `GetClientRect`, a compatible DC and bitmap
+5. `PrintWindow(hwnd, memDC, PW_RENDERFULLCONTENT)`, falling back to `BitBlt`
+6. `GetDIBits` → BGRA → `QImage(Format_ARGB32)` → `frameReady`. A failed capture is
+   skipped with the last frame held; about a second of consecutive failures ends the
+   worker with `captureError`
 
 Workers are stopped through `retireWorker` (`WorkerRetirement.h`): a worker that does not
 stop within its timeout is detached and deletes itself when its thread ends, because Qt
@@ -188,7 +192,9 @@ capturing, and on program and studio mode changes. It:
 
 A session that fails is stopped and tried again after a delay, from half a second
 doubling to ten seconds while it keeps failing; a delivered frame resets the delay, and
-removing the source cancels the retry. A session is disconnected from the controller
+removing the source cancels the retry. The exception is a window that no longer exists:
+its handle could later name a different window, so it stays off until its source is
+removed or pointed at another window. A session is disconnected from the controller
 before it is stopped, so a frame it had already queued cannot mark the source live again.
 `setDelivering(false)` suspends every session when nothing consumes frames.
 
