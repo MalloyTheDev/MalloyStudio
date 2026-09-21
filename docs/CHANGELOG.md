@@ -54,6 +54,9 @@ finding again.
   its own cadence (e065892, cd3a3ae).
 - Per-stage frame telemetry for diagnosing throughput (0bcdf7c, 25fb138).
 - Software streams are capped at the configured bitrate (cc98877).
+- A recording that has to be killed, a cancelled render and a hung media probe end with
+  every process they started, not only a package manager's launcher, and cancelling a
+  render no longer blocks the window.
 - Recordings and streams are converted with the BT.709 matrix and tagged as BT.709, so
   players no longer shift their colours.
 - A recording of a still scene keeps its length and its audio: a file writes the unchanged

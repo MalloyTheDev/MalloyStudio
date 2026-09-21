@@ -1,5 +1,6 @@
 #include "project/MediaRegistry.h"
 #include "project/ByteSize.h"
+#include "platform/ProcessTree.h"
 
 #include <QDir>
 #include <QFileInfo>
@@ -203,7 +204,7 @@ void MediaRegistry::killProbe() {
     // we tear the process down, then stop and reap it.
     m_proc->disconnect(this);
     if (m_proc->state() != QProcess::NotRunning) {
-        m_proc->kill();
+        ProcessTree::kill(quint32(m_proc->processId()));   // see ProcessTree
         m_proc->waitForFinished(1000);
     }
     m_proc->deleteLater();
@@ -367,7 +368,9 @@ void MediaRegistry::probeNext(int generation) {
         finishProbe(generation, idx);
     });
     QTimer::singleShot(m_probeTimeoutMs, proc, [proc] {
-        if (proc->state() != QProcess::NotRunning) proc->kill();   // finished follows
+        // The whole tree, or a launcher's real ffprobe stays hung; see
+        // ProcessTree. finished follows.
+        if (proc->state() != QProcess::NotRunning) ProcessTree::kill(quint32(proc->processId()));
     });
     ++m_probesStarted;
     proc->start(m_ffprobe,

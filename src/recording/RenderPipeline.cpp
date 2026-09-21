@@ -1,4 +1,5 @@
 #include "recording/RenderPipeline.h"
+#include "platform/ProcessTree.h"
 #include "recording/TimelineGraphBuilder.h"
 
 #include <QDir>
@@ -102,11 +103,13 @@ bool RenderPipeline::start(const RenderJob& job, QString* error) {
 void RenderPipeline::cancel() {
     if (!m_proc) return;
     m_cancelled = true;
-    m_proc->terminate();
-    if (!m_proc->waitForFinished(kTerminateGraceMs)) {
-        m_proc->kill();
-        m_proc->waitForFinished(kTerminateGraceMs);
-    }
+    // Ended at once, with everything it started. terminate() asks a process
+    // to close its windows, which a windowless ffmpeg never has, so every
+    // cancel waited out the grace period on the GUI thread; and kill() ended
+    // only a package manager's launcher, leaving the real ffmpeg rendering.
+    // The partial output is deleted below, so nothing is lost by not asking.
+    ProcessTree::kill(quint32(m_proc->processId()));
+    m_proc->waitForFinished(kTerminateGraceMs);
     cleanup();
     // A half-written file would otherwise be indexed as media by the registries.
     removePartialOutput();

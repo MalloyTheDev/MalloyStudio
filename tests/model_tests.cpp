@@ -35,6 +35,7 @@
 #include "platform/TwitchAuth.h"
 #include "platform/TwitchApi.h"
 #include "platform/CredentialStore.h"
+#include "platform/ProcessTree.h"
 #include "platform/SmartConfig.h"
 #include "recording/StreamingPipeline.h"
 #include "recording/EncoderRegistry.h"
@@ -216,6 +217,7 @@ private slots:
     void controllerCanReplacePipelineFromFinishedSignal();
     void aRecordingOfAStillSceneKeepsItsLengthAndAudio();
     void aRecordingKeepsItsColours();
+    void killingAProcessEndsWhatItStarted();
     void audioControllerHasDefaultLoopbackInput();
     void audioControllerPersistsVolumeAndMute();
     void audioControlsRefuseValuesThatAreNotNumbers();
@@ -952,6 +954,44 @@ void MalloyModelTests::aRecordingKeepsItsColours() {
                      && std::abs(b - source.blue()) <= 8,
                  qPrintable(QStringLiteral("%1 came back as (%2, %3, %4)")
                                 .arg(source.name()).arg(r).arg(g).arg(b)));
+    }
+}
+
+void MalloyModelTests::killingAProcessEndsWhatItStarted() {
+    // A launcher and the program it starts, as a package manager's ffmpeg is:
+    // cmd waiting on ping, which runs for half a minute.
+    const QString shell = QStandardPaths::findExecutable(QStringLiteral("cmd"));
+    if (shell.isEmpty()) QSKIP("cmd.exe not found");
+    const auto launch = [&](QProcess& p) -> quint32 {
+        p.start(shell, {QStringLiteral("/c"), QStringLiteral("ping"), QStringLiteral("-n"),
+                        QStringLiteral("30"), QStringLiteral("127.0.0.1")});
+        if (!p.waitForStarted(5000)) return 0;
+        const quint32 root = quint32(p.processId());
+        for (int i = 0; i < 50 && ProcessTree::descendants(root).isEmpty(); ++i) QThread::msleep(50);
+        const QList<quint32> kids = ProcessTree::descendants(root);
+        return kids.isEmpty() ? 0 : kids.first();
+    };
+
+    // What QProcess::kill() does: the launcher ends and its child does not.
+    {
+        QProcess launcher;
+        const quint32 child = launch(launcher);
+        QVERIFY(child != 0);
+        launcher.kill();
+        launcher.waitForFinished(3000);
+        QVERIFY2(ProcessTree::isRunning(child), "the child should outlive a plain kill of its launcher");
+        ProcessTree::kill(child);   // tidy up after the demonstration
+    }
+
+    // What the pipelines now do: the launcher and everything under it.
+    {
+        QProcess launcher;
+        const quint32 child = launch(launcher);
+        QVERIFY(child != 0);
+        QVERIFY(ProcessTree::kill(quint32(launcher.processId())));
+        launcher.waitForFinished(3000);
+        QTRY_VERIFY_WITH_TIMEOUT(!ProcessTree::isRunning(child), 3000);
+        QCOMPARE(launcher.state(), QProcess::NotRunning);
     }
 }
 

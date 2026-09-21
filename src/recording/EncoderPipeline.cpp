@@ -1,4 +1,5 @@
 #include "EncoderPipeline.h"
+#include "platform/ProcessTree.h"
 #include <QProcessEnvironment>
 #include "media/TimedSource.h"
 #include "model/Canvas.h"
@@ -956,7 +957,10 @@ void EncoderPipeline::stop() {
         killTimer.start(5000);
         wait.exec();
         if (m_ffmpeg->state() == QProcess::Running) {
-            m_ffmpeg->kill();
+            // The whole tree: ffmpeg is often a package manager's launcher
+            // whose child is the real encoder, which kill() would leave
+            // running with the file open and unfinished. See ProcessTree.
+            ProcessTree::kill(quint32(m_ffmpeg->processId()));
             m_ffmpeg->waitForFinished(1000);
         }
     }
