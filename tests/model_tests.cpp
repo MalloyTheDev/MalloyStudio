@@ -495,6 +495,11 @@ private slots:
     void aHiddenWindowIsHeldRatherThanClosed();
     void aSignOutDuringARefreshStaysSignedOut();
     void aRefreshTwitchDidNotAnswerKeepsTheAccount();
+    // A credential write that fails is reported and logged without the
+    // secret, and a Twitch sign-in that could not be saved is surfaced
+    // rather than lost at the next launch.
+    void aCredentialThatCannotBeWrittenIsReported();
+    void aTwitchSignInThatCannotBeSavedIsReported();
     void aCancelledSignInIgnoresALateCode();
     void aNetworkBlipWhilePollingDoesNotEndTheSignIn();
     void theChannelIdIsForgottenWhenTheAccountChanges();
@@ -7716,6 +7721,107 @@ void MalloyModelTests::aRefreshTwitchDidNotAnswerKeepsTheAccount() {
     QVERIFY(!ok);
     QVERIFY(!auth.isConnected());
     QCOMPARE(signedOut.count(), 1);
+    QVERIFY(CredentialStore::load(kTestTwitchCredential).isEmpty());
+}
+
+// More than a credential holds: CRED_MAX_CREDENTIAL_BLOB_SIZE is 2560 bytes,
+// and values are stored as UTF-16. Windows refuses the write, which stands in
+// for every other reason it can, such as the Credential Manager being
+// unavailable or blocked by policy.
+static QString tooLargeForACredential(QChar fill) {
+    return QString(1400, fill);
+}
+
+// A warning from CredentialStore that names the test credential and does not
+// contain `secret`.
+static QRegularExpression credentialWarningWithout(const QString& secret) {
+    return QRegularExpression(
+        QStringLiteral("^(?!.*%1)CredentialStore: could not write credential \"%2\"")
+            .arg(QRegularExpression::escape(secret),
+                 QRegularExpression::escape(kTestTwitchCredential)));
+}
+
+void MalloyModelTests::aCredentialThatCannotBeWrittenIsReported() {
+    const auto cleanup = qScopeGuard([] { CredentialStore::erase(kTestTwitchCredential); });
+    QVERIFY(CredentialStore::save(kTestTwitchCredential, QStringLiteral("kept")));
+    QCOMPARE(CredentialStore::load(kTestTwitchCredential), QStringLiteral("kept"));
+
+    const QString secret = QStringLiteral("s3cret-") + tooLargeForACredential(QLatin1Char('x'));
+    QTest::ignoreMessage(QtWarningMsg, credentialWarningWithout(secret.left(12)));
+    QVERIFY(!CredentialStore::save(kTestTwitchCredential, secret));
+    // What was stored before is still there.
+    QCOMPARE(CredentialStore::load(kTestTwitchCredential), QStringLiteral("kept"));
+
+    QVERIFY(!CredentialStore::save(QString(), QStringLiteral("value")));
+
+    // Erasing succeeds, and so does erasing what is not there, since nothing
+    // stored is what was asked for.
+    QVERIFY(CredentialStore::erase(kTestTwitchCredential));
+    QVERIFY(CredentialStore::load(kTestTwitchCredential).isEmpty());
+    QVERIFY(CredentialStore::erase(kTestTwitchCredential));
+    QVERIFY(!CredentialStore::erase(QString()));
+}
+
+void MalloyModelTests::aTwitchSignInThatCannotBeSavedIsReported() {
+    const auto cleanup = qScopeGuard([] { CredentialStore::erase(kTestTwitchCredential); });
+
+    // A refresh: Twitch rotates the one-time refresh token, so the stored one
+    // is spent, and the replacement cannot be saved.
+    seedTwitchTokens(/*expired*/ true);
+    const QString spent = CredentialStore::load(kTestTwitchCredential);
+    QVERIFY(!spent.isEmpty());
+    const QString unsaveable = tooLargeForACredential(QLatin1Char('r'));
+    const QByteArray rotated = QStringLiteral(
+        R"({"access_token":"new-access","refresh_token":"%1","expires_in":14400})")
+        .arg(unsaveable).toUtf8();
+
+    FakeTwitch twitch;
+    twitch.answer(200, rotated);
+    TwitchAuth auth(kTestTwitchCredential, nullptr);
+    auth.setClientId(QStringLiteral("test-client"));
+    auth.setAuthBase(twitch.base());
+    QSignalSpy failed(&auth, &TwitchAuth::failed);
+    QSignalSpy signedOut(&auth, &TwitchAuth::signedOut);
+
+    QTest::ignoreMessage(QtWarningMsg, credentialWarningWithout(unsaveable.left(12)));
+    int calls = 0;
+    bool ok = false;
+    QString token;
+    auth.withAccessToken([&](bool success, const QString& tokenOrError) {
+        ++calls;
+        ok = success;
+        token = tokenOrError;
+    });
+    QTRY_COMPARE(calls, 1);
+
+    // This session carries on with the renewed token, and the user is told it
+    // will not survive a restart, without the token in the message.
+    QVERIFY(ok);
+    QCOMPARE(token, QStringLiteral("new-access"));
+    QVERIFY(auth.isConnected());
+    QCOMPARE(signedOut.count(), 0);
+    QCOMPARE(failed.count(), 1);
+    const QString message = failed.first().first().toString();
+    QVERIFY(!message.isEmpty());
+    QVERIFY(!message.contains(unsaveable.left(12)));
+    QCOMPARE(CredentialStore::load(kTestTwitchCredential), spent);
+
+    // A new sign-in that cannot be saved connects for now and says so.
+    CredentialStore::erase(kTestTwitchCredential);
+    FakeTwitch signIn;
+    signIn.answer(200, kDeviceCode);
+    signIn.answer(200, rotated);
+    TwitchAuth fresh(kTestTwitchCredential, nullptr);
+    fresh.setClientId(QStringLiteral("test-client"));
+    fresh.setAuthBase(signIn.base());
+    QSignalSpy freshFailed(&fresh, &TwitchAuth::failed);
+    QSignalSpy connected(&fresh, &TwitchAuth::connected);
+
+    QTest::ignoreMessage(QtWarningMsg, credentialWarningWithout(unsaveable.left(12)));
+    fresh.beginDeviceFlow(TwitchApi::requiredScopes());
+    QTRY_COMPARE_WITH_TIMEOUT(connected.count(), 1, 10000);
+    QCOMPARE(freshFailed.count(), 1);
+    QVERIFY(fresh.isConnected());
     QVERIFY(CredentialStore::load(kTestTwitchCredential).isEmpty());
 }
 

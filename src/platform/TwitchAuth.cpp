@@ -205,9 +205,9 @@ void TwitchAuth::loadTokens() {
     m_tokens = TwitchTokens::fromJson(CredentialStore::load(m_credentialTarget));
 }
 
-void TwitchAuth::storeTokens(const TwitchTokens& tokens) {
+bool TwitchAuth::storeTokens(const TwitchTokens& tokens) {
     m_tokens = tokens;
-    CredentialStore::save(m_credentialTarget, tokens.toJson());
+    return CredentialStore::save(m_credentialTarget, tokens.toJson());
 }
 
 void TwitchAuth::forgetTokens() {
@@ -291,8 +291,12 @@ void TwitchAuth::pollOnce() {
         TwitchTokens tokens;
         if (parseTokens(body, &tokens, &pending, &error)) {
             cancelDeviceFlow();
-            storeTokens(tokens);
+            const bool saved = storeTokens(tokens);
             emit connected();
+            if (!saved)
+                emit failed(tr("Twitch is connected, but the sign-in could not be saved to the "
+                               "Windows Credential Manager, so it will be lost when MalloyStudio "
+                               "closes."));
             return;
         }
         if (!pending.isEmpty()) {
@@ -376,10 +380,17 @@ void TwitchAuth::refresh(std::function<void(bool, QString)> done) {
             return;
         }
         // Refresh tokens are one time use: persist the replacement immediately,
-        // before anything can fail, or the account is locked out.
+        // before anything can fail, or the account is locked out. The stored
+        // one is already spent, so if the replacement cannot be saved this
+        // session carries on with it and the user is told the next launch
+        // will not have it.
         if (tokens.refreshToken.isEmpty()) tokens.refreshToken = m_tokens.refreshToken;
         if (tokens.scopes.isEmpty()) tokens.scopes = m_tokens.scopes;
-        storeTokens(tokens);
+        if (!storeTokens(tokens))
+            emit failed(tr("Twitch renewed the sign-in, but the renewed sign-in could not be "
+                           "saved to the Windows Credential Manager. The account stays "
+                           "connected until MalloyStudio closes, and will need connecting "
+                           "again after that."));
         done(true, tokens.accessToken);
     });
 }

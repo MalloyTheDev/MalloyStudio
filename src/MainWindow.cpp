@@ -280,6 +280,11 @@ void MainWindow::setupUi() {
     m_twitchAuth->setClientId(
         QSettings().value(QStringLiteral("stream/twitchClientId")).toString());
     m_twitchApi = new TwitchApi(m_twitchAuth, this);
+    // The sign-in dialog reports failures while it is open. A renewed sign-in
+    // that could not be saved happens later, during an ordinary Twitch call,
+    // and would otherwise reach nobody.
+    connect(m_twitchAuth, &TwitchAuth::failed, this,
+            [this](const QString& message) { flash(message, 10000); });
 
     m_settings = new SettingsWorkspace(this);
     m_settings->setTwitch(m_twitchAuth, m_twitchApi);

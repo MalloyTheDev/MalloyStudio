@@ -1,5 +1,7 @@
 #include "platform/CredentialStore.h"
 
+#include <QtGlobal>
+
 #include <string>
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -10,14 +12,18 @@
 
 namespace {
 std::wstring toWide(const QString& s) { return s.toStdWString(); }
+
+// Names the target and the Windows error. Never the value: it is the secret.
+void logFailure(const char* action, const QString& target, DWORD error) {
+    qWarning("CredentialStore: could not %s credential \"%s\" (Windows error %lu: %s)",
+             action, qPrintable(target), static_cast<unsigned long>(error),
+             qPrintable(qt_error_string(static_cast<int>(error)).trimmed()));
+}
 }  // namespace
 
-void CredentialStore::save(const QString& target, const QString& value) {
-    if (target.isEmpty()) return;
-    if (value.isEmpty()) {
-        erase(target);
-        return;
-    }
+bool CredentialStore::save(const QString& target, const QString& value) {
+    if (target.isEmpty()) return false;
+    if (value.isEmpty()) return erase(target);
 
     const std::wstring wTarget = toWide(target);
     const std::wstring wValue  = toWide(value);
@@ -29,7 +35,9 @@ void CredentialStore::save(const QString& target, const QString& value) {
     cred.CredentialBlob     = reinterpret_cast<LPBYTE>(const_cast<wchar_t*>(wValue.data()));
     cred.Persist            = CRED_PERSIST_LOCAL_MACHINE;
     cred.UserName           = const_cast<LPWSTR>(L"MalloyStudio");
-    CredWriteW(&cred, 0);
+    if (CredWriteW(&cred, 0)) return true;
+    logFailure("write", target, GetLastError());
+    return false;
 }
 
 QString CredentialStore::load(const QString& target) {
@@ -51,8 +59,12 @@ QString CredentialStore::load(const QString& target) {
     return value;
 }
 
-void CredentialStore::erase(const QString& target) {
-    if (target.isEmpty()) return;
+bool CredentialStore::erase(const QString& target) {
+    if (target.isEmpty()) return false;
     const std::wstring wTarget = toWide(target);
-    CredDeleteW(wTarget.c_str(), CRED_TYPE_GENERIC, 0);
+    if (CredDeleteW(wTarget.c_str(), CRED_TYPE_GENERIC, 0)) return true;
+    const DWORD error = GetLastError();
+    if (error == ERROR_NOT_FOUND) return true;   // nothing stored is what was asked for
+    logFailure("erase", target, error);
+    return false;
 }

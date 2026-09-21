@@ -15,11 +15,20 @@ namespace CredentialStore {
 // Stores `value` under `target`, replacing anything already there. An empty
 // value erases the credential instead, so callers do not need a separate call
 // to clear one.
-void save(const QString& target, const QString& value);
+//
+// Returns false when nothing was stored: the target is empty, or Windows
+// refused the write (the Credential Manager is unavailable, a policy blocks
+// it, or the value is larger than a credential holds). Whatever was stored
+// before is then still there. The failure is logged with the target and the
+// Windows error, never with the value.
+bool save(const QString& target, const QString& value);
 
 // Returns an empty string when nothing is stored under `target`.
 QString load(const QString& target);
 
-void erase(const QString& target);
+// Returns true when nothing is stored under `target` afterwards, which
+// includes there having been nothing to erase. False for an empty target and
+// when Windows refused, which is logged like a failed save.
+bool erase(const QString& target);
 
 }  // namespace CredentialStore

@@ -106,13 +106,18 @@ signals:
     void deviceCodeReady(QString userCode, QString verificationUri, int expiresInSecs);
     void connected();
     void signedOut();
+    // A sign-in failed, or tokens Twitch issued could not be saved. The second
+    // comes after connected() or a successful refresh: the session works, but
+    // will not survive the application closing.
     void failed(QString message);
 
 private slots:
     void pollOnce();
 
 private:
-    void storeTokens(const TwitchTokens& tokens);
+    // Keeps the tokens for this session and returns whether they were also
+    // saved. A failure leaves them usable until the application closes.
+    bool storeTokens(const TwitchTokens& tokens);
     void loadTokens();
     void forgetTokens();
     void refresh(std::function<void(bool ok, QString tokenOrError)> done);
