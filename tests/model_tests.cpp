@@ -44,6 +44,7 @@
 #include "ui/workspaces/TimelineEdits.h"
 #include "ui/shell/EditingFocus.h"
 #include "ui/OutputSettingsDialog.h"
+#include "ui/StreamSettingsDialog.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -63,6 +64,7 @@
 #include <QTemporaryDir>
 #include <QDoubleSpinBox>
 #include <QPushButton>
+#include <QDialogButtonBox>
 #include <QScopeGuard>
 #include <QSemaphore>
 #include <QHostAddress>
@@ -430,6 +432,7 @@ private slots:
     void theReplayBufferIsAFrameConsumer();
     void aFadeStartsFromTheComposedCanvas();
     void theOutputDialogHandsBackWhatItWasGiven();
+    void theStreamDialogRefusesAnUnusableCustomUrl();
     void spinBoxesAndTextFieldsKeepTheirDigits();
     void editorClipRoundTripPreservesSourceReference();
     void editorLegacyClipLoadsAsUnlinked();
@@ -6601,6 +6604,63 @@ void MalloyModelTests::theOutputDialogHandsBackWhatItWasGiven() {
         in.container = container;
         QCOMPARE(OutputSettingsDialog(in).settings().container, container);
     }
+}
+
+void MalloyModelTests::theStreamDialogRefusesAnUnusableCustomUrl() {
+    StreamSettings current;
+    current.service   = StreamSettings::Service::Custom;
+    current.customUrl = QStringLiteral("rtmp://ingest.example/live/{key}");
+    current.streamKey = QStringLiteral("test-key");
+
+    // Never shown, and accepting it must not write the real settings or the
+    // real credential, so the save is captured instead.
+    StreamSettingsDialog dialog(current);
+    QList<StreamSettings> saved;
+    dialog.setSaveForTesting([&saved](const StreamSettings& s) { saved << s; });
+    auto* urlEdit = dialog.findChild<QLineEdit*>(QStringLiteral("customUrlEdit"));
+    auto* error   = dialog.findChild<QLabel*>(QStringLiteral("customUrlError"));
+    auto* buttons = dialog.findChild<QDialogButtonBox*>();
+    QVERIFY(urlEdit && error && buttons);
+    QPushButton* ok = buttons->button(QDialogButtonBox::Ok);
+    QVERIFY(ok);
+    QVERIFY(error->isHidden());
+
+    // Each of these was saved and streamed to, then replaced by load().
+    for (const QString& bad : {QStringLiteral("srt://ingest.example/live/{key}"),
+                               QStringLiteral("rtmp:/myserver/live/{key}"),
+                               QStringLiteral("file:///C:/recordings/out.flv")}) {
+        urlEdit->setText(bad);
+        ok->click();
+        QVERIFY2(saved.isEmpty(), qPrintable(bad));
+        QCOMPARE(dialog.result(), int(QDialog::Rejected));
+        QVERIFY2(!error->isHidden() && !error->text().isEmpty(), qPrintable(bad));
+        QCOMPARE(dialog.settings().customUrl, current.customUrl);
+    }
+
+    // Editing the field clears the complaint, and a usable URL is accepted as
+    // typed, less surrounding spaces.
+    urlEdit->setText(QStringLiteral("  rtmps://live.example.com/app/{key}  "));
+    QVERIFY(error->isHidden());
+    ok->click();
+    QCOMPARE(dialog.result(), int(QDialog::Accepted));
+    QCOMPARE(saved.size(), 1);
+    QCOMPARE(saved.first().customUrl, QStringLiteral("rtmps://live.example.com/app/{key}"));
+    QCOMPARE(dialog.settings().customUrl, saved.first().customUrl);
+
+    // Another service does not use the custom URL, so an unusable one left in
+    // the hidden field does not block OK, and is not what gets saved.
+    StreamSettings twitch = current;
+    twitch.service = StreamSettings::Service::Twitch;
+    StreamSettingsDialog other(twitch);
+    QList<StreamSettings> otherSaved;
+    other.setSaveForTesting([&otherSaved](const StreamSettings& s) { otherSaved << s; });
+    other.findChild<QLineEdit*>(QStringLiteral("customUrlEdit"))
+        ->setText(QStringLiteral("srt://ingest.example/live/{key}"));
+    other.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+    QCOMPARE(other.result(), int(QDialog::Accepted));
+    QCOMPARE(otherSaved.size(), 1);
+    QCOMPARE(otherSaved.first().service, StreamSettings::Service::Twitch);
+    QCOMPARE(otherSaved.first().customUrl, current.customUrl);
 }
 
 void MalloyModelTests::audioFromARemovedInputIsNotKept() {

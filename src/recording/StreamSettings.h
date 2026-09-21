@@ -49,6 +49,12 @@ struct StreamSettings {
     // Returns the static service URL template (without the key substituted).
     static QString templateFor(Service s);
 
+    // Whether a Service::Custom URL template may be used: it must parse
+    // strictly, name a host, and use rtmp or rtmps. normalized() replaces a
+    // template that fails this, and StreamSettingsDialog refuses one, so the
+    // dialog cannot save or start a stream with a URL a later load discards.
+    static bool isValidCustomUrl(const QString& url);
+
     // Human-readable service name for the dialog.
     static QString displayName(Service s);
 };

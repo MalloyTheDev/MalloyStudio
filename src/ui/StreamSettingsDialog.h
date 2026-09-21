@@ -3,6 +3,8 @@
 
 #include <QDialog>
 
+#include <functional>
+
 class QComboBox;
 class QLineEdit;
 class QSpinBox;
@@ -22,15 +24,22 @@ public:
 
     StreamSettings settings() const { return m_settings; }
 
+    // Accepting writes QSettings and the stream key's Credential Manager
+    // entry, which a test must not touch; it can capture the write instead.
+    using SaveFunction = std::function<void(const StreamSettings&)>;
+    void setSaveForTesting(SaveFunction save) { m_save = std::move(save); }
+
 private slots:
     void onServiceChanged(int index);
     void onAccepted();
 
 private:
     StreamSettings m_settings;
+    SaveFunction   m_save = [](const StreamSettings& s) { s.save(); };
 
     QComboBox* m_serviceCombo    = nullptr;
     QLineEdit* m_customUrlEdit   = nullptr;
+    QLabel*    m_customUrlError  = nullptr;   // why OK was refused; hidden otherwise
     QLabel*    m_urlPreviewLabel = nullptr;
     QLineEdit* m_keyEdit         = nullptr;
     QSpinBox*  m_bitrateSpinBox  = nullptr;

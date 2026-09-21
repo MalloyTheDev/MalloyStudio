@@ -312,13 +312,19 @@ void OutputSettingsTests::customStreamUrls_data() {
     QTest::newRow("local-file") << QStringLiteral("C:/recordings/replace.flv") << false;
     QTest::newRow("file-url") << QStringLiteral("file:///C:/recordings/replace.flv") << false;
     QTest::newRow("http") << QStringLiteral("https://example.com/live") << false;
+    QTest::newRow("srt") << QStringLiteral("srt://ingest.example/live/{key}") << false;
     QTest::newRow("missing-host") << QStringLiteral("rtmp:///live/{key}") << false;
+    QTest::newRow("single-slash") << QStringLiteral("rtmp:/myserver/live/{key}") << false;
+    QTest::newRow("empty") << QString() << false;
     QTest::newRow("newline") << QStringLiteral("rtmp://example.com/live/\n{key}") << false;
 }
 
 void OutputSettingsTests::customStreamUrls() {
     QFETCH(QString, url);
     QFETCH(bool, accepted);
+    // The one rule, which StreamSettingsDialog applies before saving and
+    // load() applies on reading.
+    QCOMPARE(StreamSettings::isValidCustomUrl(url), accepted);
     QTemporaryDir directory;
     QVERIFY(directory.isValid());
     QSettings settings(directory.filePath(QStringLiteral("settings.ini")), QSettings::IniFormat);

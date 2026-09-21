@@ -34,7 +34,16 @@ StreamSettingsDialog::StreamSettingsDialog(const StreamSettings& current, QWidge
     // Custom RTMP URL row (hidden unless Custom is selected)
     m_customUrlEdit = new QLineEdit(current.customUrl, serviceGroup);
     m_customUrlEdit->setPlaceholderText(QStringLiteral("rtmp://your-server.example.com/live/{key}"));
+    m_customUrlEdit->setObjectName(QStringLiteral("customUrlEdit"));
     serviceLayout->addRow(tr("Custom URL:"), m_customUrlEdit);
+
+    m_customUrlError = new QLabel(serviceGroup);
+    m_customUrlError->setObjectName(QStringLiteral("customUrlError"));
+    m_customUrlError->setWordWrap(true);
+    m_customUrlError->setStyleSheet(QStringLiteral("color: #ff625f;"));
+    m_customUrlError->hide();
+    serviceLayout->addRow(QString(), m_customUrlError);
+    connect(m_customUrlEdit, &QLineEdit::textChanged, m_customUrlError, &QWidget::hide);
 
     // Live URL preview (read-only, updates as the user types the key)
     m_urlPreviewLabel = new QLabel(serviceGroup);
@@ -196,14 +205,36 @@ StreamSettingsDialog::StreamSettingsDialog(const StreamSettings& current, QWidge
 void StreamSettingsDialog::onServiceChanged(int index) {
     const bool isCustom = (index == static_cast<int>(StreamSettings::Service::Custom));
     m_customUrlEdit->setVisible(isCustom);
+    if (!isCustom) m_customUrlError->hide();
 }
 
 void StreamSettingsDialog::onAccepted() {
-    m_settings.service     = static_cast<StreamSettings::Service>(m_serviceCombo->currentIndex());
-    m_settings.customUrl   = m_customUrlEdit->text().trimmed();
+    const auto service = static_cast<StreamSettings::Service>(m_serviceCombo->currentIndex());
+    const QString customUrl = m_customUrlEdit->text().trimmed();
+    const bool customUrlValid = StreamSettings::isValidCustomUrl(customUrl);
+
+    // The rule load() applies. A URL it rejects used to be accepted here: this
+    // session streamed to it under whatever scheme it named, and the next
+    // launch silently replaced it with the placeholder server, which was then
+    // sent the key.
+    if (service == StreamSettings::Service::Custom && !customUrlValid) {
+        m_customUrlError->setText(
+            tr("This is not an RTMP address. It must start with rtmp:// or rtmps:// and name "
+               "a server, for example rtmp://live.example.com/app/{key}."));
+        m_customUrlError->show();
+        m_customUrlEdit->setFocus();
+        return;
+    }
+
+    m_settings.service     = service;
+    // Another service does not use the custom URL, so an unusable one left in
+    // the hidden field is no reason to refuse; the stored one is kept.
+    if (customUrlValid) m_settings.customUrl = customUrl;
     m_settings.streamKey   = m_keyEdit->text();
     m_settings.bitrateKbps = m_bitrateSpinBox->value();
     m_settings.keyframeSec = m_keyframeSpinBox->value();
-    m_settings.save();
+    // What is saved and handed back is what the next load() would return.
+    m_settings = m_settings.normalized();
+    m_save(m_settings);
     accept();
 }

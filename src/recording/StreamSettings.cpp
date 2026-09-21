@@ -96,13 +96,19 @@ StreamSettings StreamSettings::normalized() const {
     o.keyframeSec = std::clamp(o.keyframeSec, 1, 10);
     if (o.service != Service::Twitch && o.service != Service::YouTube && o.service != Service::Custom)
         o.service = Service::Twitch;
-    QString probe = o.customUrl;
-    probe.replace(QStringLiteral("{key}"), QStringLiteral("validation-key"));
-    const QUrl url(probe, QUrl::StrictMode);
-    if (!url.isValid() || url.host().isEmpty()
-        || (url.scheme() != QLatin1String("rtmp") && url.scheme() != QLatin1String("rtmps")))
+    if (!isValidCustomUrl(o.customUrl))
         o.customUrl = templateFor(Service::Custom);
     return o;
+}
+
+bool StreamSettings::isValidCustomUrl(const QString& url) {
+    // Checked as it will be sent, with a stand-in for the key: the braces of
+    // the placeholder are not legal in a strictly parsed URL.
+    QString probe = url;
+    probe.replace(QStringLiteral("{key}"), QStringLiteral("validation-key"));
+    const QUrl parsed(probe, QUrl::StrictMode);
+    return parsed.isValid() && !parsed.host().isEmpty()
+        && (parsed.scheme() == QLatin1String("rtmp") || parsed.scheme() == QLatin1String("rtmps"));
 }
 
 StreamSettings StreamSettings::load() {

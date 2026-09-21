@@ -252,6 +252,10 @@ qt_add_executable(MalloyStudioTests
     src/ui/MonitorPickerDialog.h
     src/ui/WindowPickerDialog.cpp
     src/ui/WindowPickerDialog.h
+    # The stream dialog, which must refuse a custom URL that load() would
+    # replace rather than save it.
+    src/ui/StreamSettingsDialog.cpp
+    src/ui/StreamSettingsDialog.h
 )
 
 # Force console subsystem so CTest captures stdout test output
