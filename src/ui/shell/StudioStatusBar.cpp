@@ -3,6 +3,8 @@
 #include "project/RecentRecordings.h"
 #include "ui/Theme.h"
 
+#include <QCoreApplication>
+#include <QDir>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QStorageInfo>
@@ -11,6 +13,13 @@
 namespace {
 // Shown for any figure the app cannot currently read.
 const QString kNoValue = QStringLiteral("-");
+
+// The right-hand end of the bar: this build's version, which main() takes from
+// the project version CMake defines, then what is known about ffmpeg.
+QString versionLine(const QString& ffmpeg) {
+    const QString app = QCoreApplication::applicationVersion();
+    return app.isEmpty() ? ffmpeg : QStringLiteral("v%1  ·  %2").arg(app, ffmpeg);
+}
 
 QLabel* dot(const QColor& c, QWidget* parent) {
     auto* d = new QLabel(parent);
@@ -72,10 +81,12 @@ StudioStatusBar::StudioStatusBar(QWidget* parent) : QWidget(parent) {
 
     row->addStretch();
 
-    auto* ver = new QLabel(QStringLiteral("v8.0.0  ·  ffmpeg 7.0.2"), this);
-    ver->setProperty("mono", true);
-    ver->setProperty("tone", "mute");
-    row->addWidget(ver);
+    // ffmpeg's version is filled in by setFfmpegVersion once the binary has
+    // answered, which is after the window is up.
+    m_version = new QLabel(versionLine(QStringLiteral("ffmpeg ") + kNoValue), this);
+    m_version->setProperty("mono", true);
+    m_version->setProperty("tone", "mute");
+    row->addWidget(m_version);
 
     m_statsTimer = new QTimer(this);
     m_statsTimer->setInterval(1000);
@@ -240,6 +251,16 @@ void StudioStatusBar::setEncodeStats(int bitrateKbps, int droppedFrames, int enc
 
 void StudioStatusBar::setCaptureStatsProvider(std::function<CaptureStats()> provider) {
     m_captureStats = std::move(provider);
+}
+
+void StudioStatusBar::setFfmpegVersion(const FfmpegVersion::Result& found) {
+    const QString ffmpeg = found.path.isEmpty()    ? tr("ffmpeg not found")
+                         : found.version.isEmpty() ? QStringLiteral("ffmpeg ") + kNoValue
+                                                   : QStringLiteral("ffmpeg ") + found.version;
+    m_version->setText(versionLine(ffmpeg));
+    // Which binary answered, since PATH decides and more than one may be
+    // installed.
+    m_version->setToolTip(QDir::toNativeSeparators(found.path));
 }
 
 void StudioStatusBar::flashMessage(const QString& text, int ms) {

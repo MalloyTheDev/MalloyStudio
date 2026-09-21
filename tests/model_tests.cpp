@@ -45,11 +45,13 @@
 #include "platform/SmartConfig.h"
 #include "recording/StreamingPipeline.h"
 #include "recording/EncoderRegistry.h"
+#include "recording/FfmpegVersion.h"
 #include "ui/workspaces/EditorWorkspace.h"
 #include "ui/workspaces/TimelineEdits.h"
 #include "ui/workspaces/StreamingWorkspace.h"
 #include "ui/workspaces/LibraryWorkspaces.h"
 #include "ui/shell/EditingFocus.h"
+#include "ui/shell/StudioStatusBar.h"
 #include "ui/OutputSettingsDialog.h"
 #include "ui/StreamSettingsDialog.h"
 #include "ui/SmartConfigDialog.h"
@@ -312,6 +314,10 @@ private slots:
     // parser anchors the streaming stats display.
     void filterEnabledFlagRoundtripsJson();
     void streamProgressLineParsesBitrateAndDrops();
+    // The status bar names the ffmpeg that is actually on PATH, read from its
+    // own `-version` in the background, and says so when there is none.
+    void ffmpegVersionIsReadFromItsFirstLine();
+    void theStatusBarNamesTheFfmpegItRuns();
     // Machine load: the pure percentage math, including every case where two
     // readings say nothing and the honest answer is to report unknown.
     void machineLoadReportsUnknownRatherThanGuessing();
@@ -2760,6 +2766,115 @@ void MalloyModelTests::streamProgressLineParsesBitrateAndDrops() {
         QCOMPARE(drops, 99);
         QCOMPARE(fps, 99);
     }
+}
+
+void MalloyModelTests::ffmpegVersionIsReadFromItsFirstLine() {
+    // Release builds: the number, without the build's decorations. The first
+    // is what the ffmpeg on the development machine prints.
+    QCOMPARE(FfmpegVersion::parse(QStringLiteral(
+                 "ffmpeg version 8.1.1-essentials_build-www.gyan.dev Copyright (c) 2000-2026 "
+                 "the FFmpeg developers\r\nbuilt with gcc 15.2.0 (Rev13, Built by MSYS2 project)\r\n")),
+             QStringLiteral("8.1.1"));
+    QCOMPARE(FfmpegVersion::parse(QStringLiteral(
+                 "ffmpeg version 7.0.2 Copyright (c) 2000-2024 the FFmpeg developers")),
+             QStringLiteral("7.0.2"));
+    QCOMPARE(FfmpegVersion::parse(QStringLiteral("ffmpeg version 6.1.1-3ubuntu5 Copyright")),
+             QStringLiteral("6.1.1"));
+    // A release tag, and a release with no patch number.
+    QCOMPARE(FfmpegVersion::parse(QStringLiteral("ffmpeg version n7.1 Copyright")),
+             QStringLiteral("7.1"));
+
+    // Development builds have no release number, and their build identifier is
+    // what identifies them. A date is not mistaken for one.
+    QCOMPARE(FfmpegVersion::parse(QStringLiteral("ffmpeg version N-118000-g1234abcd Copyright")),
+             QStringLiteral("N-118000-g1234abcd"));
+    QCOMPARE(FfmpegVersion::parse(QStringLiteral(
+                 "ffmpeg version 2024-12-19-git-494c961379-essentials_build-www.gyan.dev Copyright")),
+             QStringLiteral("2024-12-19-git-494c961379-essentials_build-www.gyan.dev"));
+
+    // Anything else is no version at all rather than a guess, including a
+    // version further down the output, which is not this binary's first line.
+    QVERIFY(FfmpegVersion::parse(QString()).isEmpty());
+    QVERIFY(FfmpegVersion::parse(QStringLiteral("ffmpeg version")).isEmpty());
+    QVERIFY(FfmpegVersion::parse(QStringLiteral("ffprobe version 8.1.1 Copyright")).isEmpty());
+    QVERIFY(FfmpegVersion::parse(QStringLiteral("Microsoft Windows [Version 10.0.26200]")).isEmpty());
+    QVERIFY(FfmpegVersion::parse(QStringLiteral("warning\nffmpeg version 8.1.1 Copyright")).isEmpty());
+}
+
+void MalloyModelTests::theStatusBarNamesTheFfmpegItRuns() {
+    // What the bar shows for each answer. It used to print "ffmpeg 7.0.2"
+    // whatever was installed.
+    const QString appVersion = QCoreApplication::applicationVersion();
+    const auto restore = qScopeGuard([&] { QCoreApplication::setApplicationVersion(appVersion); });
+    QCoreApplication::setApplicationVersion(QStringLiteral("8.0.0"));
+    StudioStatusBar bar;
+    const auto shown = [&bar] {
+        for (const QLabel* label : bar.findChildren<QLabel*>())
+            if (label->text().startsWith(QStringLiteral("v8.0.0"))) return label->text();
+        return QString();
+    };
+    QCOMPARE(shown(), QStringLiteral("v8.0.0  ·  ffmpeg -"));   // not known yet
+    bar.setFfmpegVersion({QStringLiteral("C:/tools/ffmpeg.exe"), QStringLiteral("8.1.1")});
+    QCOMPARE(shown(), QStringLiteral("v8.0.0  ·  ffmpeg 8.1.1"));
+    bar.setFfmpegVersion({QStringLiteral("C:/tools/ffmpeg.exe"), QString()});
+    QCOMPARE(shown(), QStringLiteral("v8.0.0  ·  ffmpeg -"));   // found, but it did not say
+    bar.setFfmpegVersion({});
+    QCOMPARE(shown(), QStringLiteral("v8.0.0  ·  ffmpeg not found"));
+
+    // The probe. The result is declared before the object owning the process,
+    // so that an answer arriving while that object is destroyed still has
+    // somewhere to go.
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const auto probe = [](const QString& path, int timeoutMs, FfmpegVersion::Result* found) {
+        bool answered = false;
+        QObject owner;
+        FfmpegVersion::probe(path, &owner, [&](const FfmpegVersion::Result& r) {
+            *found = r;
+            answered = true;
+        }, timeoutMs);
+        return QTest::qWaitFor([&] { return answered; }, 15000);
+    };
+    FfmpegVersion::Result found;
+
+    // None on PATH.
+    QVERIFY(probe(QString(), 5000, &found));
+    QVERIFY(found.path.isEmpty());
+    QVERIFY(found.version.isEmpty());
+
+    // One that cannot be started: its path, and no version.
+    const QString missing = dir.filePath(QStringLiteral("no-such-ffmpeg.exe"));
+    QVERIFY(probe(missing, 5000, &found));
+    QCOMPARE(found.path, missing);
+    QVERIFY(found.version.isEmpty());
+
+    // The real one answers with a version.
+    const QString ffmpeg = QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
+    if (!ffmpeg.isEmpty()) {
+        QVERIFY(probe(ffmpeg, 5000, &found));
+        QCOMPARE(found.path, ffmpeg);
+        QVERIFY2(!found.version.isEmpty(), qPrintable(ffmpeg));
+    }
+
+    // One that never answers: cmd waits for a command on its standard input,
+    // which is left open. It is ended at the timeout, together with anything
+    // it started, and reported as unreadable.
+    const QString shell = QStandardPaths::findExecutable(QStringLiteral("cmd"));
+    if (shell.isEmpty()) QSKIP("cmd.exe not found");
+    bool answered = false;
+    QObject owner;
+    FfmpegVersion::probe(shell, &owner, [&](const FfmpegVersion::Result& r) {
+        found = r;
+        answered = true;
+    }, 300);
+    auto* proc = owner.findChild<QProcess*>();
+    QVERIFY(proc);
+    QVERIFY(proc->waitForStarted(5000));
+    const quint32 pid = quint32(proc->processId());
+    QTRY_VERIFY_WITH_TIMEOUT(answered, 10000);
+    QCOMPARE(found.path, shell);
+    QVERIFY(found.version.isEmpty());
+    QTRY_VERIFY_WITH_TIMEOUT(!ProcessTree::isRunning(pid), 3000);
 }
 
 void MalloyModelTests::sinkCadenceDecidesWhenAFrameIsDue() {

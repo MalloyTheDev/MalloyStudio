@@ -104,7 +104,9 @@ rearranged and the layout is persisted in `QSettings` (Windows Registry under
 `HKCU\Software\MalloyStudio\MalloyStudio`).
 
 If ffmpeg is not on `PATH`, the Record button is disabled with an explanatory
-tooltip; all other features work normally.
+tooltip and the status bar says ffmpeg was not found; all other features work
+normally. Otherwise the status bar shows the version that ffmpeg reports, and
+its path on hover.
 
 ---
 

@@ -2,6 +2,7 @@
 
 #include "capture/ICaptureSource.h"
 #include "platform/MachineLoad.h"
+#include "recording/FfmpegVersion.h"
 
 #include <QString>
 #include <QWidget>
@@ -53,6 +54,11 @@ public:
     // nothing about what is being captured.
     void setCaptureStatsProvider(std::function<CaptureStats()> provider);
 
+    // Names the ffmpeg this build runs, from FfmpegVersion::probe. The version
+    // reads as unknown until this is called, and a result with no path says
+    // that ffmpeg was not found, which is also why Record and Stream are off.
+    void setFfmpegVersion(const FfmpegVersion::Result& found);
+
 private:
     QWidget* makeStat(const QString& label, QLabel** valueOut);
     void tickStats();
@@ -81,6 +87,10 @@ private:
     QWidget* m_capDropStat = nullptr;
     QLabel*  m_capDrops = nullptr;
     std::function<CaptureStats()> m_captureStats;
+
+    // The application's version, from the build, and ffmpeg's, from the
+    // binary on PATH.
+    QLabel* m_version = nullptr;
 
     QTimer* m_statsTimer = nullptr;
     QTimer* m_clock = nullptr;

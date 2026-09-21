@@ -10,6 +10,9 @@ int main(int argc, char* argv[]) {
     QApplication app(argc, argv);
     QCoreApplication::setOrganizationName("MalloyStudio");
     QCoreApplication::setApplicationName("MalloyStudio");
+    // The project version in CMakeLists.txt, so a release changes it in one
+    // place and nothing that shows it can drift.
+    QCoreApplication::setApplicationVersion(QStringLiteral(MALLOY_VERSION));
 
     // Stage timing is off unless asked for. The environment variable is
     // there so a measurement script can switch it on for one run without

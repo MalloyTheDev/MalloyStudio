@@ -26,6 +26,7 @@
 #include "audio/AudioController.h"
 #include "input/HotkeyManager.h"
 #include "recording/MediaController.h"
+#include "recording/FfmpegVersion.h"
 #include "model/SceneCollection.h"
 #include "model/Scene.h"
 #include "capture/CaptureBackend.h"
@@ -48,6 +49,7 @@
 #include <QLabel>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QPointer>
 #include <QPushButton>
 #include <QSettings>
 #include <QShortcut>
@@ -133,6 +135,18 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         m_controlsBar->setRecordEnabled(false, tip);
         m_controlsBar->setStreamEnabled(false, tip);
     }
+
+    // The version of the ffmpeg recordings run, for the status bar. Asked once
+    // the event loop is running and answered in the background, since nothing
+    // the first paint shows depends on it. The bar is held by QPointer because
+    // an unanswered probe is ended while this window's children are destroyed.
+    QTimer::singleShot(0, this, [this] {
+        const QPointer<StudioStatusBar> bar = m_shell->status();
+        FfmpegVersion::probe(QStandardPaths::findExecutable(QStringLiteral("ffmpeg")), this,
+                             [bar](const FfmpegVersion::Result& found) {
+            if (bar) bar->setFfmpegVersion(found);
+        });
+    });
 
     // Start on a usable project rather than an inert one. Without a scene the
     // preview says "No scene selected", Add Source opens nothing, and the

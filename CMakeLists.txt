@@ -1,5 +1,11 @@
 cmake_minimum_required(VERSION 3.21)
-project(MalloyStudio LANGUAGES CXX)
+project(MalloyStudio VERSION 8.0.0 LANGUAGES CXX)
+
+# The version the application reports about itself. main() hands it to
+# QCoreApplication, and the status bar reads it from there. Defined for that
+# one file, so a version change recompiles one file rather than the project.
+set_source_files_properties(src/main.cpp PROPERTIES
+    COMPILE_DEFINITIONS MALLOY_VERSION="${PROJECT_VERSION}")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -66,6 +72,8 @@ set(MALLOY_CORE_SOURCES
     src/recording/RingTimedPcmSource.h
     src/recording/EncoderRegistry.cpp
     src/recording/EncoderRegistry.h
+    src/recording/FfmpegVersion.cpp
+    src/recording/FfmpegVersion.h
     src/input/HotkeyManager.cpp
     src/input/HotkeyManager.h
     src/platform/CredentialStore.cpp
@@ -274,6 +282,9 @@ qt_add_executable(MalloyStudioTests
     # configured microphone and nothing else.
     src/ui/SmartConfigDialog.cpp
     src/ui/SmartConfigDialog.h
+    # The status bar, which must name the ffmpeg this build actually runs.
+    src/ui/shell/StudioStatusBar.cpp
+    src/ui/shell/StudioStatusBar.h
 )
 
 # Force console subsystem so CTest captures stdout test output
