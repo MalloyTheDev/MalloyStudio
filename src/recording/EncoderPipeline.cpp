@@ -460,7 +460,7 @@ EncoderPipeline::~EncoderPipeline() {
 }
 
 namespace {
-// Common input args: rawvideo from stdin + s16le PCM from named pipe.
+// Common input args: raw video and s16le PCM, each from its own named pipe.
 // Always at canvas-native resolution (1920x1080); the scale filter in the
 // output args resizes when OutputSettings differs.
 QStringList buildInputArgs(const OutputSettings& s, const QString& videoPipeName,
@@ -886,7 +886,8 @@ void EncoderPipeline::stop() {
     // may be blocked in ConnectNamedPipe waiting for an ffmpeg that died during
     // argument parsing, or part way through the priming write. DisconnectNamedPipe
     // below would then wait on that write while the write waits for a reader:
-    // the deadlock AudioPipeWriter::unblockPendingWrite already documents.
+    // a deadlock, which is why every pipe worker's I/O is cancellable (see
+    // CancellablePipeIo).
     // Cancelling their I/O is what makes these joins bounded, and joining them
     // is what stops cleanup() closing a handle another thread is blocked on.
     retirePipeWorkers();

@@ -108,12 +108,13 @@ protected:
     QString audioPipeName() const { return m_audioPipeName; }
 
     // Concrete subclasses override to build per-Target output/codec/muxer args.
-    // The base class prepends the input args (rawvideo stdin + audio pipe)
-    // before this is appended.
+    // The base class prepends the input args (raw video and s16le audio, each
+    // over its own named pipe) before this is appended.
     //
-    // Default implementation produces file-output args (used by RecorderPipeline):
-    //   -c:v <codec> -preset <p> -crf <q> -pix_fmt yuv420p
-    //   -c:a <codec> -b:a <kbps>k -shortest <destination>
+    // The default implementation produces file-output args (used by
+    // RecorderPipeline): the video codec args EncoderRegistry builds for
+    // Destination::File, then the audio codec and bitrate and the destination.
+    // -shortest is deliberately not used; see the implementation.
     virtual QStringList buildOutputArgs(const Target& target) const;
 
 public:
@@ -215,8 +216,8 @@ private:
     void appendStderrTail(const QString& chunk);
     void parseProgressLine(QStringView line);
 
-    // Written to stdin whenever the frame source has nothing yet, so ffmpeg's
-    // video input never starves. See onTickVideo for why that matters.
+    // Written to the video pipe whenever the frame source has nothing yet, so
+    // ffmpeg's video input never starves. See onTickVideo for why that matters.
     QImage m_blackFrame;
 
 public:

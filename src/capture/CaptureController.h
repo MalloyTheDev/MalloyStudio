@@ -22,10 +22,11 @@ public:
     virtual void stopCapture() = 0;
 
     // What this session's backend has produced and lost, for the SOURCE RX and
-    // CAP DROP rows. Sessions whose backend does not count report nothing
-    // rather than zero pretending to be a measurement, which is what the
-    // default here is: a camera or a PrintWindow capture has no such number,
-    // and inventing one would put a confident 0 next to a real drop count.
+    // CAP DROP rows. Display, window and camera sessions all count, through
+    // their bounded frame handoff. A session whose backend does not count
+    // reports nothing rather than zero pretending to be a measurement, which
+    // is what the default here is: inventing a number would put a confident 0
+    // next to a real drop count.
     virtual CaptureStats stats() const { return {}; }
 
     // Whether anything downstream wants frames from this session.
@@ -80,7 +81,7 @@ public:
     int activeSessionCount() const { return m_sessions.size(); }
     int activeWindowSessionCount() const { return m_windowSessions.size(); }
 
-    // Every display and window backend's production and loss for this run,
+    // Every display, window and camera backend's production and loss for this run,
     // including sessions that have already been stopped.
     //
     // Summed across sessions and across time on purpose. A source that was

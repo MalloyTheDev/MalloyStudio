@@ -16,8 +16,10 @@
 //   - TimelineRenderer will implement both → plugs into the same
 //     EncoderPipeline with zero changes to the encoder.
 //
-// PTS (presentation timestamp) is in microseconds since some monotonic
-// origin (we use QDateTime::currentMSecsSinceEpoch * 1000). The encoder
+// PTS (presentation timestamp) is wall-clock microseconds since the Unix
+// epoch (QDateTime::currentMSecsSinceEpoch() * 1000). It is not monotonic:
+// changing the system clock, or a correction after resume, can step it
+// backwards, and anything comparing two of them has to allow for that. The encoder
 // doesn't currently use PTS for the live path (it pulls on a fixed-rate
 // timer), but the replay-buffer ring sources rely on it to drive playback.
 // ---------------------------------------------------------------------------

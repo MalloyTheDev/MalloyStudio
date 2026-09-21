@@ -22,8 +22,9 @@ struct OutputSettings {
     QString audioCodec       = QStringLiteral("aac");
     int     audioBitratekbps = 192;
     QString container        = QStringLiteral("mp4");   // used for file-extension enforcement
-    // CBR bitrate used by hardware encoders and the streaming pipeline.
-    // libx264 file recording ignores this field (uses crf instead).
+    // The bitrate a stream is held to: CBR on hardware encoders, the ceiling
+    // of capped CRF in software (EncoderRegistry, Destination::Stream). Files
+    // ignore it on every encoder and use crf instead.
     int     bitrateKbps      = 4500;
     // Replay buffer duration in seconds (0 = disabled).
     int     replayBufferSeconds = 0;

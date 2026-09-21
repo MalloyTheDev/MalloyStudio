@@ -66,9 +66,11 @@ public:
     void    setCamera(const QString& deviceId, const QString& name);
     bool    hasCameraConfig() const { return !m_cameraDeviceId.isEmpty(); }
 
-    // Only meaningful when type == Browser.
-    // Qt6::WebEngineWidgets is required for actual rendering; when it is
-    // unavailable the source displays a blank frame.
+    // Only meaningful when type == Browser. Nothing renders a browser source
+    // yet: it is drawn as a placeholder and the URL is only stored. Whatever
+    // renders it later has to treat the URL as untrusted, since it arrives in
+    // project files, and hold it for the user's consent the way device sources
+    // are held (needsDeviceConsent in SceneCollection.cpp).
     QString browserUrl()       const { return m_browserUrl; }
     int     browserRefreshHz() const { return m_browserRefreshHz; }
     void    setBrowserUrl(const QString& url);
