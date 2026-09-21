@@ -415,7 +415,9 @@ StreamingWorkspace::Strip StreamingWorkspace::makeMixStrip(const QString& id, co
 
     s.volume = new QSlider(Qt::Horizontal, s.root);
     s.volume->setRange(0, 150);   // matches AudioMixerPanel: 0..150 → 0.0..1.5
-    s.volume->setValue(static_cast<int>(in.volume * 100.0f));
+    // Seeded by rounding, here and in onMixControlChanged, as the Recording
+    // mixer is: 0.53f * 100.0f is a hair under 53, so a cast showed 0.53 as 52.
+    s.volume->setValue(qRound(in.volume * 100.0f));
     s.volume->setMinimumWidth(56);
     s.volume->setToolTip(tr("Volume (0–150 %)"));
     botRow->addWidget(s.volume, 2);
@@ -486,7 +488,7 @@ void StreamingWorkspace::onMixControlChanged(const QString& id) {
         if (in.id != id) continue;
         const Strip& s = it.value();
         const QSignalBlocker bv(s.volume), bm(s.mute);
-        s.volume->setValue(static_cast<int>(in.volume * 100.0f));
+        s.volume->setValue(qRound(in.volume * 100.0f));
         s.mute->setChecked(in.muted);
         return;
     }

@@ -10,6 +10,7 @@
 #include "platform/FrameProfile.h"
 #include "ui/PreviewWidget.h"
 #include "ui/InspectorPanel.h"
+#include "ui/AudioMixerPanel.h"
 #include "input/HotkeyManager.h"
 #include "model/Canvas.h"
 #include "model/FilterEffect.h"
@@ -42,6 +43,7 @@
 #include "recording/EncoderRegistry.h"
 #include "ui/workspaces/EditorWorkspace.h"
 #include "ui/workspaces/TimelineEdits.h"
+#include "ui/workspaces/StreamingWorkspace.h"
 #include "ui/shell/EditingFocus.h"
 #include "ui/OutputSettingsDialog.h"
 #include "ui/StreamSettingsDialog.h"
@@ -59,6 +61,9 @@
 #include <QSignalSpy>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
+#include <QSlider>
+#include <QStackedWidget>
 #include <QWidget>
 #include <QBuffer>
 #include <QTemporaryDir>
@@ -234,6 +239,8 @@ private slots:
     void audioControlsRefuseValuesThatAreNotNumbers();
     void aMicrophoneThatFailsIsStartedAgain();
     void audioFromARemovedInputIsNotKept();
+    // Both mixers show the level that is stored, rounded, wherever it was set.
+    void aMixerSliderStaysWhereItWasSet();
     void theMixerKeepsTimeWithTheWallClock();
     void mediaProbesAreRememberedNotRepeated();
     void aHungOrMissingProberDoesNotStallTheScan();
@@ -402,6 +409,9 @@ private slots:
     void aCameraWaitingToRetryIsLeftToItsBackoff();
     void aWindowCaptureThatFailsIsTriedAgain();
     void theInspectorForgetsALayerThatIsGone();
+    // A filter slider shows the stored value, and moving one of its neighbours
+    // leaves that value alone.
+    void theInspectorShowsTheFilterValueThatIsStored();
     void projectMediaPathsMustBeLocalFiles();
     void encoderRedactsTheStreamKeyFromFfmpegOutput();
     void addingAConfiguredLayerIsOneUndoStep();
@@ -4692,6 +4702,81 @@ void MalloyModelTests::theInspectorForgetsALayerThatIsGone() {
     QVERIFY(titled);
 }
 
+void MalloyModelTests::theInspectorShowsTheFilterValueThatIsStored() {
+    // A filter's sliders are seeded from the stored values whenever the layer
+    // is shown or anything about it changes, and moving any one of them writes
+    // back every slider on the page. The seed cast instead of rounding, and
+    // many hundredths are stored a hair under the whole number, so a
+    // brightness of 0.53 showed as 52 and editing contrast then stored 0.52.
+    SceneCollection scenes;
+    scenes.addScene(QStringLiteral("Scene"));
+    InspectorPanel inspector(&scenes, nullptr, nullptr);
+    SceneItem* item = scenes.addNewSourceToCurrent(QStringLiteral("Block"), Source::Type::ColorBlock,
+                                                   QString(), QColor(200, 30, 30));
+    QVERIFY(item);
+    auto* colour = new ColorCorrectionFilter;
+    auto* opacity = new OpacityFilter;
+    auto* key = new ChromaKeyFilter;
+    item->addFilter(colour);
+    item->addFilter(opacity);
+    item->addFilter(key);
+    scenes.selectCurrentItemAt(0);
+
+    auto* filters = inspector.findChild<QListWidget*>();
+    auto* pages = inspector.findChild<QStackedWidget*>();
+    QVERIFY(filters && pages);
+    const auto slidersOnPage = [&](int row) {
+        filters->setCurrentRow(row);
+        return pages->currentWidget()->findChildren<QSlider*>();
+    };
+    // Stores every value the slider can show, in hundredths as the slider
+    // stores them, and names the first that is not shown as itself.
+    const auto misshown = [](QSlider* slider, auto store) {
+        for (int v = slider->minimum(); v <= slider->maximum(); ++v) {
+            store(v / 100.0f);
+            if (slider->value() != v)
+                return QStringLiteral("%1 shown as %2").arg(v / 100.0f).arg(slider->value());
+        }
+        return QString();
+    };
+
+    const QList<QSlider*> colourSliders = slidersOnPage(0);
+    QCOMPARE(colourSliders.size(), 3);   // brightness, contrast, saturation
+    QSlider* brightness = colourSliders.at(0);
+    QSlider* contrast = colourSliders.at(1);
+    QSlider* saturation = colourSliders.at(2);
+    QString wrong = misshown(brightness, [&](float v) { colour->setBrightness(v); });
+    QVERIFY2(wrong.isEmpty(), qPrintable(wrong));
+    wrong = misshown(contrast, [&](float v) { colour->setContrast(v); });
+    QVERIFY2(wrong.isEmpty(), qPrintable(wrong));
+    wrong = misshown(saturation, [&](float v) { colour->setSaturation(v); });
+    QVERIFY2(wrong.isEmpty(), qPrintable(wrong));
+
+    // Moving contrast leaves the values beside it exactly as they were.
+    colour->setBrightness(0.53f);
+    colour->setContrast(1.17f);
+    colour->setSaturation(0.29f);
+    QCOMPARE(brightness->value(), 53);
+    QCOMPARE(contrast->value(), 117);
+    QCOMPARE(saturation->value(), 29);
+    contrast->setValue(120);
+    QCOMPARE(colour->contrast(), 1.20f);
+    QCOMPARE(colour->brightness(), 0.53f);
+    QCOMPARE(colour->saturation(), 0.29f);
+
+    const QList<QSlider*> opacitySliders = slidersOnPage(1);
+    QCOMPARE(opacitySliders.size(), 1);
+    wrong = misshown(opacitySliders.at(0), [&](float v) { opacity->setOpacity(v); });
+    QVERIFY2(wrong.isEmpty(), qPrintable(wrong));
+
+    const QList<QSlider*> keySliders = slidersOnPage(2);
+    QCOMPARE(keySliders.size(), 2);   // tolerance, smoothness
+    wrong = misshown(keySliders.at(0), [&](float v) { key->setTolerance(v); });
+    QVERIFY2(wrong.isEmpty(), qPrintable(wrong));
+    wrong = misshown(keySliders.at(1), [&](float v) { key->setSmoothness(v); });
+    QVERIFY2(wrong.isEmpty(), qPrintable(wrong));
+}
+
 void MalloyModelTests::everyMicChangeIsAnnouncedStructurally() {
     // MainWindow reconciles microphones on these signals. Only audioInputsChanged
     // used to be connected, and most edits never emit it, so a deleted mic kept
@@ -6688,6 +6773,80 @@ void MalloyModelTests::audioFromARemovedInputIsNotKept() {
     // It must not bring the removed input's buffer back. Added again, the
     // microphone would otherwise start with that audio in hand.
     QCOMPARE(c.bufferedBytesForTesting(id), -1);
+}
+
+void MalloyModelTests::aMixerSliderStaysWhereItWasSet() {
+    // A mixer slider stores v / 100, and is then seeded from what was stored:
+    // straight away through inputControlChanged, in the other mixer as well,
+    // and when a strip is built. The seed cast instead of rounding, and many
+    // hundredths are stored a hair under the whole number, so the knob stepped
+    // back under the cursor (53 showed as 52) and came back a step down after
+    // a restart.
+    AudioController c;
+    c.setWorkerFactoryForTesting([](const QString& deviceId, bool loopback) {
+        return new FakeWasapiWorker(deviceId, loopback);
+    });
+    const QString id = QStringLiteral("input:{slider-test-mic}");
+    // Levels persist by input id, and this input exists only for this test.
+    const auto forget = qScopeGuard([&id] {
+        QSettings().remove(QStringLiteral("audio/inputs/") + id);
+    });
+    c.reconcileInputs({QStringLiteral("{slider-test-mic}")});
+    const auto stored = [&c, &id] {
+        for (const AudioInput& in : c.inputs())
+            if (in.id == id) return in;
+        return AudioInput{};
+    };
+    QCOMPARE(stored().id, id);
+    c.setVolume(id, 1.17f);
+    c.setPan(id, -0.53f);
+
+    AudioMixerPanel recording(&c, nullptr);
+    StreamingWorkspace streaming(&c);
+    // A strip is the widget that holds the input's name.
+    const auto stripSlider = [&](QWidget* view, int minimum, int maximum) -> QSlider* {
+        for (const QLabel* label : view->findChildren<QLabel*>()) {
+            if (label->text() != stored().name) continue;
+            for (QSlider* slider : label->parentWidget()->findChildren<QSlider*>())
+                if (slider->minimum() == minimum && slider->maximum() == maximum) return slider;
+        }
+        return nullptr;
+    };
+    QSlider* volume = stripSlider(&recording, 0, 150);
+    QSlider* pan = stripSlider(&recording, -100, 100);
+    QSlider* streamVolume = stripSlider(&streaming, 0, 150);
+    QVERIFY(volume && pan && streamVolume);
+
+    // Shown as stored, and showing it wrote nothing back.
+    QCOMPARE(volume->value(), 117);
+    QCOMPARE(pan->value(), -53);
+    QCOMPARE(streamVolume->value(), 117);
+    QCOMPARE(stored().volume, 1.17f);
+    QCOMPARE(stored().pan, -0.53f);
+
+    // Every position, set from either mixer, stays where it was put in both,
+    // and is what the controller holds.
+    for (QSlider* moved : {volume, streamVolume}) {
+        for (int v = moved->minimum(); v <= moved->maximum(); ++v) {
+            moved->setValue(v);
+            QCOMPARE(volume->value(), v);
+            QCOMPARE(streamVolume->value(), v);
+            QCOMPARE(stored().volume, v / 100.0f);
+        }
+    }
+    for (int p = pan->minimum(); p <= pan->maximum(); ++p) {
+        pan->setValue(p);
+        QCOMPARE(pan->value(), p);
+        QCOMPARE(stored().pan, p / 100.0f);
+    }
+
+    // A level set elsewhere is shown in both mixers, and neither writes it back.
+    QSignalSpy controls(&c, &AudioController::inputControlChanged);
+    c.setVolume(id, 0.59f);
+    QCOMPARE(volume->value(), 59);
+    QCOMPARE(streamVolume->value(), 59);
+    QCOMPARE(controls.count(), 1);
+    QCOMPARE(stored().volume, 0.59f);
 }
 
 void MalloyModelTests::theMixerKeepsTimeWithTheWallClock() {

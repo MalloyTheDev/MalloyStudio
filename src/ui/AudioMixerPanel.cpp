@@ -166,9 +166,12 @@ AudioMixerPanel::Strip AudioMixerPanel::makeStrip(const QString& id, const Audio
     s.meter->setMinimumWidth(40);
     botRow->addWidget(s.meter, 2);
 
+    // Seeded by rounding, here and in onInputControlChanged. Many hundredths
+    // are stored a hair under the whole number (0.53f * 100.0f is 52.9999962f),
+    // so a cast showed 53 as 52 and stepped the knob back under the cursor.
     s.volume = new QSlider(Qt::Horizontal, s.root);
     s.volume->setRange(0, 150); // 0..150 maps to 0.0..1.5
-    s.volume->setValue(static_cast<int>(in.volume * 100.0f));
+    s.volume->setValue(qRound(in.volume * 100.0f));
     s.volume->setMinimumWidth(56);
     s.volume->setToolTip(tr("Volume (0–150 %)"));
     botRow->addWidget(s.volume, 2);
@@ -176,7 +179,7 @@ AudioMixerPanel::Strip AudioMixerPanel::makeStrip(const QString& id, const Audio
     // Pan: -100..+100 maps to -1.0..+1.0; tick at center.
     s.pan = new QSlider(Qt::Horizontal, s.root);
     s.pan->setRange(-100, 100);
-    s.pan->setValue(static_cast<int>(in.pan * 100.0f));
+    s.pan->setValue(qRound(in.pan * 100.0f));
     s.pan->setMinimumWidth(40);
     s.pan->setToolTip(tr("Pan  ◄ L──C──R ►"));
     s.pan->setTickPosition(QSlider::TicksBelow);
@@ -227,8 +230,8 @@ void AudioMixerPanel::onInputControlChanged(const QString& id) {
         if (in.id != id) continue;
         const Strip& s = it.value();
         const QSignalBlocker bv(s.volume), bp(s.pan), bm(s.mute);
-        s.volume->setValue(static_cast<int>(in.volume * 100.0f));
-        s.pan->setValue(static_cast<int>(in.pan * 100.0f));
+        s.volume->setValue(qRound(in.volume * 100.0f));
+        s.pan->setValue(qRound(in.pan * 100.0f));
         s.mute->setChecked(in.muted);
         return;
     }

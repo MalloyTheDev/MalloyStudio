@@ -688,16 +688,16 @@ void InspectorPanel::onFilterSelectionChanged() {
         }
         case FilterEffect::Type::Opacity: {
             const auto* of = static_cast<const OpacityFilter*>(f);
-            m_opacitySlider->setValue(static_cast<int>(of->opacity() * 100.0f));
+            m_opacitySlider->setValue(qRound(of->opacity() * 100.0f));
             m_opacityLabel->setText(QStringLiteral("%1%").arg(m_opacitySlider->value()));
             m_filterProps->setCurrentIndex(m_filterPageOpacity);
             break;
         }
         case FilterEffect::Type::ColorCorrection: {
             const auto* cc = static_cast<const ColorCorrectionFilter*>(f);
-            m_brightnessSlider->setValue(static_cast<int>(cc->brightness() * 100.0f));
-            m_contrastSlider->setValue(static_cast<int>(cc->contrast()     * 100.0f));
-            m_saturationSlider->setValue(static_cast<int>(cc->saturation() * 100.0f));
+            m_brightnessSlider->setValue(qRound(cc->brightness() * 100.0f));
+            m_contrastSlider->setValue(qRound(cc->contrast()     * 100.0f));
+            m_saturationSlider->setValue(qRound(cc->saturation() * 100.0f));
             m_brightnessLabel->setText(QStringLiteral("%1").arg(cc->brightness(), 0, 'f', 2));
             m_contrastLabel->setText(QStringLiteral("%1").arg(cc->contrast(),     0, 'f', 2));
             m_saturationLabel->setText(QStringLiteral("%1").arg(cc->saturation(), 0, 'f', 2));
@@ -706,8 +706,8 @@ void InspectorPanel::onFilterSelectionChanged() {
         }
         case FilterEffect::Type::ChromaKey: {
             const auto* ck = static_cast<const ChromaKeyFilter*>(f);
-            m_chromaTolSlider->setValue(static_cast<int>(ck->tolerance()  * 100.0f));
-            m_chromaSmoothSlider->setValue(static_cast<int>(ck->smoothness() * 100.0f));
+            m_chromaTolSlider->setValue(qRound(ck->tolerance()  * 100.0f));
+            m_chromaSmoothSlider->setValue(qRound(ck->smoothness() * 100.0f));
             m_chromaTolLabel->setText(QStringLiteral("%1%").arg(m_chromaTolSlider->value()));
             m_chromaSmoothLabel->setText(QStringLiteral("%1%").arg(m_chromaSmoothSlider->value()));
             m_chromaKeyColor->setStyleSheet(

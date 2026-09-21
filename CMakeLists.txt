@@ -256,6 +256,16 @@ qt_add_executable(MalloyStudioTests
     # replace rather than save it.
     src/ui/StreamSettingsDialog.cpp
     src/ui/StreamSettingsDialog.h
+    # The Recording and Streaming mixers, whose sliders must show the level
+    # that is stored, and what they are built from.
+    src/ui/AudioMixerPanel.cpp
+    src/ui/AudioMixerPanel.h
+    src/ui/MicrophonePickerDialog.cpp
+    src/ui/MicrophonePickerDialog.h
+    src/ui/VuMeter.cpp
+    src/ui/VuMeter.h
+    src/ui/workspaces/StreamingWorkspace.cpp
+    src/ui/workspaces/StreamingWorkspace.h
 )
 
 # Force console subsystem so CTest captures stdout test output
