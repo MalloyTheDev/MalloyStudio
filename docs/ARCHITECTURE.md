@@ -294,10 +294,16 @@ defaults were a BT.601 conversion with no colour description, which players read
 BT.709, shifting saturated colours. The codec arguments then come from `EncoderRegistry`
 (see below). `-shortest` is not used.
 
-**Stop.** The writers and acceptors are asked to stop and their pending I/O cancelled,
-then joined; the pipes are disconnected, which is ffmpeg's end of input; the pipeline
-waits up to 5 s for ffmpeg to finish with the event loop running, and kills it after
-that. A one-line summary of the run's capture stages is logged.
+**Stop.** Each pipe writer first delivers what it already holds, within one shared
+budget of a second; then it and its acceptor have any pending I/O cancelled and are
+joined, and the pipe is closed. The video side goes first, because audio that runs ahead
+of the picture is not read by ffmpeg until the video input ends. Closing rather than
+disconnecting matters: `DisconnectNamedPipe` discards what ffmpeg has not yet read from
+the pipe, while closing the handle lets it read the rest and then see end of input. The
+pipeline waits up to 5 s for ffmpeg to finish with the event loop running, and ends its
+process tree after that. A one-line summary of the run's capture stages is logged,
+including any sound the audio transport had to drop (AUDIO DROP). Closing the main
+window asks before it ends a recording or stream, and stops them before the captures.
 
 ---
 

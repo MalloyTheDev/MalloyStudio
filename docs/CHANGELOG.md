@@ -22,6 +22,8 @@ finding again.
   that is configured is shown as configured (06a5f5d).
 - The Dashboard's record and live quick actions say Stop Recording and End Stream while
   those are running (1d7fb14).
+- Closing the window while recording or streaming asks first, and stops them before the
+  captures rather than after the event loop has gone (f01d158).
 
 ### Sources and capture
 
@@ -63,6 +65,11 @@ finding again.
   players no longer shift their colours.
 - A recording of a still scene keeps its length and its audio: a file writes the unchanged
   picture again after 100 ms without a frame, so ffmpeg never stops reading the audio.
+- Stopping keeps what was already handed to ffmpeg. The last frames and the sound still
+  in the pipes or the writers' queues were discarded, several seconds of it when the
+  audio ran ahead of the picture (cdac802).
+- Sound dropped because ffmpeg stopped reading is logged when it starts and totalled as
+  AUDIO DROP in the run summary (2874669).
 - Replay saves play in real time, keep their first audio, and finish before their
   sources when the app closes (61a9abc, 9112313); the replay buffer counts as a consumer
   (18dee41).
