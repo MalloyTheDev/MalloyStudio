@@ -52,6 +52,8 @@ finding again.
   its own cadence (e065892, cd3a3ae).
 - Per-stage frame telemetry for diagnosing throughput (0bcdf7c, 25fb138).
 - Software streams are capped at the configured bitrate (cc98877).
+- A recording of a still scene keeps its length and its audio: a file writes the unchanged
+  picture again after 100 ms without a frame, so ffmpeg never stops reading the audio.
 - Replay saves play in real time, keep their first audio, and finish before their
   sources when the app closes (61a9abc, 9112313); the replay buffer counts as a consumer
   (18dee41).

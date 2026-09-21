@@ -271,8 +271,11 @@ queue is dropped and counted rather than buffered. `AudioPipeWriter` holds up to
 chunks and drops the oldest only past that, since dropped audio deletes time.
 
 **Time.** Frames carry wall-clock timestamps, so a dropped frame leaves a gap instead of
-shortening the file. A file uses `-fps_mode vfr` and writes a frame only when the
-composition sequence has advanced (`Cadence::FollowSource`). A stream uses
+shortening the file. A file uses `-fps_mode vfr` and writes a frame when the composition
+sequence has advanced (`Cadence::FollowSource`), and writes the unchanged picture again
+when it has gone 100 ms without one (`kStillFloorMs`): ffmpeg stops reading an input that
+runs ahead of the others, so a video stream that stopped during a still scene used to take
+the audio with it. A stream uses
 `-fps_mode cfr -r <fps>` and writes on its own clock, repeating the latest picture
 (`Cadence::ConstantRate`), because an ingest expects a steady rate.
 

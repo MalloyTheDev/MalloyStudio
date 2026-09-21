@@ -223,15 +223,32 @@ private:
 public:
     // How this sink decides when a frame is due.
     //
-    // A file follows the source: a picture that has not changed is not new
-    // media, so nothing is written and the wall-clock timestamps carry the
-    // gap. A stream keeps its own cadence: an ingest has negotiated a rate and
-    // needs frames at that rate however seldom the screen changes, so the
-    // latest picture is repeated to fill the time. The same fps number means
-    // different things on the two paths, which is why they are not the same
-    // decision.
+    // A file follows the source: a new picture is written when it is composed,
+    // and the wall-clock timestamps carry the time between pictures. It is
+    // never silent for longer than kStillFloorMs, though; see there. A stream
+    // keeps its own cadence: an ingest has negotiated a rate and needs frames
+    // at that rate however seldom the screen changes, so the latest picture is
+    // repeated to fill the time. The same fps number means different things on
+    // the two paths, which is why they are not the same decision.
     enum class Cadence { FollowSource, ConstantRate };
     Cadence m_cadence = Cadence::ConstantRate;
+
+    // The longest a file goes without a video frame. When the picture has not
+    // changed for this long, it is written again.
+    //
+    // A file that wrote only changes stopped its video stream whenever the
+    // scene was still, and ffmpeg holds back an input that runs ahead of the
+    // others, so the audio stopped being read with it. It waited in the pipe
+    // and in AudioPipeWriter's queue, was discarded when the pipes closed at
+    // stop, and past the queue's length was dropped mid-recording, putting the
+    // rest of the recording out of sync. A still scene with narration recorded
+    // a fraction of a second. OBS never lets its video stream stop at all: its
+    // graphics thread outputs a frame every interval, changed or not, and a
+    // late frame is repeated rather than left out. This keeps that property at
+    // a tenth of a second rather than every frame, because each frame here
+    // crosses a pipe at eight megabytes rather than staying on the GPU. The
+    // repeats are counted (STILL), not reported as composed pictures.
+    static constexpr int kStillFloorMs = 100;
 
 public:
     // Pure: whether a sink on this cadence should write the picture it is
@@ -245,8 +262,13 @@ public:
     // advance it. Today the timer only fires when a frame is due so this is
     // always true, but writing the rule this way means an event-driven tick
     // cannot quietly turn a capture event into a stream clock tick.
+    //
+    // stillFloorDue says a file has gone kStillFloorMs without a frame, and
+    // makes it write the unchanged picture again. A stream ignores it: its
+    // clock already writes on every due tick.
     static bool shouldWriteFrame(Cadence cadence, quint64 compositionSequence,
-                                 quint64 lastSentSequence, bool cadenceDue);
+                                 quint64 lastSentSequence, bool cadenceDue,
+                                 bool stillFloorDue = false);
 
 private:
 
@@ -296,6 +318,12 @@ private:
     // none was lost, and conflating the two is what made a healthy recording
     // look like it was shedding nine frames in ten.
     int m_idleTicks = 0;
+
+    // Frames written only to keep a file's video moving through a still
+    // scene; see kStillFloorMs. Not composed pictures, so not ENC ACCEPT.
+    int m_stillRepeats = 0;
+    // When the last video frame was handed to the transport, for the floor.
+    QElapsedTimer m_lastVideoWrite;
 
     // The longest unbroken stretch in which every composed picture was
     // refused.

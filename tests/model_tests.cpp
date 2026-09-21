@@ -214,6 +214,7 @@ private slots:
     void recorderConstructsRegardlessOfFfmpegPresence();
     void recorderCanRestartAfterFinalization();
     void controllerCanReplacePipelineFromFinishedSignal();
+    void aRecordingOfAStillSceneKeepsItsLengthAndAudio();
     void audioControllerHasDefaultLoopbackInput();
     void audioControllerPersistsVolumeAndMute();
     void audioControlsRefuseValuesThatAreNotNumbers();
@@ -745,6 +746,46 @@ private:
     QTimer m_timer;
 };
 
+// A composed picture that never changes: the same sequence number every time,
+// as the preview reports for a scene with nothing moving in it.
+class StillTestFrames final : public TimedFrameSource {
+public:
+    StillTestFrames() : m_image(1920, 1080, QImage::Format_ARGB32) {
+        m_image.fill(QColor(20, 90, 60));
+    }
+    QImage currentFrame() override { return m_image; }
+    int nativeWidth() const override { return m_image.width(); }
+    int nativeHeight() const override { return m_image.height(); }
+    quint64 compositionSequence() const override { return 7; }
+private:
+    QImage m_image;
+};
+
+// Duration of one stream of a media file in seconds, from its packets rather
+// than its header, or -1 when it cannot be read.
+double streamSeconds(const QString& ffprobe, const QString& path, const QString& stream) {
+    QProcess probe;
+    probe.start(ffprobe, {QStringLiteral("-v"), QStringLiteral("error"),
+        QStringLiteral("-select_streams"), stream,
+        QStringLiteral("-show_entries"), QStringLiteral("packet=pts_time,duration_time"),
+        QStringLiteral("-of"), QStringLiteral("csv=p=0"), path});
+    if (!probe.waitForFinished(10000)) {
+        probe.kill();
+        probe.waitForFinished();
+        return -1;
+    }
+    double end = -1;
+    for (const QByteArray& line : probe.readAllStandardOutput().split('\n')) {
+        const QList<QByteArray> f = line.trimmed().split(',');
+        if (f.size() < 2) continue;
+        bool okPts = false, okDur = false;
+        const double pts = f[0].toDouble(&okPts);
+        const double dur = f[1].toDouble(&okDur);
+        if (okPts) end = std::max(end, pts + (okDur ? dur : 0.0));
+    }
+    return end;
+}
+
 OutputSettings recordingTestSettings() {
     OutputSettings settings;
     settings.width = 320;
@@ -809,6 +850,35 @@ void MalloyModelTests::recorderCanRestartAfterFinalization() {
         QCoreApplication::processEvents();
         QVERIFY(!pipeline.isRunning());
     }
+}
+
+void MalloyModelTests::aRecordingOfAStillSceneKeepsItsLengthAndAudio() {
+    RecorderPipeline pipeline;
+    if (!pipeline.ffmpegAvailable()) QSKIP("Real encoder lifecycle requires ffmpeg in PATH");
+    const QString ffprobe = QStandardPaths::findExecutable(QStringLiteral("ffprobe"));
+    if (ffprobe.isEmpty()) QSKIP("ffprobe is needed to measure the result");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    StillTestFrames frames;
+    RecordingTestAudio audio;
+    EncoderPipeline::Target target;
+    target.output = recordingTestSettings();
+    target.destination = dir.filePath(QStringLiteral("still.mp4"));
+    QString error;
+
+    // Three seconds of a scene in which nothing moves, with sound.
+    QVERIFY2(pipeline.start(target, &frames, &audio, &error), qPrintable(error));
+    QTest::qWait(3000);
+    pipeline.stop();
+
+    // The file is as long as the recording was, in both streams. A picture
+    // that does not change is still three seconds of picture, and the sound
+    // recorded during it must all be there.
+    const double video = streamSeconds(ffprobe, target.destination, QStringLiteral("v:0"));
+    const double sound = streamSeconds(ffprobe, target.destination, QStringLiteral("a:0"));
+    qInfo("still scene: video %.2f s, audio %.2f s", video, sound);
+    QVERIFY2(sound > 2.4, qPrintable(QStringLiteral("audio %1 s").arg(sound)));
+    QVERIFY2(video > 2.4, qPrintable(QStringLiteral("video %1 s").arg(video)));
 }
 
 void MalloyModelTests::controllerCanReplacePipelineFromFinishedSignal() {
@@ -1994,6 +2064,13 @@ void MalloyModelTests::sinkCadenceDecidesWhenAFrameIsDue() {
     // The first frame of a run, before anything has been written.
     QVERIFY(EncoderPipeline::shouldWriteFrame(Cadence::FollowSource, 1, 0, kDue));
 
+    // A still picture is written again once the floor is due, so a file's
+    // video never stops long enough for ffmpeg to stop reading its audio.
+    QVERIFY(EncoderPipeline::shouldWriteFrame(Cadence::FollowSource, 7, 7, kDue,
+                                              /*stillFloorDue=*/true));
+    QVERIFY(!EncoderPipeline::shouldWriteFrame(Cadence::FollowSource, 7, 7, kDue,
+                                               /*stillFloorDue=*/false));
+
     // --- A stream owns its presentation clock ----------------------------
     // Due, and the picture has not moved: send the latest one again, because
     // the ingest negotiated a rate and silence is not a frame.
@@ -2001,6 +2078,9 @@ void MalloyModelTests::sinkCadenceDecidesWhenAFrameIsDue() {
 
     // Not due: send nothing, whatever the compositor has been doing.
     QVERIFY(!EncoderPipeline::shouldWriteFrame(Cadence::ConstantRate, 7, 7, kNotDue));
+    // The still floor is a file's rule; a stream's clock is not moved by it.
+    QVERIFY(!EncoderPipeline::shouldWriteFrame(Cadence::ConstantRate, 7, 7, kNotDue,
+                                               /*stillFloorDue=*/true));
 
     // The case worth pinning down. A newly composed picture must NOT pull a
     // stream frame forward. If a source event could make a frame due, the

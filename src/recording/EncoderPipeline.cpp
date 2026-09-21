@@ -687,6 +687,8 @@ bool EncoderPipeline::start(const Target& target,
     m_composedFramesAccepted = 0;
     m_cfrDuplicates = 0;
     m_idleTicks = 0;
+    m_stillRepeats = 0;
+    m_lastVideoWrite.invalidate();
     m_longestDropBurstMs = 0;
     m_inDropBurst = false;
     // The capture side's counters run for as long as the application has been
@@ -793,6 +795,7 @@ bool EncoderPipeline::start(const Target& target,
     // few milliseconds apart, because the sink still believed it had sent
     // nothing.
     m_lastSentSequence = primedSequence;
+    m_lastVideoWrite.start();
 
     // No deleteLater on these: they own a blocking wait on a pipe handle this
     // object closes, so stop() joins them explicitly instead.
@@ -961,13 +964,13 @@ void EncoderPipeline::stop() {
     const int piped = m_framesPiped;
     qInfo("capture stages: SOURCE RX %d  CAP DROP %d  COMPOSED %d  ENC ACCEPT %d  "
           "PIPE WRITE %d  ENC DROP %d  ENC DROP BURST MAX %.2f s  "
-          "CFR DUP %d  IDLE %d",
+          "CFR DUP %d  IDLE %d  STILL %d",
           sourceNow.framesProduced - m_sourceStatsAtStart.framesProduced,
           sourceNow.framesDropped  - m_sourceStatsAtStart.framesDropped,
           m_composedFramesAccepted + m_composedFramesRejected,
           m_composedFramesAccepted, piped, m_composedFramesRejected,
           double(m_longestDropBurstMs) / 1000.0,
-          m_cfrDuplicates, m_idleTicks);
+          m_cfrDuplicates, m_idleTicks, m_stillRepeats);
 
     if (FrameProfile::enabled())
         qInfo("%s", qPrintable(FrameProfile::report()));
@@ -1036,7 +1039,8 @@ void EncoderPipeline::cleanup() {
 }
 
 bool EncoderPipeline::shouldWriteFrame(Cadence cadence, quint64 compositionSequence,
-                                       quint64 lastSentSequence, bool cadenceDue) {
+                                       quint64 lastSentSequence, bool cadenceDue,
+                                       bool stillFloorDue) {
     // A stream owes its ingest a frame whenever its own clock says one is due,
     // and owes nothing when it does not, whatever the compositor has been
     // doing. The sequence is deliberately not consulted: repeating the latest
@@ -1048,8 +1052,9 @@ bool EncoderPipeline::shouldWriteFrame(Cadence cadence, quint64 compositionSeque
     // is new, so the only safe reading is that it is.
     if (compositionSequence == TimedFrameSource::kUnsequenced) return true;
 
-    // Otherwise the same sequence means the same picture, already recorded.
-    return compositionSequence != lastSentSequence;
+    // Otherwise the same sequence means the same picture, already recorded,
+    // and it is written again only when the still floor is due.
+    return compositionSequence != lastSentSequence || stillFloorDue;
 }
 
 void EncoderPipeline::onTickVideo() {
@@ -1079,21 +1084,29 @@ void EncoderPipeline::onTickVideo() {
     // length of the run. RingTimedFrameSource pre-fills a black frame for the
     // same reason.
     // Nothing new to record. The timer runs at the configured rate, but the
-    // desktop produces frames at its own, and writing the same picture again
-    // would be inventing media rather than capturing it. The wall-clock
-    // timestamps on the input carry the gap, so the recording still lasts as
-    // long as the session.
+    // desktop produces frames at its own, and a file writes a picture when it
+    // is new. The wall-clock timestamps on the input carry the time between
+    // pictures, and the still floor keeps the video moving when nothing
+    // changes; see kStillFloorMs.
     //
     // A stream skips this test: its ingest expects frames at the negotiated
     // rate whether or not anything moved, so the latest picture is repeated.
+    bool stillRepeat = false;
     {
         // The timer only fires when this sink's clock says a frame is due, so
         // reaching here is what "due" means today.
         const quint64 seq = m_frames->compositionSequence();
-        if (!shouldWriteFrame(m_cadence, seq, m_lastSentSequence, /*cadenceDue=*/true)) {
+        const bool floorDue = m_cadence == Cadence::FollowSource
+                              && m_lastVideoWrite.isValid()
+                              && m_lastVideoWrite.elapsed() >= kStillFloorMs;
+        if (!shouldWriteFrame(m_cadence, seq, m_lastSentSequence, /*cadenceDue=*/true,
+                              floorDue)) {
             ++m_idleTicks;
             return;
         }
+        stillRepeat = m_cadence == Cadence::FollowSource
+                      && seq != TimedFrameSource::kUnsequenced
+                      && seq == m_lastSentSequence;
         m_lastSentSequence = seq;
     }
 
@@ -1133,8 +1146,12 @@ void EncoderPipeline::onTickVideo() {
     // composes and paints. A dropped frame costs one frame; blocking here
     // would freeze the preview and the interface.
     if (m_videoWriter->queuedFrames() >= VideoPipeWriter::kMaxQueuedFrames) {
-        ++m_composedFramesRejected;
-        noteFrameRejected();
+        // A repeat that finds no room is not lost media: the transport is
+        // busy with pictures, which keeps the video moving by itself.
+        if (!stillRepeat) {
+            ++m_composedFramesRejected;
+            noteFrameRejected();
+        }
         return;
     }
 
@@ -1167,10 +1184,17 @@ void EncoderPipeline::onTickVideo() {
     {
         FrameProfile::Scoped timing(FrameProfile::Stage::EncoderWrite);
         if (!m_videoWriter->trySubmit(std::move(out))) {
-            ++m_composedFramesRejected;
-            noteFrameRejected();
+            if (!stillRepeat) {
+                ++m_composedFramesRejected;
+                noteFrameRejected();
+            }
             return;
         }
+    }
+    m_lastVideoWrite.start();
+    if (stillRepeat) {
+        ++m_stillRepeats;
+        return;
     }
     ++m_composedFramesAccepted;
     noteFrameAccepted();
