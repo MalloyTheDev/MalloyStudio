@@ -65,7 +65,11 @@ without an explicit retry.
 **4. `outputPath` is a full file path**, produced at enqueue from the project name, a
 timestamp and the container extension, following the pattern
 `MainWindow` already expands for recordings. Enqueue refuses a path whose parent
-directory does not exist rather than failing minutes later inside ffmpeg.
+directory does not exist rather than failing minutes later inside ffmpeg. A restored
+`Pending` job is held to the same checks, and first to the rule project media paths
+follow (`MediaPathPolicy`): an `outputPath` that is not a drive-absolute local path is
+set to `Failed` before the filesystem is asked about it, because asking about a UNC path
+is what makes Windows authenticate to the host it names.
 
 ## Alternatives considered
 

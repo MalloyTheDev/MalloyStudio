@@ -1,6 +1,7 @@
 #include "recording/RenderQueue.h"
 #include "recording/EncoderRegistry.h"
 #include "recording/RenderPipeline.h"
+#include "project/MediaPathPolicy.h"
 
 #include <QDir>
 #include <QFile>
@@ -312,6 +313,20 @@ void RenderQueue::load() {
             // the store reaches ffmpeg at the next launch having been validated
             // by nobody. Failed and visible, rather than quietly dropped: the
             // user should be able to see what the queue refused.
+            // The output path is held to the rule project media paths are, and
+            // before anything asks the filesystem about it: asking whether a
+            // UNC path exists is what makes Windows authenticate to the host
+            // it names, so a job planted in the store would leak the user's
+            // credentials at launch and could then render to that host. Only
+            // restored jobs are held to it; a path the user picks in a dialog
+            // is theirs to choose.
+            if (j.state == RenderJob::Pending && !MediaPathPolicy::isAllowed(j.outputPath)) {
+                j.state = RenderJob::Failed;
+                j.progress = 0;
+                j.error = QObject::tr("A restored job must write to a file on a local drive, "
+                                      "and this one names %1. Enqueue it again to render it.")
+                              .arg(j.outputPath);
+            }
             if (j.state == RenderJob::Pending) {
                 const QString why = whyNotRunnable(j.timeline, j.outputPath);
                 if (!why.isEmpty()) {

@@ -379,6 +379,7 @@ private slots:
     void timelineGraphRefusesWhatItCannotRender();
     void timelineGraphBoundsNumbersBeforeArithmetic();
     void restoredRenderJobsAreValidatedLikeEnqueuedOnes();
+    void restoredRenderJobsMustWriteToALocalDrive();
     void clipsLongerThanTheTimelineArePlacedNotAborted();
     void undoKeepsTheLiveCaptureFrameOnAir();
     void aSavedReplayPlaysInRealTime();
@@ -2979,6 +2980,48 @@ void MalloyModelTests::restoredRenderJobsAreValidatedLikeEnqueuedOnes() {
         timeline, dir.filePath(QStringLiteral("nope/deeper/out.mp4")));
     QVERIFY(!missing.isEmpty());
     QVERIFY(missing.contains(QStringLiteral("does not exist")));
+}
+
+void MalloyModelTests::restoredRenderJobsMustWriteToALocalDrive() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString store = dir.filePath(QStringLiteral("rq.json"));
+
+    // Pending jobs as anything able to write the store could leave them. The
+    // host is this machine, so that if the check were missing the probe it
+    // would make stays here.
+    const QStringList refused = {
+        QStringLiteral("\\\\127.0.0.1\\no-such-share\\x.mp4"),
+        QStringLiteral("//127.0.0.1/no-such-share/x.mp4"),
+        QStringLiteral("relative/x.mp4"),
+        QStringLiteral("file:///C:/x.mp4"),
+    };
+    const RenderRequest valid = makeRenderRequest(dir.filePath(QStringLiteral("ok.mp4")));
+    {
+        QJsonArray arr;
+        for (int i = 0; i < refused.size(); ++i) {
+            QJsonObject o;
+            o.insert(QStringLiteral("id"), QStringLiteral("job-%1").arg(i));
+            o.insert(QStringLiteral("state"), 0);   // Pending
+            o.insert(QStringLiteral("outputPath"), refused[i]);
+            o.insert(QStringLiteral("timeline"), valid.timeline);
+            o.insert(QStringLiteral("output"), valid.output.toJson());
+            arr.append(o);
+        }
+        QFile f(store);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write(QJsonDocument(arr).toJson());
+    }
+
+    RenderQueue q;
+    q.setStorePath(store);
+    QCOMPARE(q.jobs().size(), refused.size());
+    QCOMPARE(q.countOfState(RenderJob::Failed), refused.size());
+    // Refused for what it names, not for whatever the filesystem said when
+    // asked about it: a missing folder is the answer the old check gave, and
+    // getting it meant the path had already been probed.
+    for (const RenderJob& j : q.jobs())
+        QVERIFY2(j.error.contains(QStringLiteral("local drive")), qPrintable(j.error));
 }
 
 void MalloyModelTests::timelineGraphBoundsNumbersBeforeArithmetic() {
