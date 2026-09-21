@@ -918,6 +918,11 @@ bool MainWindow::loadProject(const QString& filePath) {
     QString error;
     QJsonArray timeline;
     if (!ProjectDocument::loadFromFile(*m_scenes, &timeline, filePath, &error)) {
+        // A refused file changes nothing, so nothing announces a change, and
+        // the captures stopped above would stay stopped: a blank preview, and
+        // a recording or stream carrying on without its video. Bring back
+        // what the unchanged project wants.
+        m_captureController->reconcile();
         QMessageBox::warning(this, tr("Open Failed"), error);
         return false;
     }
