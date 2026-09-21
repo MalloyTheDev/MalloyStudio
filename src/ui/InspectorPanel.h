@@ -57,6 +57,8 @@ private:
     // Header
     QLabel*  m_title = nullptr;
     QLabel*  m_type = nullptr;
+    QLabel*      m_held  = nullptr;   // shown while the source waits for device consent
+    QPushButton* m_allow = nullptr;   // releases that hold for this source only
 
     // Toggles
     QCheckBox* m_visible = nullptr;

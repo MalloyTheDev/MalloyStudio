@@ -45,7 +45,7 @@ and records to MP4/MKV/MOV via **ffmpeg**.
 | Twitch sign-in | Device-code sign-in fetches the stream key and pushes title and category on Go Live |
 | Stream key relay | Opt-in: ffmpeg publishes to a local relay so the key never appears on its command line; rtmps is carried over TLS |
 | Replay saves in real time | A saved replay plays at the speed it was captured, with its audio from the first moment |
-| Device consent on project load | Cameras, microphones, displays and windows named by an opened project stay off until allowed |
+| Device consent on project load | Cameras, microphones, displays and windows named by an opened project stay off until allowed; each held layer is marked Held in the Sources panel and the Inspector, with an Allow button for that source alone |
 | Untrusted project input | Media paths must be local drive-absolute paths; files over 32 MB, out-of-range ids and values are refused |
 | Capture recovery | Display, camera and microphone capture restart by themselves after a UAC prompt, a lock screen or an unplugged device |
 

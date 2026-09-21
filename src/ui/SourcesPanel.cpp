@@ -2,6 +2,7 @@
 #include <QApplication>
 #include "MicrophonePickerDialog.h"
 #include "MonitorPickerDialog.h"
+#include "Theme.h"
 #include "WindowPickerDialog.h"
 #include "audio/AudioController.h"
 #include "model/SceneCollection.h"
@@ -136,6 +137,7 @@ SourcesPanel::SourcesPanel(SceneCollection* scenes, AudioController* audio, QWid
     connect(m_scenes, &SceneCollection::itemsChanged,    this, &SourcesPanel::rebuild);
     connect(m_scenes, &SceneCollection::sourcesChanged,  this, &SourcesPanel::rebuild);
     connect(m_scenes, &SceneCollection::collectionReset, this, &SourcesPanel::rebuild);
+    connect(m_scenes, &SceneCollection::deviceConsentChanged, this, &SourcesPanel::rebuild);
     connect(m_scenes, &SceneCollection::itemSelectionChanged, this, &SourcesPanel::onCurrentItemChanged);
 
     rebuild();
@@ -212,7 +214,8 @@ QWidget* SourcesPanel::createLayerRow(int index) {
     auto* type = new QLabel(Source::typeToString(source->type()), row);
     type->setStyleSheet(QStringLiteral("color: #70737a;"));
 
-    if (source->type() == Source::Type::DisplayCapture && source->hasMonitorConfig()) {
+    const bool held = m_scenes->deviceHeld(source->id());
+    if (source->type() == Source::Type::DisplayCapture && source->hasMonitorConfig() && !held) {
         type->setText(type->text() + QStringLiteral("  LIVE-ready"));
     }
 
@@ -220,6 +223,26 @@ QWidget* SourcesPanel::createLayerRow(int index) {
     layout->addWidget(lock);
     layout->addWidget(name, 1);
     layout->addWidget(type);
+
+    // A device a project file named stays off until the user agrees to it
+    // (SceneCollection::holdDeviceConsent). Without this a held layer looked
+    // exactly like a live one that showed nothing, and the only way to release
+    // it was to uncheck Visible and check it again. Allowing here releases
+    // this source alone, as switching it on does.
+    if (held) {
+        auto* badge = Theme::makeTag(tr("Held"), QStringLiteral("warn"), row);
+        badge->setToolTip(tr("This project asked to use this device and it has not been "
+                             "allowed, so nothing is captured from it."));
+        auto* allow = new QToolButton(row);
+        allow->setText(tr("Allow"));
+        allow->setToolTip(tr("Let this source use its device"));
+        const int sourceId = source->id();
+        connect(allow, &QToolButton::clicked, this, [this, sourceId] {
+            m_scenes->grantDeviceConsent(sourceId);
+        });
+        layout->addWidget(badge);
+        layout->addWidget(allow);
+    }
 
     connect(visible, &QCheckBox::toggled, this, [this, visible](bool checked) {
         m_scenes->setCurrentItemVisible(visible->property("layerIndex").toInt(), checked);

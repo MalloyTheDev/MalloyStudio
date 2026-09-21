@@ -1,5 +1,6 @@
 #include "InspectorPanel.h"
 #include "MonitorPickerDialog.h"
+#include "Theme.h"
 #include "WindowPickerDialog.h"
 #include "audio/AudioController.h"
 #include "capture/CaptureController.h"
@@ -86,6 +87,18 @@ InspectorPanel::InspectorPanel(SceneCollection* scenes,
     m_title->setFont(titleFont);
     m_type = new QLabel(inner);
     m_type->setStyleSheet(QStringLiteral("color: #70737a;"));
+    // For a source a loaded project named and the user has not allowed. This
+    // is where someone looks when a layer shows nothing, and picking the
+    // monitor again, the obvious thing to try, does not release the hold.
+    m_held = Theme::makeTag(tr("Held"), QStringLiteral("warn"), inner);
+    m_held->setToolTip(tr("This project asked to use this device and it has not been "
+                          "allowed, so nothing is captured from it."));
+    m_allow = new QPushButton(tr("Allow"), inner);
+    m_allow->setToolTip(tr("Let this source use its device"));
+    auto* heldRow = new QHBoxLayout();
+    heldRow->addWidget(m_held);
+    heldRow->addWidget(m_allow);
+    heldRow->addStretch();
 
     // Toggles
     m_visible = new QCheckBox(tr("Visible"), inner);
@@ -288,6 +301,7 @@ InspectorPanel::InspectorPanel(SceneCollection* scenes,
     // Assemble root layout
     root->addWidget(m_title);
     root->addWidget(m_type);
+    root->addLayout(heldRow);
     root->addLayout(toggles);
     root->addLayout(transformGrid);
     root->addLayout(actions);
@@ -308,6 +322,10 @@ InspectorPanel::InspectorPanel(SceneCollection* scenes,
         });
     }
 
+    connect(m_allow, &QPushButton::clicked, this, [this] {
+        if (const Source* source = m_scenes->sourceForItem(m_scenes->currentItem()))
+            m_scenes->grantDeviceConsent(source->id());
+    });
     connect(m_visible, &QCheckBox::toggled, this, [this](bool checked) {
         if (!m_updating) m_scenes->setCurrentItemVisible(m_scenes->currentItemIndex(), checked);
     });
@@ -503,6 +521,7 @@ InspectorPanel::InspectorPanel(SceneCollection* scenes,
     connect(m_scenes, &SceneCollection::currentChanged, this, [this](int){ rebuild(); });
     connect(m_scenes, &SceneCollection::itemsChanged,   this, &InspectorPanel::rebuild);
     connect(m_scenes, &SceneCollection::itemSelectionChanged, this, [this](int){ rebuild(); });
+    connect(m_scenes, &SceneCollection::deviceConsentChanged, this, &InspectorPanel::rebuild);
     connect(m_captureController, &CaptureController::monitorStatusChanged,
             this, [this](int, int, const QString&){ rebuild(); });
     connect(m_captureController, &CaptureController::statusChanged,
@@ -548,6 +567,9 @@ void InspectorPanel::rebuild() {
     const QRectF r = item->transform();
     m_title->setText(source->name());
     m_type->setText(Source::typeToString(source->type()));
+    const bool held = m_scenes->deviceHeld(source->id());
+    m_held->setVisible(held);
+    m_allow->setVisible(held);
     m_visible->setChecked(item->isVisible());
     m_locked->setChecked(item->isLocked());
     showNumber(m_x, r.x());
@@ -935,6 +957,8 @@ void InspectorPanel::showNoLayer(const QString& title) {
     m_shownItem = nullptr;
     m_title->setText(title);
     m_type->clear();
+    m_held->setVisible(false);
+    m_allow->setVisible(false);
     m_visible->setChecked(false);
     m_locked->setChecked(false);
     for (QDoubleSpinBox* box : {m_x, m_y, m_w, m_h}) box->setValue(0);

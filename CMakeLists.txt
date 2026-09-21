@@ -301,6 +301,11 @@ qt_add_executable(MalloyStudioTests
     # what was chosen.
     src/ui/OnboardingOverlay.cpp
     src/ui/OnboardingOverlay.h
+    # The layer list, which marks a source held for device consent and offers
+    # to allow it. The microphone picker its Add dialog opens is listed with
+    # the mixers above.
+    src/ui/SourcesPanel.cpp
+    src/ui/SourcesPanel.h
 )
 
 # Force console subsystem so CTest captures stdout test output

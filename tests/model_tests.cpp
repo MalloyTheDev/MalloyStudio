@@ -19,6 +19,8 @@
 #include "ui/HotkeysDialog.h"
 #include "ui/OnboardingOverlay.h"
 #include "project/ByteSize.h"
+#include "ui/SourcesPanel.h"
+#include "capture/CameraCapture.h"
 #include "input/HotkeyManager.h"
 #include "model/Canvas.h"
 #include "model/FilterEffect.h"
@@ -466,6 +468,8 @@ private slots:
     void aSlowUplinkBacksUpIntoFfmpegNotMemory();
     void aRelayThatHeldBackStillDeliversEverything();
     void loadedProjectHoldsItsDevicesUntilAllowed();
+    void aHeldLayerSaysSoAndCanBeAllowedFromItsRow();
+    void theInspectorOffersToAllowAHeldSource();
     void undoAndRedoKeepADeclinedDeviceHeld();
     void sourceIdsNearTheTopDoNotOverflow();
     void anEditSessionEndsWithTheStateItBeganIn();
@@ -7218,6 +7222,155 @@ void MalloyModelTests::loadedProjectHoldsItsDevicesUntilAllowed() {
     QVERIFY(ProjectDocument::loadFromFile(quiet, inert, &error));
     QVERIFY(!quiet.deviceConsentPending());
     QVERIFY(quiet.pendingDeviceRequests().isEmpty());
+}
+
+void MalloyModelTests::aHeldLayerSaysSoAndCanBeAllowedFromItsRow() {
+    // A screen and a camera, both visible, and a title that needs no device,
+    // opened from a file so that the screen and the camera are held.
+    QJsonObject project;
+    {
+        SceneCollection authored;
+        authored.ensureCurrentScene();
+        QVERIFY(authored.addNewSourceToCurrent(QStringLiteral("Title"), Source::Type::Text,
+                                               QStringLiteral("hello")) != nullptr);
+        QVERIFY(authored.addNewSourceToCurrent(QStringLiteral("Screen"),
+                                               Source::Type::DisplayCapture,
+                                               QString(), QColor(), 0, 0) != nullptr);
+        QVERIFY(authored.addCameraToCurrent(QStringLiteral("Front Camera"),
+                                            QStringLiteral("{camera-device-id}"),
+                                            QStringLiteral("Front Camera")) != nullptr);
+        project = authored.toJson();
+    }
+    SceneCollection opened;
+    QString error;
+    QVERIFY2(opened.loadFromJson(project, &error, SceneCollection::LoadOrigin::File),
+             qPrintable(error));
+    Source* screen = nullptr;
+    Source* camera = nullptr;
+    for (Source* s : opened.sources()) {
+        if (s->type() == Source::Type::DisplayCapture) screen = s;
+        if (s->type() == Source::Type::Camera)         camera = s;
+    }
+    QVERIFY(screen != nullptr);
+    QVERIFY(camera != nullptr);
+    QVERIFY(opened.deviceHeld(screen->id()));
+    QVERIFY(opened.deviceHeld(camera->id()));
+
+    SourcesPanel panel(&opened, nullptr);
+    // Building the panel warms the camera list on a worker thread. That only
+    // enumerates devices, but the process must not exit while it is still
+    // inside MediaFoundation, so the test does not return before it is done.
+    const auto enumerated = qScopeGuard([] {
+        if (!QTest::qWaitFor([] { return CameraCapture::hasEnumerated(); }, 60000))
+            qWarning("the camera list was still being enumerated when the test ended");
+    });
+
+    // A layer's row, found by the name it shows. Rows replaced by a rebuild
+    // are hidden before they are deleted.
+    const auto rowFor = [&](const QString& name) -> QWidget* {
+        for (QLabel* label : panel.findChildren<QLabel*>())
+            if (label->text() == name && label->isVisibleTo(&panel)) return label->parentWidget();
+        return nullptr;
+    };
+    const auto allowIn = [](QWidget* row) -> QAbstractButton* {
+        for (QAbstractButton* button : row->findChildren<QAbstractButton*>())
+            if (button->text() == QObject::tr("Allow")) return button;
+        return nullptr;
+    };
+    const auto markedHeld = [](QWidget* row) {
+        for (const QLabel* label : row->findChildren<QLabel*>())
+            if (label->text().compare(QObject::tr("Held"), Qt::CaseInsensitive) == 0) return true;
+        return false;
+    };
+
+    // A held layer used to look exactly like a live one that showed nothing.
+    for (const QString& name : {QStringLiteral("Screen"), QStringLiteral("Front Camera")}) {
+        QWidget* row = rowFor(name);
+        QVERIFY2(row != nullptr, qPrintable(name));
+        QVERIFY2(markedHeld(row), qPrintable(name));
+        QVERIFY2(allowIn(row) != nullptr, qPrintable(name));
+    }
+    QWidget* title = rowFor(QStringLiteral("Title"));
+    QVERIFY(title != nullptr);
+    QVERIFY(!markedHeld(title));
+    QVERIFY(allowIn(title) == nullptr);
+
+    // Allowing one row releases that source and no other.
+    allowIn(rowFor(QStringLiteral("Screen")))->click();
+    QVERIFY(!opened.deviceHeld(screen->id()));
+    QVERIFY2(opened.deviceHeld(camera->id()), "allowing the screen must not release the camera");
+
+    QWidget* screenRow = rowFor(QStringLiteral("Screen"));
+    QVERIFY(screenRow != nullptr);
+    QVERIFY(!markedHeld(screenRow));
+    QVERIFY(allowIn(screenRow) == nullptr);
+    QWidget* cameraRow = rowFor(QStringLiteral("Front Camera"));
+    QVERIFY(cameraRow != nullptr);
+    QVERIFY(markedHeld(cameraRow));
+    QVERIFY(allowIn(cameraRow) != nullptr);
+}
+
+void MalloyModelTests::theInspectorOffersToAllowAHeldSource() {
+    QJsonObject project;
+    {
+        SceneCollection authored;
+        authored.ensureCurrentScene();
+        QVERIFY(authored.addNewSourceToCurrent(QStringLiteral("Title"), Source::Type::Text,
+                                               QStringLiteral("hello")) != nullptr);
+        QVERIFY(authored.addAudioInputToCurrent(QStringLiteral("Desk Mic"),
+                                                QStringLiteral("{desk-mic-id}")) != nullptr);
+        QVERIFY(authored.addAudioInputToCurrent(QStringLiteral("Room Mic"),
+                                                QStringLiteral("{room-mic-id}")) != nullptr);
+        project = authored.toJson();
+    }
+    SceneCollection opened;
+    QString error;
+    QVERIFY2(opened.loadFromJson(project, &error, SceneCollection::LoadOrigin::File),
+             qPrintable(error));
+    InspectorPanel inspector(&opened, nullptr, nullptr);
+
+    const auto select = [&](const QString& name) {
+        Scene* scene = opened.currentScene();
+        for (int i = 0; scene && i < scene->itemCount(); ++i)
+            if (opened.sourceForItem(scene->itemAt(i))->name() == name) opened.selectCurrentItemAt(i);
+        return opened.sourceForItem(opened.currentItem());
+    };
+    const auto allowShown = [&]() -> QAbstractButton* {
+        for (QAbstractButton* button : inspector.findChildren<QAbstractButton*>())
+            if (button->text() == QObject::tr("Allow") && button->isVisibleTo(&inspector))
+                return button;
+        return nullptr;
+    };
+    const auto heldShown = [&] {
+        for (const QLabel* label : inspector.findChildren<QLabel*>())
+            if (label->isVisibleTo(&inspector)
+                && label->text().compare(QObject::tr("Held"), Qt::CaseInsensitive) == 0)
+                return true;
+        return false;
+    };
+
+    Source* title = select(QStringLiteral("Title"));
+    QVERIFY(title != nullptr && title->name() == QStringLiteral("Title"));
+    QVERIFY(!heldShown());
+    QVERIFY(allowShown() == nullptr);
+
+    Source* desk = select(QStringLiteral("Desk Mic"));
+    QVERIFY(desk != nullptr && desk->name() == QStringLiteral("Desk Mic"));
+    QVERIFY(heldShown());
+    QAbstractButton* allow = allowShown();
+    QVERIFY(allow != nullptr);
+
+    // The header's Allow releases the layer on show, not the project.
+    allow->click();
+    QVERIFY(!opened.deviceHeld(desk->id()));
+    QVERIFY(!heldShown());
+    QVERIFY(allowShown() == nullptr);
+
+    Source* room = select(QStringLiteral("Room Mic"));
+    QVERIFY(room != nullptr && room->name() == QStringLiteral("Room Mic"));
+    QVERIFY2(opened.deviceHeld(room->id()), "allowing one microphone must not release the other");
+    QVERIFY(heldShown());
+    QVERIFY(allowShown() != nullptr);
 }
 
 void MalloyModelTests::rtmpRelayTransportFollowsTheScheme() {

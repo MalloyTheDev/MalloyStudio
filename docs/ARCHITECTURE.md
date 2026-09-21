@@ -375,6 +375,8 @@ discarded those moves.
 
 Shows properties for the currently selected scene item. Sections:
 1. **Header** — source name + type label
+   (and, for a source held for device consent, a Held badge with an Allow
+   button that releases that source only; SourcesPanel shows the same per row)
 2. **Toggles** — Visible / Locked
 3. **Transform** — X, Y, W, H spinboxes + Fit / Fill / Center / Reset buttons
    (a typed number is applied on Enter or on leaving the field; the arrows and

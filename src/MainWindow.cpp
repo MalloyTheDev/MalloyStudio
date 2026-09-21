@@ -1044,8 +1044,8 @@ bool MainWindow::loadProject(const QString& filePath) {
         ask.setText(tr("%1 wants to use %n device(s).", nullptr, wanted.size())
                         .arg(QFileInfo(filePath).fileName()));
         ask.setInformativeText(tr("Allow this only if you trust where this project "
-                                  "came from. You can switch sources on yourself "
-                                  "later instead."));
+                                  "came from. You can allow sources one at a time "
+                                  "later instead, from the Sources panel."));
         ask.setDetailedText(wanted.join(QLatin1Char('\n')));
         ask.setStandardButtons(QMessageBox::Yes | QMessageBox::No);
         ask.setDefaultButton(QMessageBox::No);
