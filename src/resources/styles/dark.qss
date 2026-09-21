@@ -246,7 +246,6 @@ QHeaderView::section {
 
 /* Card (.card / .card-strong) */
 QFrame#card { background-color: #141518; border: 1px solid #2d2f33; border-radius: 8px; }
-QFrame#card[strong="true"] { background-color: #1b1c1f; }
 
 /* Panel chrome (.panel / .panel-hd / .panel-bd) */
 QFrame#panel { background-color: #141518; border: 1px solid #2d2f33; border-radius: 8px; }
@@ -363,8 +362,4 @@ QFrame#onboardCard { background-color: #141518; border: 1px solid #414449; borde
 
 /* Hero / placeholder helpers */
 QLabel#heroTitle { font-size: 28px; font-weight: 600; color: #f7f7f7; }
-QFrame#placeholder {
-    background-color: #232427; border: 1px solid #2d2f33; border-radius: 6px;
-    color: #70737a;
-}
 QFrame#divider { background-color: #2d2f33; }
