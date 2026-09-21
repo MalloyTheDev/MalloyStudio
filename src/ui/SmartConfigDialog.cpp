@@ -155,7 +155,8 @@ void SmartConfigDialog::watchMicrophone(AudioController* audio) {
     // Only worth doing when there is a connected input to watch. Without one
     // the peak stays unobserved and the recommendation says nothing about it.
     if (!audio || !m_profile.microphonesChecked
-        || m_profile.microphoneName.isEmpty() || !m_profile.microphoneConnected)
+        || m_profile.microphoneName.isEmpty() || m_profile.microphoneInputId.isEmpty()
+        || !m_profile.microphoneConnected)
         return;
 
     constexpr int kWatchMs = 1500;   // long enough to cover a pause in speech
@@ -164,8 +165,13 @@ void SmartConfigDialog::watchMicrophone(AudioController* audio) {
                             .arg(m_profile.microphoneName));
     m_micWatch->setVisible(true);
 
+    // Levels arrive for every input. Desktop audio playing, or a second
+    // microphone picking up the room, must not pass a dead one as working:
+    // that is the case this check exists to catch.
+    const QString micId = m_profile.microphoneInputId;
     connect(audio, &AudioController::levelsUpdated, this,
-            [this](const QString&, float peakL, float peakR) {
+            [this, micId](const QString& id, float peakL, float peakR) {
+        if (id != micId) return;
         m_micPeak = std::max({m_micPeak, peakL, peakR});
     });
 

@@ -31,6 +31,9 @@ struct SystemProfile {
     // The capture input the user has actually configured in the mixer, not
     // merely the first one the machine enumerates. Empty when none is set up.
     QString microphoneName;
+    // That input's AudioController id, so watching it listens to it alone and
+    // not to desktop audio or another microphone. Empty with microphoneName.
+    QString microphoneInputId;
     // Whether inputs were actually enumerated. Without this an unchecked
     // machine and one with no microphone look identical, and the user gets told
     // they have no microphone when nobody looked.

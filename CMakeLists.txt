@@ -270,6 +270,10 @@ qt_add_executable(MalloyStudioTests
     # The library workspaces, whose sidebar counts must follow their registries.
     src/ui/workspaces/LibraryWorkspaces.cpp
     src/ui/workspaces/LibraryWorkspaces.h
+    # The recommendation dialog, whose microphone check must listen to the
+    # configured microphone and nothing else.
+    src/ui/SmartConfigDialog.cpp
+    src/ui/SmartConfigDialog.h
 )
 
 # Force console subsystem so CTest captures stdout test output

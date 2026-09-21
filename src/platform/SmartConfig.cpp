@@ -84,6 +84,7 @@ SystemProfile SystemProbe::detect(AudioController* audio) {
         for (const AudioInput& in : audio->inputs()) {
             if (in.loopback) continue;
             p.microphoneName = in.name;
+            p.microphoneInputId = in.id;
             p.microphoneConnected = in.connected;
             break;
         }

@@ -49,6 +49,7 @@
 #include "ui/shell/EditingFocus.h"
 #include "ui/OutputSettingsDialog.h"
 #include "ui/StreamSettingsDialog.h"
+#include "ui/SmartConfigDialog.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -243,6 +244,7 @@ private slots:
     void audioControlsRefuseValuesThatAreNotNumbers();
     void aMicrophoneThatFailsIsStartedAgain();
     void desktopAudioFollowsTheDefaultPlaybackDevice();
+    void theMicrophoneCheckHearsOnlyTheMicrophone();
     void audioFromARemovedInputIsNotKept();
     // Both mixers show the level that is stored, rounded, wherever it was set.
     void aMixerSliderStaysWhereItWasSet();
@@ -7002,6 +7004,58 @@ void MalloyModelTests::desktopAudioFollowsTheDefaultPlaybackDevice() {
     fromWindows(true, true, QStringLiteral("{headphones}"));
     QCoreApplication::processEvents();
     QCOMPARE(made.size(), 3);
+}
+
+void MalloyModelTests::theMicrophoneCheckHearsOnlyTheMicrophone() {
+    AudioController audio;
+    audio.setWorkerFactoryForTesting([](const QString& deviceId, bool loopback) {
+        return new FakeWasapiWorker(deviceId, loopback);
+    });
+    audio.reconcileInputs({QStringLiteral("{dead-mic}")});
+
+    // The profile names the input it describes, so the check can listen to
+    // that input and no other.
+    const SystemProfile detected = SystemProbe::detect(&audio);
+    QCOMPARE(detected.microphoneInputId, QStringLiteral("input:{dead-mic}"));
+    QVERIFY(detected.microphoneConnected);
+
+    const auto shows = [](const QWidget& w, const QString& text) {
+        for (const QLabel* l : w.findChildren<QLabel*>())
+            if (l->text().contains(text)) return true;
+        return false;
+    };
+
+    // The configured microphone is dead. Desktop audio is playing, and a
+    // second microphone picks up the room; neither is the one being checked.
+    SmartConfigDialog dead(detected, OutputSettings{}, &audio);
+    // Another microphone, which is producing sound, checked at the same time.
+    SystemProfile room = detected;
+    room.microphoneName = QStringLiteral("Room microphone");
+    room.microphoneInputId = QStringLiteral("input:{room-mic}");
+    SmartConfigDialog working(room, OutputSettings{}, &audio);
+    // A profile that does not say which input it means is not watched at
+    // all, rather than measured against whichever input speaks.
+    SystemProfile unnamed = room;
+    unnamed.microphoneInputId.clear();
+    SmartConfigDialog unwatched(unnamed, OutputSettings{}, &audio);
+
+    emit audio.levelsUpdated(QStringLiteral("loopback:default"), 0.8f, 0.7f);
+    emit audio.levelsUpdated(QStringLiteral("input:{room-mic}"), 0.4f, 0.4f);
+    emit audio.levelsUpdated(QStringLiteral("input:{dead-mic}"), 0.0f, 0.0f);
+
+    // Reported silent, with the recommender's warning. Counting every input,
+    // as it did, it said the dead microphone was producing sound.
+    QTRY_VERIFY_WITH_TIMEOUT(shows(dead, QStringLiteral("No sound arrived from")), 5000);
+    QVERIFY(!shows(dead, QStringLiteral("is producing sound")));
+    QVERIFY(shows(dead, QStringLiteral("no sound arrived from it")));
+
+    QTRY_VERIFY_WITH_TIMEOUT(shows(working, QStringLiteral("Room microphone is producing sound")),
+                             5000);
+    QVERIFY(!shows(working, QStringLiteral("no sound arrived")));
+
+    QVERIFY(!shows(unwatched, QStringLiteral("producing sound")));
+    QVERIFY(!shows(unwatched, QStringLiteral("No sound arrived")));
+    QVERIFY(!shows(unwatched, QStringLiteral("no sound arrived")));
 }
 
 void MalloyModelTests::aFadeStartsFromTheComposedCanvas() {
