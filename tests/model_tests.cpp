@@ -294,6 +294,9 @@ private slots:
     void addAudioInputFromUiCreatesScopedSource();
     void addCameraCreatesScopedSourceAndRoundTrips();
     void aCameraRunsItsBestNativeFormat();
+    void aCameraFormatThatCannotBeShownIsNotRun();
+    void cameraEnumerationRunsOneAtATime();
+    void twoCamerasWithOneNameCanBothBeChosen();
     void editorClipRoundTripPreservesV4Fields();
     void editorClipFromLegacyV3JsonAppliesDefaults();
     void audioControllerEmitsInputControlChangedOnValueChange();
@@ -2261,6 +2264,159 @@ void MalloyModelTests::aCameraRunsItsBestNativeFormat() {
              QStringLiteral("640x480 RGB32 at 29.97 fps"));
     QCOMPARE(CameraCapture::describe({1u, 640, 480, 0, 0}),
              QStringLiteral("640x480 0x00000001 at 0.00 fps"));
+}
+
+void MalloyModelTests::aCameraFormatThatCannotBeShownIsNotRun() {
+    using Format = CameraCapture::NativeFormat;
+    using Attempt = CameraCapture::FormatAttempt;
+    constexpr int kNone = -2;   // what value_or reports for "no format works"
+    const quint32 nv12 = CameraCapture::fourcc('N', 'V', '1', '2');
+    const quint32 mjpg = CameraCapture::fourcc('M', 'J', 'P', 'G');
+    // A capture card's own subtype, which the reader may have no converter for.
+    const quint32 odd = CameraCapture::fourcc('H', 'D', 'Y', 'C');
+    const QList<Format> offered = {
+        {nv12, 1920, 1080, 30, 1},   // 0
+        {odd, 1920, 1080, 60, 1},    // 1: ranked first
+        {odd, 1280, 720, 60, 1},     // 2: ranked second
+        {mjpg, 1920, 1080, 30, 1},   // 3
+    };
+
+    // The reader cannot make RGB32 of the odd subtype. Running it anyway is
+    // what left a camera black with no error; instead the camera runs the next
+    // format it can show, without trying the odd subtype at its other size.
+    QList<int> tried;
+    std::optional<int> chosen = CameraCapture::negotiateFormat(offered, [&](int index) {
+        tried.append(index);
+        return index >= 0 && offered.at(index).subtype == odd ? Attempt::ConversionRefused
+                                                              : Attempt::Accepted;
+    });
+    QCOMPARE(chosen.value_or(kNone), 0);
+    QCOMPARE(tried, (QList<int>{1, 0}));
+
+    // A mode the device itself refuses says nothing about its other modes.
+    tried.clear();
+    chosen = CameraCapture::negotiateFormat(offered, [&](int index) {
+        tried.append(index);
+        return index == 1 ? Attempt::DeviceRefused : Attempt::Accepted;
+    });
+    QCOMPARE(chosen.value_or(kNone), 2);
+    QCOMPARE(tried, (QList<int>{1, 2}));
+
+    // Nothing listed converts: the device's own default is the last resort.
+    tried.clear();
+    chosen = CameraCapture::negotiateFormat(offered, [&](int index) {
+        tried.append(index);
+        return index == -1 ? Attempt::Accepted : Attempt::ConversionRefused;
+    });
+    QCOMPARE(chosen.value_or(kNone), -1);
+    QCOMPARE(tried, (QList<int>{1, 0, 3, -1}));
+
+    // And when that fails too there is no format, which the camera reports as
+    // an error instead of streaming bytes it would wrap as the wrong format.
+    chosen = CameraCapture::negotiateFormat(offered, [](int) {
+        return Attempt::ConversionRefused;
+    });
+    QVERIFY(!chosen.has_value());
+
+    // A camera listing nothing usable goes straight to its default.
+    tried.clear();
+    chosen = CameraCapture::negotiateFormat({}, [&](int index) {
+        tried.append(index);
+        return Attempt::Accepted;
+    });
+    QCOMPARE(chosen.value_or(kNone), -1);
+    QCOMPARE(tried, (QList<int>{-1}));
+}
+
+void MalloyModelTests::cameraEnumerationRunsOneAtATime() {
+    // Stands in for Media Foundation, so no real device is enumerated, and
+    // holds each enumeration open until the test lets it finish.
+    std::atomic<int> enumerations{0};
+    QSemaphore gate;
+    CameraCapture::setEnumeratorForTesting([&] {
+        enumerations.fetch_add(1);
+        gate.acquire();
+        return QList<CameraCapture::Device>{
+            {QStringLiteral("id-a"), QStringLiteral("USB Camera")}};
+    });
+    const auto restore = qScopeGuard([&] {
+        gate.release(100);
+        CameraCapture::setEnumeratorForTesting({});
+    });
+
+    // An inspector rebuilt on every mouse move while the list is stale asks
+    // sixty times in a second. Each ask used to start a thread, and each got
+    // its own answer: sixty threads, then sixty rebuilds back to back.
+    QObject inspector;
+    int rebuilds = 0;
+    for (int i = 0; i < 60; ++i) {
+        CameraCapture::refreshDevicesAsync(&inspector, [&](QList<CameraCapture::Device>) {
+            ++rebuilds;
+        });
+    }
+    // Another caller asking meanwhile shares the same enumeration.
+    QObject panel;
+    QList<CameraCapture::Device> seen;
+    CameraCapture::refreshDevicesAsync(&panel, [&](QList<CameraCapture::Device> devices) {
+        seen = devices;
+    });
+    CameraCapture::refreshDevicesAsync(nullptr);
+
+    QTRY_COMPARE(enumerations.load(), 1);
+    QTest::qWait(100);
+    QCOMPARE(enumerations.load(), 1);
+
+    gate.release();
+    QTRY_COMPARE(seen.size(), qsizetype(1));
+    QCOMPARE(seen.first().id, QStringLiteral("id-a"));
+    QTRY_COMPARE(rebuilds, 1);
+    QTest::qWait(100);
+    QCOMPARE(rebuilds, 1);
+    QVERIFY(CameraCapture::hasEnumerated());
+
+    // Once it has finished, asking again enumerates again.
+    CameraCapture::waitForEnumeration();
+    CameraCapture::refreshDevicesAsync(nullptr);
+    QTRY_COMPARE(enumerations.load(), 2);
+    gate.release();
+
+    // The worker can be waited for: this returns only once it has finished,
+    // which is what shutdown relies on to keep it from writing the cache while
+    // static destruction takes the cache away.
+    std::atomic<bool> finished{false};
+    CameraCapture::setEnumeratorForTesting([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        finished.store(true);
+        return QList<CameraCapture::Device>{};
+    });
+    QVERIFY(!CameraCapture::hasEnumerated());
+    CameraCapture::refreshDevicesAsync(nullptr);
+    CameraCapture::waitForEnumeration();
+    QVERIFY(finished.load());
+    QVERIFY(CameraCapture::hasEnumerated());
+}
+
+void MalloyModelTests::twoCamerasWithOneNameCanBothBeChosen() {
+    // Two identical webcams enumerate under one friendly name. The picker
+    // looked the chosen text up among the names, so the second always bound
+    // the first camera's id.
+    const QList<CameraCapture::Device> cams = {
+        {QStringLiteral("usb#vid_1&pid_2#1"), QStringLiteral("USB Camera")},
+        {QStringLiteral("usb#vid_1&pid_2#2"), QStringLiteral("USB Camera")},
+        {QStringLiteral("usb#vid_3&pid_4#1"), QStringLiteral("USB Camera (2)")},
+        {QStringLiteral("usb#vid_5&pid_6#1"), QStringLiteral("Facecam")},
+    };
+    const QStringList labels = CameraCapture::pickerLabels(cams);
+    QCOMPARE(labels.size(), cams.size());
+    QCOMPARE(labels.at(0), QStringLiteral("USB Camera"));
+    QCOMPARE(labels.at(3), QStringLiteral("Facecam"));
+    // Every label is distinct, even from a device whose own name looks like
+    // a numbered duplicate, so the chosen label leads back to its own device.
+    for (int i = 0; i < labels.size(); ++i) {
+        QCOMPARE(labels.indexOf(labels.at(i)), i);
+        QCOMPARE(cams.at(labels.indexOf(labels.at(i))).id, cams.at(i).id);
+    }
+    QVERIFY(CameraCapture::pickerLabels({}).isEmpty());
 }
 
 void MalloyModelTests::addingAudioInputTriggersAudioInputsChanged() {

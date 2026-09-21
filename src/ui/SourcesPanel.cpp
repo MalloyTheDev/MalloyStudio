@@ -359,15 +359,19 @@ void SourcesPanel::onAddClicked() {
                 tr("No webcam or capture device was found."));
             return;
         }
-        QStringList names;
-        for (const CameraCapture::Device& c : cams) names << c.name;
+        // Bound by position, and so by device id, never by name: two identical
+        // webcams share a friendly name, and looking the chosen text up among
+        // the names always found the first. The labels are distinct.
+        const QStringList labels = CameraCapture::pickerLabels(cams);
         bool ok = false;
         const QString chosen = QInputDialog::getItem(
-            this, tr("Choose Camera"), tr("Device:"), names, 0, false, &ok);
+            this, tr("Choose Camera"), tr("Device:"), labels, 0, false, &ok);
         if (!ok) return;
-        const CameraCapture::Device dev = cams.at(qMax(0, names.indexOf(chosen)));
+        const int row = labels.indexOf(chosen);
+        if (row < 0) return;
+        const CameraCapture::Device dev = cams.at(row);
         QString resolved = name;
-        if (resolved.startsWith(tr("Camera"))) resolved = dev.name;
+        if (resolved.startsWith(tr("Camera"))) resolved = labels.at(row);
         m_scenes->addCameraToCurrent(resolved, dev.id, dev.name);
         return;
     }
