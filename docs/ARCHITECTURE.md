@@ -1,7 +1,8 @@
 # MalloyStudio — Architecture
 
 This document describes how the subsystems fit together, the data flow from capture to
-recording, and the key design decisions made across versions v1–v5.
+recording, and the design decisions behind them. The layer sections describe the code as
+it is now; sections headed with a version record what that version added.
 
 ---
 
@@ -10,42 +11,40 @@ recording, and the key design decisions made across versions v1–v5.
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                           MainWindow                                │
-│  (menus, dock layout, signal wiring, OutputSettings, undo stack)    │
+│  (shell, workspaces, signal wiring, settings, undo stack)           │
 └────┬─────────────────────────┬──────────────────────┬──────────────┘
      │                         │                      │
      ▼                         ▼                      ▼
-┌──────────┐         ┌──────────────────┐     ┌──────────────┐
-│  Model   │         │   Capture layer  │     │ Recording    │
-│          │◄───────►│                  │     │              │
-│SceneCol- │         │CaptureController │     │  Recorder    │
-│lection   │         │  ├ DxgiSession   │     │  (ffmpeg     │
-│ Scenes   │         │  └ WindowSession │     │   subprocess)│
-│ Sources  │         │WasapiCapture     │     └──────┬───────┘
-│ Filters  │         └──────────┬───────┘            │
-└────┬─────┘                    │ frames              │ pcm
-     │ signals                  ▼                     │
-     │                 ┌────────────────┐             │
-     │                 │ PreviewWidget  │─────────────┘
-     │                 │  compositing   │ cachedComposedFrame()
-     │                 │  transitions   │
-     │                 │  drag-resize   │
-     │                 └────────────────┘
-     │
-     ▼
-┌──────────────────────────────────────────┐
-│              UI panels                   │
-│  ScenesPanel · SourcesPanel              │
-│  InspectorPanel · AudioMixerPanel        │
-│  ControlsBar · VuMeter                   │
-│  MonitorPickerDialog · WindowPickerDialog│
-│  OutputSettingsDialog                    │
-└──────────────────────────────────────────┘
-
-┌──────────────────────────────────────────┐
-│           AudioController                │
-│  owns WasapiCapture workers              │
-│  per-source reconciliation               │
-│  program-bus PCM → Recorder              │
+┌──────────┐         ┌──────────────────┐     ┌──────────────────┐
+│  Model   │         │   Capture layer  │     │ MediaController  │
+│          │◄───────►│                  │     │  recording       │
+│SceneCol- │         │CaptureController │     │  streaming       │
+│lection   │         │  ├ display       │     │  replay saves    │
+│ Scenes   │         │  │  (DXGI or WGC)│     │ (EncoderPipeline │
+│ Sources  │         │  ├ window        │     │  + ffmpeg over   │
+│ Filters  │         │  └ camera        │     │  named pipes)    │
+└────┬─────┘         └──────────┬───────┘     └──────┬───────────┘
+     │ signals                  │ frames             │ frames, pcm
+     │                          ▼                    │
+     │                 ┌────────────────┐            │
+     │                 │ PreviewWidget  │────────────┤ currentFrame()
+     │                 │  compositing   │            │
+     │                 │  transitions   │            │
+     │                 │  replay ring   │            │
+     │                 └────────────────┘            │
+     ▼                                               │
+┌──────────────────────────────────────────┐         │
+│              UI panels and workspaces    │         │
+│  Dashboard · Recording · Streaming       │         │
+│  Editor · Media · Settings               │         │
+│  ScenesPanel · SourcesPanel · Inspector  │         │
+│  AudioMixerPanel · ControlsBar           │         │
+└──────────────────────────────────────────┘         │
+                                                     │
+┌──────────────────────────────────────────┐         │
+│           AudioController                │         │
+│  one WasapiCapture worker per input      │─────────┘
+│  50 Hz program-bus mixer, replay ring    │  pcmReady
 └──────────────────────────────────────────┘
 ```
 
@@ -126,53 +125,75 @@ session captures `before` at start and pushes one command at end.
 
 ### `CaptureSession` (abstract)
 
-Tiny interface with `startCapture()` / `stopCapture()` and signals `frameReady(QImage)` /
-`captureError(QString)`. Two concrete implementations:
+Small interface with `startCapture()` / `stopCapture()`, `setDelivering(bool)`, `stats()`
+and signals `frameReady(QImage)` / `captureError(QString)`. Three kinds of session exist:
 
-- **`DxgiCaptureSession`** — wraps a `DxgiCapture` QThread
-- **`WindowCaptureSession`** — wraps a `WindowCapture` QThread
+- **display**: `DxgiCaptureSession` (a `DxgiCapture` QThread) or `WgcCaptureSession`
+  (Windows.Graphics.Capture), chosen by the `capture/backend` setting through
+  `CaptureBackend::effective()`, which falls back to DXGI where WGC is unavailable. The
+  two exist to be compared; everything downstream of them is identical.
+- **window**: `WindowCaptureSession` (a `WindowCapture` QThread using PrintWindow), or
+  WGC under the same setting.
+- **camera**: `CameraCaptureSession`, a Media Foundation source reader on its own
+  thread.
 
-The abstract session lets `CaptureController` tests inject fake sessions.
+Every session bounds the frames it has handed over and not yet had taken: DXGI and WGC
+allow two in flight, window and camera capture go through a bounded
+`CaptureFrameHandoff`. A frame past the bound is dropped and counted, and `stats()`
+reports what was produced and dropped. The abstract session is what lets tests inject
+fakes.
 
 ### `DxgiCapture` (QThread worker)
 
-Uses **DXGI Desktop Duplication** (`IDXGIOutputDuplication`). Runs at ~30 fps:
+Uses **DXGI Desktop Duplication** (`IDXGIOutputDuplication`):
 1. `AcquireNextFrame(timeout=33ms)`
 2. `QueryInterface<IDXGIResource>` → `ID3D11Texture2D`
-3. `CreateTexture2D(STAGING)` → `CopyResource`
-4. `Map(D3D11_MAP_READ)` → construct `QImage(Format_ARGB32)`
-5. Emit `frameReady`
+3. `CopyResource` into a staging texture, `Map(D3D11_MAP_READ)`
+4. Copy into a `QImage(Format_ARGB32)` and emit `frameReady`, unless two frames are
+   already in flight, in which case the newest is dropped and counted.
+
+`DXGI_ERROR_ACCESS_LOST` (a UAC prompt, the lock screen, a display mode change) ends the
+worker with `captureError`; the controller recreates it (see below).
 
 ### `WindowCapture` (QThread worker)
 
-Uses **PrintWindow / BitBlt** to capture a specific HWND at ~30 fps:
-1. `IsWindow(hwnd)` — false → emit `windowClosed`, exit
-2. `GetClientRect` for dimensions
-3. Create a compatible DC + DIB section (`CreateCompatibleBitmap`)
-4. Try `PrintWindow(hwnd, memDC, PW_RENDERFULLCONTENT)` (works with GPU-rendered apps)
-   — fall back to `BitBlt` on failure
-5. `GetDIBits` → BGRA bytes → `QImage(Format_ARGB32)` → emit `frameReady`
+Uses **PrintWindow / BitBlt** to capture one HWND at about 30 fps:
+1. `IsWindow(hwnd)` false → emit `windowClosed` and exit
+2. A window whose application is not responding (`IsHungAppWindow`) is skipped, since
+   PrintWindow waits on that application and would block the worker
+3. `GetClientRect`, a compatible DC and bitmap
+4. `PrintWindow(hwnd, memDC, PW_RENDERFULLCONTENT)`, falling back to `BitBlt`
+5. `GetDIBits` → BGRA → `QImage(Format_ARGB32)` → `frameReady`
 
-`PW_RENDERFULLCONTENT` forces the compositor to render GPU content into the DC; this
-works for Chrome, VS Code, etc. DRM-protected content still produces a black frame.
+Workers are stopped through `retireWorker` (`WorkerRetirement.h`): a worker that does not
+stop within its timeout is detached and deletes itself when its thread ends, because Qt
+aborts the process if a running `QThread` is destroyed.
 
 ### `CaptureController`
 
-Keeps two parallel session maps:
+Keeps three session maps:
 
 ```
 QHash<QString, ActiveSession>       m_sessions        // display: key "adapter:output"
 QHash<QString, ActiveWindowSession> m_windowSessions  // window:  key "window:0x<8hex>"
+QHash<QString, ActiveCameraSession> m_cameraSessions  // camera:  key = device id
 ```
 
-`reconcile()` is called on every `SceneCollection` signal that could change what needs
-capturing. It:
-1. Builds `required` (display) and `requiredWindows` (HWND) sets by scanning visible items
-2. Stops sessions whose key is no longer in the required set
-3. Starts sessions for keys that are required but not yet running
+`reconcile()` runs on every `SceneCollection` signal that could change what needs
+capturing, and on program and studio mode changes. It:
+1. Collects the sources wanted by the live scenes: the current scene and, in studio
+   mode, the program scene, which is what is recorded and streamed
+2. Skips any source held for device consent (`SceneCollection::deviceHeld`)
+3. Stops sessions no longer wanted and starts the missing ones
 
-Session creation is injected via `SessionFactory` / `WindowSessionFactory` functors —
-this is how tests swap in `FakeCaptureSession` without touching production code.
+A session that fails is stopped and tried again after a delay, from half a second
+doubling to ten seconds while it keeps failing; a delivered frame resets the delay, and
+removing the source cancels the retry. A session is disconnected from the controller
+before it is stopped, so a frame it had already queued cannot mark the source live again.
+`setDelivering(false)` suspends every session when nothing consumes frames.
+
+Session creation is injected through `SessionFactory` (and
+`setCameraSessionFactoryForTesting`), which is how tests use `FakeCaptureSession`.
 
 ---
 
@@ -181,34 +202,34 @@ this is how tests swap in `FakeCaptureSession` without touching production code.
 ### `WasapiCapture` (QThread worker)
 
 Captures one WASAPI endpoint (loopback **or** input). All COM objects live on the worker
-thread. Output is hard-pinned to **48 kHz / 16-bit / stereo** (s16le). The worker
-converts whatever the device delivers (float32 most common, int16/int32 also handled)
-via per-sample inline converters.
+thread. Output is fixed at **48 kHz / 16-bit / stereo** (s16le): the device's format is
+converted per sample and resampled to 48 kHz where the device runs at another rate
+(`audio/Resampler.h`). Every failure that ends the worker is reported through
+`captureError` with its HRESULT, and a quiet endpoint is polled on each timeout so a
+device removed while silent is noticed.
 
 ### `AudioController`
 
 Owns a flat list of `AudioInput` structs and a parallel list of `WasapiCapture*` workers.
 
-**Loopback default** — always the first entry (`id = "loopback:default"`); never removed.
+**Loopback default**: always the first entry (`id = "loopback:default"`); never removed.
 
-**`reconcileInputs(QStringList activeDeviceIds)`** — called whenever `SceneCollection`
-emits `audioInputsChanged`. Adds workers for device IDs in the list that don't yet have
-one; stops and removes workers for IDs that are no longer in the list. The loopback
-entry is immune to removal.
+**`reconcileInputs(QStringList activeDeviceIds)`**: adds workers for device ids without
+one and removes those no longer listed. MainWindow calls it with
+`SceneCollection::gatherVisibleAudioIds()` on every structural model signal, not only
+`audioInputsChanged`, because most edits that change the set of microphones do not emit
+that one.
 
-**`enumerateInputDevices()`** — one-shot COM call (`IMMDeviceEnumerator::EnumAudioEndpoints(eCapture)`)
-returning `{deviceId, friendlyName}` pairs. Called to populate the Inspector's audio-device
-combo box and to assign friendly names to new reconciled inputs.
+**Device loss**: an input whose worker reports an error is marked disconnected and
+restarted after a delay, from half a second doubling to ten seconds; audio arriving marks
+it connected again. Following a change of the default playback device is not implemented.
 
-**Program bus** — each worker emits `samplesReady(QByteArray pcm)` which `AudioController`
-intercepts, applies per-input volume/mute, and re-emits as `mixedSamples(QByteArray)`.
-`Recorder` subscribes to `mixedSamples` and writes it to the audio named pipe.
-
-> Note: the current mixing model is additive — when multiple inputs are active, only
-> the **loopback** channel's samples flow to the recorder (the architecture for mixing
-> multiple streams is deferred to v6). Per-source audio currently controls whether mic
-> workers run; the mic stream is connected to the same `mixedSamples` signal but the
-> recorder only processes the first emission per tick.
+**Program bus**: each worker's `samplesReady` goes into a per-input byte FIFO. A 50 Hz
+timer (`mixAndEmit`) takes exactly one tick (20 ms) from each FIFO, applies volume, mute
+and balance, sums into int32, runs the optional limiter, clamps to int16 and emits one
+chunk through `TimedPcmSource::pcmReady`: silence when nothing is connected. The encoder
+and the replay ring both consume that signal. Volume, pan and the limiter threshold are
+bounded, and a value that is not a number is replaced with a default.
 
 ---
 
@@ -216,32 +237,52 @@ intercepts, applies per-input volume/mute, and re-emits as `mixedSamples(QByteAr
 
 ### `OutputSettings`
 
-Header-only POD + QSettings load/save. Not per-project — stored in the Windows Registry
-under `HKCU\Software\MalloyStudio\MalloyStudio\output\*`. Defaults match the v4
-hard-coded values (1080p / 30fps / libx264 / CRF 23 / AAC 192k / mp4).
+Header-only POD + QSettings load/save. Not per-project: stored under
+`HKCU\Software\MalloyStudio\MalloyStudio\output\*`. `normalized()` bounds every field
+(even dimensions, 1 to 1000 fps, and so on), and every writer is expected to go through it.
 
-### `Recorder`
+### `MediaController`
 
-Two-channel ffmpeg pipeline:
+Owns a `RecorderPipeline` for recording and a `StreamingPipeline` for streaming, both
+`EncoderPipeline` subclasses, and runs a one-shot `RecorderPipeline` for each replay save
+over snapshots of the preview's frame ring and the controller's PCM ring
+(`RingTimedFrameSource`, `RingTimedPcmSource`, which play the snapshot back in real time
+by its timestamps). Its destructor stops any of them still running.
+
+### `EncoderPipeline`
+
+Runs ffmpeg with video and audio on two named pipes:
 
 ```
-PreviewWidget ──[QTimer@fps]──► stdin ──► ffmpeg ──► output file
-AudioController ──[mixedSamples]──► named pipe ──► ffmpeg ──►┘
+PreviewWidget::currentFrame() ──[tick]──► VideoPipeWriter ──► \\.\pipe\malloy_video_… ──► ffmpeg
+AudioController::pcmReady ─────────────► AudioPipeWriter ──► \\.\pipe\malloy_audio_… ──►┘
 ```
 
-**Video channel**: `onTickVideo()` calls `m_frameSupplier()` (= `PreviewWidget::cachedComposedFrame()`),
-writes raw BGRA scanlines to ffmpeg's stdin. ffmpeg uses a `-vf scale=W:H` filter when
-the requested output resolution differs from the canvas native 1920×1080.
+**Pipes.** Each is created before ffmpeg starts with an explicit security descriptor
+(the system and the current user only), `PIPE_REJECT_REMOTE_CLIENTS`, a single instance,
+and a name salted from the system random generator. ffmpeg reads
+`-f rawvideo -pix_fmt bgra -s 1920x1080 -framerate <fps> -use_wallclock_as_timestamps 1`
+from one and `-f s16le -ar 48000 -ac 2` from the other. A `PipeAcceptThread` per pipe
+waits in an overlapped, cancellable `ConnectNamedPipe` (`CancellablePipeIo`); the video
+pipe is primed with one frame so ffmpeg's probe does not starve.
 
-**Audio channel**: a Windows named pipe (`\\.\pipe\malloy_audio_<pid>_<rnd>`) is created
-server-side before ffmpeg starts. `PipeAcceptThread` blocks on `ConnectNamedPipe` off
-the main thread; once connected, `AudioController::mixedSamples` is wired to write PCM
-into the pipe. ffmpeg reads `-f s16le -ar 48000 -ac 2 -i <pipename>`.
+**Writers.** `VideoPipeWriter` holds at most three frames; a frame arriving at a full
+queue is dropped and counted rather than buffered. `AudioPipeWriter` holds up to 1500
+chunks and drops the oldest only past that, since dropped audio deletes time.
 
-`-shortest` ensures ffmpeg finalises the file when the shorter stream ends.
+**Time.** Frames carry wall-clock timestamps, so a dropped frame leaves a gap instead of
+shortening the file. A file uses `-fps_mode vfr` and writes a frame only when the
+composition sequence has advanced (`Cadence::FollowSource`). A stream uses
+`-fps_mode cfr -r <fps>` and writes on its own clock, repeating the latest picture
+(`Cadence::ConstantRate`), because an ingest expects a steady rate.
 
-**Cleanup**: `stop()` closes stdin (video EOF), flushes + disconnects the pipe (audio EOF),
-waits up to 5 s for ffmpeg to finish, then emits `finished(path, bytes)`.
+**Output.** The codec arguments come from `EncoderRegistry` (see below), after a `scale`
+filter when the output size differs from the 1920x1080 canvas. `-shortest` is not used.
+
+**Stop.** The writers and acceptors are asked to stop and their pending I/O cancelled,
+then joined; the pipes are disconnected, which is ffmpeg's end of input; the pipeline
+waits up to 5 s for ffmpeg to finish with the event loop running, and kills it after
+that. A one-line summary of the run's capture stages is logged.
 
 ---
 
@@ -343,12 +384,14 @@ Opacity could be implemented as a pixel loop (`img[i].alpha *= factor`). Instead
 and applies the product via `QPainter::setOpacity()`. This leverages hardware alpha
 compositing with zero CPU cost.
 
-### Named-pipe audio transport
+### Named-pipe media transport
 
 ffmpeg cannot read from a Qt `QIODevice` directly; it needs a path. On Windows, named
-pipes are addressable via `\\.\pipe\<name>`. The server side is created before ffmpeg
-starts; `PipeAcceptThread` blocks on `ConnectNamedPipe` off the main thread to avoid
-stalling the UI while ffmpeg opens the pipe.
+pipes are addressable via `\\.\pipe\<name>`. Video used to go to ffmpeg's stdin, which
+left the write in `QProcess`'s buffer on the GUI thread; both streams now have a pipe of
+their own, served by threads of their own, so a stalled encoder costs frames, counted,
+rather than the UI. The pipes are created before ffmpeg starts, and a `PipeAcceptThread`
+waits for each connection off the main thread.
 
 ### OutputSettings as app-global QSettings
 
@@ -358,9 +401,10 @@ don't change per-project. Storing them globally means the user configures once.
 
 ### AudioController::reconcileInputs
 
-Rather than AudioController watching SceneCollection directly, MainWindow wires
-`SceneCollection::audioInputsChanged → AudioController::reconcileInputs(gatherVisibleAudioIds())`.
-This keeps AudioController ignorant of the model layer and makes the data flow explicit.
+Rather than AudioController watching SceneCollection directly, MainWindow calls
+`AudioController::reconcileInputs(gatherVisibleAudioIds())` on every structural model
+signal. This keeps AudioController ignorant of the model layer and makes the data flow
+explicit.
 
 ---
 
@@ -403,7 +447,8 @@ re-emitted from the streamer's `EncoderPipeline::progress` signal.
 ### StreamingPipeline (v6, fixed in v7)
 
 Subclasses `EncoderPipeline::buildOutputArgs` to emit RTMP-flavored args:
-no `-shortest` (streams run forever), `-f flv` muxer, forced GOP for live
+`-fps_mode cfr -r <fps>` for the constant rate an ingest expects, the codec
+arguments for `Destination::Stream`, `-f flv`, and a forced GOP for live
 delivery. v6 hardcoded libx264 flags here — v7 routes through
 `EncoderRegistry::find(s.videoCodec)->buildArgs(s)` then appends
 `-tune <streamingTune>` (if non-empty) and `-g <fps × keyframeSec>` last
