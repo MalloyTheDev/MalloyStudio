@@ -221,6 +221,7 @@ private slots:
     void stoppingKeepsTheSoundAlreadyHandedOver();
     void soundTheEncoderNeverTookIsReported();
     void theSinkTicksAtItsConfiguredRate();
+    void soundAndPictureStayTogether();
     void killingAProcessEndsWhatItStarted();
     void audioControllerHasDefaultLoopbackInput();
     void audioControllerPersistsVolumeAndMute();
@@ -787,6 +788,105 @@ private:
     QImage m_image;
 };
 
+// A flash and a click at the same moment on one clock: black pictures and
+// silence until kFlashAtMs, then white pictures, and a 20 ms click in the
+// chunk that covers kFlashAtMs. Sound is emitted by elapsed time, as the mixer
+// does, so both sources keep the same time.
+class FlashAndClick {
+public:
+    static constexpr qint64 kFlashAtMs = 2000;
+
+    FlashAndClick() : frames(this), audio(this) {
+        clock.start();
+        m_black = QImage(1920, 1080, QImage::Format_ARGB32);
+        m_black.fill(Qt::black);
+        m_white = QImage(1920, 1080, QImage::Format_ARGB32);
+        m_white.fill(Qt::white);
+    }
+    bool flashed() const { return clock.elapsed() >= kFlashAtMs; }
+
+    class Frames final : public TimedFrameSource {
+    public:
+        explicit Frames(FlashAndClick* owner) : m_owner(owner) {}
+        QImage currentFrame() override {
+            return m_owner->flashed() ? m_owner->m_white : m_owner->m_black;
+        }
+        int nativeWidth() const override { return 1920; }
+        int nativeHeight() const override { return 1080; }
+        quint64 compositionSequence() const override { return m_owner->flashed() ? 2 : 1; }
+    private:
+        FlashAndClick* m_owner;
+    };
+
+    class Audio final : public TimedPcmSource {
+    public:
+        explicit Audio(FlashAndClick* owner) : m_owner(owner) {
+            m_timer.setTimerType(Qt::PreciseTimer);
+            connect(&m_timer, &QTimer::timeout, this, [this] {
+                const qint64 due = m_owner->clock.elapsed() / 20;
+                for (; m_emitted < due; ++m_emitted) {
+                    QByteArray chunk(3840, '\0');
+                    if (m_emitted == FlashAndClick::kFlashAtMs / 20) {
+                        auto* s = reinterpret_cast<qint16*>(chunk.data());
+                        for (int i = 0; i < 960; ++i) {
+                            const qint16 v = (i / 24) % 2 ? 20000 : -20000;   // 1 kHz square
+                            s[2 * i] = v;
+                            s[2 * i + 1] = v;
+                        }
+                    }
+                    emit pcmReady(chunk);
+                }
+            });
+            m_timer.start(5);
+        }
+        int sampleRate() const override { return 48000; }
+        int channels() const override { return 2; }
+    private:
+        FlashAndClick* m_owner;
+        QTimer m_timer;
+        qint64 m_emitted = 0;
+    };
+
+    QElapsedTimer clock;
+    Frames frames;
+    Audio audio;
+private:
+    QImage m_black;
+    QImage m_white;
+};
+
+// When the picture in a file first turns bright, from ffmpeg's showinfo, or
+// -1 if it never does.
+double firstBrightFrameSeconds(const QString& ffmpeg, const QString& path) {
+    QProcess p;
+    p.start(ffmpeg, {QStringLiteral("-hide_banner"), QStringLiteral("-i"), path,
+                     QStringLiteral("-map"), QStringLiteral("0:v:0"),
+                     QStringLiteral("-vf"), QStringLiteral("showinfo"),
+                     QStringLiteral("-f"), QStringLiteral("null"), QStringLiteral("-")});
+    if (!p.waitForFinished(30000)) { p.kill(); p.waitForFinished(); return -1; }
+    static const QRegularExpression frame(
+        QStringLiteral("pts_time:([0-9.]+).*mean:\\[([0-9]+)"));
+    for (const QString& line : QString::fromUtf8(p.readAllStandardError()).split(QLatin1Char('\n'))) {
+        const auto m = frame.match(line);
+        if (m.hasMatch() && m.captured(2).toInt() > 128) return m.captured(1).toDouble();
+    }
+    return -1;
+}
+
+// When the sound in a file first rises out of silence, from ffmpeg's
+// silencedetect, or -1 if it never does.
+double firstSoundSeconds(const QString& ffmpeg, const QString& path) {
+    QProcess p;
+    p.start(ffmpeg, {QStringLiteral("-hide_banner"), QStringLiteral("-i"), path,
+                     QStringLiteral("-map"), QStringLiteral("0:a:0"),
+                     QStringLiteral("-af"), QStringLiteral("silencedetect=n=-30dB:d=0.05"),
+                     QStringLiteral("-f"), QStringLiteral("null"), QStringLiteral("-")});
+    if (!p.waitForFinished(30000)) { p.kill(); p.waitForFinished(); return -1; }
+    static const QRegularExpression end(QStringLiteral("silence_end: ([0-9.]+)"));
+    const auto m = end.match(QString::fromUtf8(p.readAllStandardError()));
+    return m.hasMatch() ? m.captured(1).toDouble() : -1;
+}
+
 // One solid colour, for checking what the encode does to it.
 class SolidColourFrames final : public TimedFrameSource {
 public:
@@ -1085,6 +1185,42 @@ void MalloyModelTests::theSinkTicksAtItsConfiguredRate() {
         QVERIFY2(std::abs(rate - fps) / fps < 0.012,
                  qPrintable(QStringLiteral("%1 fps ticked at %2 Hz").arg(fps).arg(rate)));
     }
+}
+
+void MalloyModelTests::soundAndPictureStayTogether() {
+    // ffmpeg opens the video pipe before the audio pipe and starts each input
+    // at zero, so a gap between the two openings would put the sound out of
+    // step with the picture for the whole recording. A flash and a click made
+    // at the same moment must land at the same time in the file.
+    RecorderPipeline pipeline;
+    if (!pipeline.ffmpegAvailable()) QSKIP("Real encoder lifecycle requires ffmpeg in PATH");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    FlashAndClick source;
+    EncoderPipeline::Target target;
+    target.output = recordingTestSettings();
+    target.output.fps = 60;
+    target.destination = dir.filePath(QStringLiteral("sync.mp4"));
+    QString error;
+
+    QVERIFY2(pipeline.start(target, &source.frames, &source.audio, &error), qPrintable(error));
+    QEventLoop loop;
+    QTimer::singleShot(FlashAndClick::kFlashAtMs + 1500, &loop, &QEventLoop::quit);
+    loop.exec();
+    pipeline.stop();
+
+    const double flash = firstBrightFrameSeconds(pipeline.ffmpegPath(), target.destination);
+    const double click = firstSoundSeconds(pipeline.ffmpegPath(), target.destination);
+    qInfo("flash at %.3f s, click at %.3f s, click - flash = %.3f s",
+          flash, click, click - flash);
+    QVERIFY(flash > 0);
+    QVERIFY(click > 0);
+    // Measured on the development machine: the click 7 to 27 ms after the
+    // flash, which is a 20 ms audio chunk and part of a frame. The bound
+    // allows a chunk and a frame each way; a start-up offset between the two
+    // inputs, which is what this guards against, is hundreds of milliseconds.
+    QVERIFY2(std::abs(click - flash) < 0.06,
+             qPrintable(QStringLiteral("click %1 s, flash %2 s").arg(click).arg(flash)));
 }
 
 void MalloyModelTests::killingAProcessEndsWhatItStarted() {
