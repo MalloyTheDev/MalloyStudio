@@ -747,15 +747,23 @@ private:
 class RecordingTestAudio final : public TimedPcmSource {
 public:
     RecordingTestAudio() {
+        // Paced by elapsed time, as the mixer is. One chunk per timer fire
+        // fell behind whenever the event loop was late, which QTest::qWait
+        // makes it every time, and left every recording here short of sound.
+        m_clock.start();
+        m_timer.setTimerType(Qt::PreciseTimer);
         connect(&m_timer, &QTimer::timeout, this, [this] {
-            emit pcmReady(QByteArray(3840, '\0')); // 20 ms of 48 kHz stereo PCM
+            for (const qint64 due = m_clock.elapsed() / 20; m_emitted < due; ++m_emitted)
+                emit pcmReady(QByteArray(3840, '\0')); // 20 ms of 48 kHz stereo PCM
         });
-        m_timer.start(20);
+        m_timer.start(5);
     }
     int sampleRate() const override { return 48000; }
     int channels() const override { return 2; }
 private:
+    QElapsedTimer m_clock;
     QTimer m_timer;
+    qint64 m_emitted = 0;
 };
 
 // A composed picture that never changes: the same sequence number every time,
@@ -1016,11 +1024,12 @@ void MalloyModelTests::aRecordingOfAStillSceneKeepsItsLengthAndAudio() {
     const double video = streamSeconds(ffprobe, target.destination, QStringLiteral("v:0"));
     const double sound = streamSeconds(ffprobe, target.destination, QStringLiteral("a:0"));
     qInfo("still scene: video %.2f s, audio %.2f s", video, sound);
-    // Measured on the development machine: 2.4 to 2.7 s of audio here, and 2.7
-    // to 2.8 s for a scene that moves, the difference from 3 s being ffmpeg's
-    // start-up before it opens the audio pipe. Without the still floor it was
-    // 0.18 s. The bound sits well between the two so the test does not flake.
-    QVERIFY2(sound > 2.0, qPrintable(QStringLiteral("audio %1 s").arg(sound)));
+    // Measured on the development machine: 2.90 to 2.92 s of audio here, the
+    // difference from 3 s being the time before ffmpeg has opened its inputs.
+    // Without the still floor it was 0.18 s. The bound sits well between the
+    // two so the test does not flake. (It was 2.4 to 2.8 s, and the bound 2.0,
+    // while the test's audio source fell behind the wall clock.)
+    QVERIFY2(sound > 2.5, qPrintable(QStringLiteral("audio %1 s").arg(sound)));
     QVERIFY2(video > 2.0, qPrintable(QStringLiteral("video %1 s").arg(video)));
 }
 
@@ -1104,9 +1113,9 @@ void MalloyModelTests::stoppingKeepsTheSoundAlreadyHandedOver() {
     QCoreApplication::processEvents();
     pipeline.stop();
 
-    // All of it is in the file: the sound runs seven seconds past the picture,
-    // less ffmpeg's start-up before it opened the audio pipe (0.2 to 0.6 s; see
-    // aRecordingOfAStillSceneKeepsItsLengthAndAudio). Discarding the writer's
+    // All of it is in the file: measured, the sound runs 6.80 to 6.84 s past
+    // the picture, the seven seconds less about a frame and the start-up
+    // before ffmpeg had both inputs open. Discarding the writer's
     // queue at Stop loses about a second and a half of it; so does draining
     // the sound before the video pipe is closed, which waits out the budget on
     // a reader that is holding the sound back; and disconnecting the pipe
