@@ -443,6 +443,8 @@ private slots:
     void deviceSampleFormatsAreReadOrRefused();
     void blurHandlesImagesSmallerThanItsRadius();
     void timelineGraphPlacesTrimsAndScalesClips();
+    // Clip positions are stored in canvas pixels and rendered in output pixels.
+    void timelineGraphScalesPositionsFromCanvasToOutput();
     void timelineGraphMixesAudioAndKeepsPathsOutOfTheGraph();
     void timelineGraphRefusesWhatItCannotRender();
     void timelineGraphBoundsNumbersBeforeArithmetic();
@@ -3995,6 +3997,50 @@ void MalloyModelTests::timelineGraphPlacesTrimsAndScalesClips() {
     const RenderGraph sg = TimelineGraphBuilder::build(smallTimeline, out);
     QVERIFY2(sg.ok, qPrintable(sg.error));
     QVERIFY(sg.filterGraph.contains(QStringLiteral("scale=960:540")));
+}
+
+void MalloyModelTests::timelineGraphScalesPositionsFromCanvasToOutput() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString media = makeMediaFile(dir.filePath(QStringLiteral("a.mp4")));
+    QVERIFY(!media.isEmpty());
+
+    // A half-size clip whose top left corner is the centre of the 1920x1080
+    // canvas, so it covers the bottom right quadrant whatever the output size.
+    const auto placed = [&](int tx, int ty, int width, int height) {
+        QJsonObject c = makeClip(media, 0.0, 5.0);
+        c.insert(QStringLiteral("transform"), QJsonObject{{QStringLiteral("x"), tx},
+                                                          {QStringLiteral("y"), ty},
+                                                          {QStringLiteral("scale"), 50.0}});
+        OutputSettings out;
+        out.width = width; out.height = height; out.fps = 30;
+        return TimelineGraphBuilder::build(QJsonArray{c}, out);
+    };
+
+    // At the canvas size nothing changes.
+    RenderGraph g = placed(960, 540, 1920, 1080);
+    QVERIFY2(g.ok, qPrintable(g.error));
+    QVERIFY2(g.filterGraph.contains(QStringLiteral("overlay=960:540:")), qPrintable(g.filterGraph));
+    QVERIFY(g.filterGraph.contains(QStringLiteral("scale=960:540")));
+
+    // 720p: position and size both shrink by two thirds.
+    g = placed(960, 540, 1280, 720);
+    QVERIFY2(g.ok, qPrintable(g.error));
+    QVERIFY2(g.filterGraph.contains(QStringLiteral("overlay=640:360:")), qPrintable(g.filterGraph));
+    QVERIFY(g.filterGraph.contains(QStringLiteral("scale=640:360")));
+
+    // 4K: both double. The position used to go through unscaled, which put the
+    // clip in the upper left quadrant instead.
+    g = placed(960, 540, 3840, 2160);
+    QVERIFY2(g.ok, qPrintable(g.error));
+    QVERIFY2(g.filterGraph.contains(QStringLiteral("overlay=1920:1080:")), qPrintable(g.filterGraph));
+    QVERIFY(g.filterGraph.contains(QStringLiteral("scale=1920:1080")));
+
+    // A position that does not divide evenly is rounded to the nearest pixel,
+    // including one off the canvas to the left.
+    g = placed(100, -50, 1280, 720);
+    QVERIFY2(g.ok, qPrintable(g.error));
+    QVERIFY2(g.filterGraph.contains(QStringLiteral("overlay=67:-33:")), qPrintable(g.filterGraph));
 }
 
 void MalloyModelTests::timelineGraphMixesAudioAndKeepsPathsOutOfTheGraph() {

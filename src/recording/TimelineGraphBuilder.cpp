@@ -1,4 +1,5 @@
 #include "recording/TimelineGraphBuilder.h"
+#include "model/Canvas.h"
 #include "project/MediaPathPolicy.h"
 #include "recording/EncoderRegistry.h"
 
@@ -205,14 +206,20 @@ RenderGraph TimelineGraphBuilder::build(const QJsonArray& timeline, const Output
         ++inputIndex;
     }
 
-    // Composite every video clip onto the background in track order.
+    // Composite every video clip onto the background in track order. The editor
+    // stores a clip's position in canvas pixels (MalloyCanvas, 1920x1080)
+    // whatever the output size, so it is scaled to the output here, as the size
+    // above is by being a share of the output. Rounded as 64-bit: the product
+    // of two ints can exceed what an int holds.
     QString last = QStringLiteral("bg");
     for (int i = 0; i < videoLabels.size(); ++i) {
         const Clip& c = video.at(i);
         const QString out = (i == videoLabels.size() - 1) ? QStringLiteral("vout")
                                                           : QStringLiteral("t%1").arg(i);
+        const qint64 x = std::llround(c.tx * double(output.width) / MalloyCanvas::Width);
+        const qint64 y = std::llround(c.ty * double(output.height) / MalloyCanvas::Height);
         chains << QStringLiteral("[%1][%2]overlay=%3:%4:eof_action=pass:shortest=0[%5]")
-                      .arg(last, videoLabels.at(i)).arg(c.tx).arg(c.ty).arg(out);
+                      .arg(last, videoLabels.at(i)).arg(x).arg(y).arg(out);
         last = out;
     }
 

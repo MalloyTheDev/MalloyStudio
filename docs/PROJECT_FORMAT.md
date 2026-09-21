@@ -236,6 +236,13 @@ A clip occupies `[start, start + dur)` on the timeline and consumes
 `start`, `dur` and `sourceIn` together; trimming the right edge changes `dur` only.
 Splitting at time `t` gives the right-hand clip `sourceIn + (t - start) * speed.factor`.
 
+### Placement
+
+`transform.x` and `transform.y` place the clip's top left corner in canvas pixels, on the
+1920x1080 canvas, and `transform.scale` is a percentage of the canvas size. A render at
+another output size scales both, so a clip lands in the same place in a 720p or 4K render
+as it does at 1080p.
+
 ### Unlinked clips
 
 A clip with an empty or missing `sourcePath` is *unlinked*: still editable, drawn with a
