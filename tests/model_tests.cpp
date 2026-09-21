@@ -375,6 +375,7 @@ private slots:
     void undoInStudioModeLeavesTheProgramOnAir();
     void removingAScenePreservesWhatIsOnAir();
     void stagingASceneKeepsTheProgramCaptureRunning();
+    void aFrameQueuedBeforeAStopIsDropped();
     void projectMediaPathsMustBeLocalFiles();
     void encoderRedactsTheStreamKeyFromFfmpegOutput();
     void addingAConfiguredLayerIsOneUndoStep();
@@ -3923,6 +3924,44 @@ void MalloyModelTests::stagingASceneKeepsTheProgramCaptureRunning() {
     scenes.setStudioMode(false);
     QCOMPARE(FakeCaptureSession::stopped.count(QStringLiteral("1:2")), 1);
     QCOMPARE(controller.activeSessionCount(), 0);
+}
+
+void MalloyModelTests::aFrameQueuedBeforeAStopIsDropped() {
+    FakeCaptureSession::started.clear();
+    FakeCaptureSession::stopped.clear();
+    FakeCaptureSession::created.clear();
+
+    SceneCollection scenes;
+    scenes.addScene(QStringLiteral("Scene"));
+    scenes.addNewSourceToCurrent(QStringLiteral("Display"), Source::Type::DisplayCapture,
+                                 QString(), QColor(), 1, 2);
+    scenes.selectCurrentItemAt(0);
+    CaptureController controller(
+        &scenes,
+        [](int adapterIndex, int outputIndex, QObject* parent) {
+            return new FakeCaptureSession(adapterIndex, outputIndex, parent);
+        });
+    QCOMPARE(FakeCaptureSession::created.size(), 1);
+    QPointer<FakeCaptureSession> session = FakeCaptureSession::created.first();
+
+    QSignalSpy frames(&controller, &CaptureController::frameReady);
+    QSignalSpy cleared(&controller, &CaptureController::frameCleared);
+    emit session->frameReady(QImage(4, 4, QImage::Format_RGB32));
+    QCOMPARE(frames.count(), 1);
+    QCOMPARE(controller.monitorStatus(1, 2), QStringLiteral("Live"));
+
+    // The source is hidden: the session stops and its picture is cleared.
+    scenes.setCurrentItemVisible(0, false);
+    QCOMPARE(FakeCaptureSession::stopped.count(QStringLiteral("1:2")), 1);
+    QCOMPARE(cleared.count(), 1);
+    QVERIFY(session);   // deleted later, so a queued frame can still reach it
+
+    // A frame the session had queued before the stop is delivered now. It
+    // used to be passed on, marking the monitor live again and handing the
+    // preview a picture of a source that is off.
+    emit session->frameReady(QImage(4, 4, QImage::Format_RGB32));
+    QCOMPARE(frames.count(), 1);
+    QCOMPARE(controller.monitorStatus(1, 2), QStringLiteral("Idle"));
 }
 
 void MalloyModelTests::everyMicChangeIsAnnouncedStructurally() {

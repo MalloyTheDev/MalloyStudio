@@ -257,6 +257,11 @@ void CaptureController::stopSession(const QString& key, bool setIdleStatus) {
     ActiveSession active = it.value();
     m_sessions.erase(it);
     if (active.session) {
+        // Frames the session had already queued are still delivered after
+        // it stops, and one arriving here would mark the source live again
+        // and put back the picture being cleared below. Nothing it sends
+        // from now on is wanted.
+        disconnect(active.session, nullptr, this, nullptr);
         active.session->stopCapture();
         const CaptureStats stats = active.session->stats();
         m_retiredStats.framesProduced += stats.framesProduced;
@@ -294,6 +299,11 @@ void CaptureController::stopWindowSession(const QString& key) {
     ActiveWindowSession active = it.value();
     m_windowSessions.erase(it);
     if (active.session) {
+        // Frames the session had already queued are still delivered after
+        // it stops, and one arriving here would mark the source live again
+        // and put back the picture being cleared below. Nothing it sends
+        // from now on is wanted.
+        disconnect(active.session, nullptr, this, nullptr);
         active.session->stopCapture();
         const CaptureStats stats = active.session->stats();
         m_retiredStats.framesProduced += stats.framesProduced;
@@ -325,6 +335,11 @@ void CaptureController::stopCameraSession(const QString& deviceId) {
     ActiveCameraSession active = it.value();
     m_cameraSessions.erase(it);
     if (active.session) {
+        // Frames the session had already queued are still delivered after
+        // it stops, and one arriving here would mark the source live again
+        // and put back the picture being cleared below. Nothing it sends
+        // from now on is wanted.
+        disconnect(active.session, nullptr, this, nullptr);
         active.session->stopCapture();
         const CaptureStats stats = active.session->stats();
         m_retiredStats.framesProduced += stats.framesProduced;
