@@ -3,6 +3,7 @@
 #include "audio/AudioMix.h"
 #include "media/TimedSource.h"
 
+#include <QElapsedTimer>
 #include <QHash>
 
 #include <functional>
@@ -88,7 +89,7 @@ signals:
     // Program bus output: interleaved s16le 48kHz stereo PCM. Emitted ~50 Hz.
 
 private slots:
-    void mixAndEmit();   // fired by m_mixerTimer at 50 Hz
+    void mixAndEmit();   // fired by m_mixerTimer; emits every tick that is due
 
 private:
     void addLoopbackDefault();
@@ -123,6 +124,22 @@ private:
 
     // 50 Hz mixer timer — fires mixAndEmit() on the main thread.
     QTimer* m_mixerTimer = nullptr;
+
+    // The mixer's clock. Audio time in a recording is the number of bytes
+    // written, so the mixer has to emit one tick of audio for every 20 ms that
+    // passes, not one per timer fire: fires come late, a stalled GUI thread
+    // skips them, and Qt does not replay missed ones. Emitting one per fire
+    // produced 2% less audio than wall time (measured over ten seconds), so a
+    // recording's sound ran about 1.2 s per minute ahead of its picture, and
+    // each stall moved it further. OBS paces its audio thread the same way,
+    // against a fixed start time rather than the previous wakeup.
+    QElapsedTimer m_mixClock;
+    qint64        m_ticksEmitted = 0;
+    // More than this behind, and the backlog is dropped instead of emitted: a
+    // GUI thread stalled for ten seconds has frozen the application, and the
+    // writer's queue could not take the burst anyway.
+    static constexpr qint64 kMaxCatchUpTicks = 500;
+    void mixOneTick();
 
     // Master bus limiter state.
     bool  m_limiterEnabled      = false;

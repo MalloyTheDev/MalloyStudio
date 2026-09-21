@@ -220,6 +220,7 @@ private slots:
     void audioControlsRefuseValuesThatAreNotNumbers();
     void aMicrophoneThatFailsIsStartedAgain();
     void audioFromARemovedInputIsNotKept();
+    void theMixerKeepsTimeWithTheWallClock();
     void mediaProbesAreRememberedNotRepeated();
     void aHungOrMissingProberDoesNotStallTheScan();
     void cloudOnlyMediaIsListedButNeverOpened();
@@ -6019,6 +6020,32 @@ void MalloyModelTests::audioFromARemovedInputIsNotKept() {
     // It must not bring the removed input's buffer back. Added again, the
     // microphone would otherwise start with that audio in hand.
     QCOMPARE(c.bufferedBytesForTesting(id), -1);
+}
+
+void MalloyModelTests::theMixerKeepsTimeWithTheWallClock() {
+    // A recording's audio time is the number of bytes the mixer emitted, so
+    // the mixer has to emit exactly as much audio as time passes. It emitted
+    // one 20 ms tick per timer fire, which measured 2% short, and nothing at
+    // all for the time the GUI thread was stalled.
+    AudioController c;
+    qint64 bytes = 0;
+    QObject::connect(&c, &TimedPcmSource::pcmReady, &c,
+                     [&bytes](const QByteArray& pcm) { bytes += pcm.size(); });
+    QTest::qWait(300);
+    const qint64 startBytes = bytes;
+    QElapsedTimer wall;
+    wall.start();
+
+    QTest::qWait(1500);
+    QThread::msleep(700);   // the GUI thread stalls
+    QTest::qWait(1000);
+
+    const double audio = double(bytes - startBytes) / (48000.0 * 4.0);
+    const double elapsed = wall.elapsed() / 1000.0;
+    qInfo("mixer: wall %.3f s, audio %.3f s", elapsed, audio);
+    // Within two ticks and a little scheduling slack.
+    QVERIFY2(std::abs(audio - elapsed) < 0.1,
+             qPrintable(QStringLiteral("audio %1 s for %2 s of wall time").arg(audio).arg(elapsed)));
 }
 
 void MalloyModelTests::mediaProbesAreRememberedNotRepeated() {

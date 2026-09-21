@@ -42,6 +42,8 @@ finding again.
 - Every input is mixed on a 50 Hz program bus, byte-accurately and in stereo (6013ef8,
   64d9cd7), with capture resampled to 48 kHz (3d211f2).
 - Volume, pan and the limiter threshold refuse values that are not numbers (eeb2cc7).
+- The mixer emits audio by elapsed time rather than one tick per timer fire, which ran
+  2% short and lost stalls, so recorded sound no longer drifts ahead of the picture.
 
 ### Recording and streaming
 

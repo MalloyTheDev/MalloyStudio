@@ -225,7 +225,9 @@ restarted after a delay, from half a second doubling to ten seconds; audio arriv
 it connected again. Following a change of the default playback device is not implemented.
 
 **Program bus**: each worker's `samplesReady` goes into a per-input byte FIFO. A 50 Hz
-timer (`mixAndEmit`) takes exactly one tick (20 ms) from each FIFO, applies volume, mute
+timer (`mixAndEmit`) emits one 20 ms tick for every 20 ms of elapsed time since the mixer
+started, catching up after a late or stalled fire, because a recording's audio time is
+the number of bytes written. Each tick takes exactly 20 ms from each FIFO, applies volume, mute
 and balance, sums into int32, runs the optional limiter, clamps to int16 and emits one
 chunk through `TimedPcmSource::pcmReady`: silence when nothing is connected. The encoder
 and the replay ring both consume that signal. Volume, pan and the limiter threshold are

@@ -1,6 +1,7 @@
 #pragma once
 #include "media/TimedSource.h"
 
+#include <QElapsedTimer>
 #include <QQueue>
 
 class QTimer;
@@ -36,4 +37,8 @@ private slots:
 private:
     QQueue<TimedPcm> m_chunks;
     QTimer*          m_timer = nullptr;
+    // Chunks are due by elapsed time, 20 ms each, not one per timer fire, which
+    // delivered them about 2% slower than real time; see AudioController.
+    QElapsedTimer    m_clock;
+    qint64           m_emitted = 0;
 };

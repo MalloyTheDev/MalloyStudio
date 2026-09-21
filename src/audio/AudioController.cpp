@@ -49,8 +49,10 @@ static constexpr float kLimiterRelease = 1.0f / 60.0f;   // gain back 1/60 per t
 AudioController::AudioController(QObject* parent) : TimedPcmSource(parent) {
     // 50 Hz mixer clock.
     m_mixerTimer = new QTimer(this);
-    m_mixerTimer->setInterval(20);  // 20 ms ≈ 50 Hz
+    m_mixerTimer->setTimerType(Qt::PreciseTimer);
+    m_mixerTimer->setInterval(20);  // 20 ms ≈ 50 Hz; see m_mixClock for what paces the audio
     connect(m_mixerTimer, &QTimer::timeout, this, &AudioController::mixAndEmit);
+    m_mixClock.start();
     m_mixerTimer->start();
 
     addLoopbackDefault();
@@ -80,6 +82,22 @@ AudioController::~AudioController() {
 // ---------------------------------------------------------------------------
 
 void AudioController::mixAndEmit() {
+    // Every tick the clock says is due, not one per fire; see m_mixClock.
+    constexpr qint64 kTickMs = 1000 / 50;
+    const qint64 due = m_mixClock.elapsed() / kTickMs;
+    qint64 owed = due - m_ticksEmitted;
+    if (owed > kMaxCatchUpTicks) {
+        qWarning("Audio mixer fell %lld ms behind; resynchronising", (owed - 1) * kTickMs);
+        m_ticksEmitted = due - 1;
+        owed = 1;
+    }
+    for (; owed > 0; --owed) {
+        mixOneTick();
+        ++m_ticksEmitted;
+    }
+}
+
+void AudioController::mixOneTick() {
     // Always emit a chunk every tick — even when no inputs exist. The
     // recording pipeline opens a second ffmpeg input on the audio pipe
     // and ffmpeg will exit with EINVAL (-22) if it doesn't see steady
