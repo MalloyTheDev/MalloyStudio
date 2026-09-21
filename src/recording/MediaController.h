@@ -86,6 +86,7 @@ signals:
     void replaySaved(QString path);
 
     // Both pipelines surface errors here; origin = "recording" | "streaming" | "replay".
+    // Emitted once the output concerned has stopped.
     void errorOccurred(QString origin, QString message);
 
 private:

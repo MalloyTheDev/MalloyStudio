@@ -139,9 +139,10 @@ bool MediaController::startStreaming(const StreamSettings& stream,
     m_keyRelay = nullptr;
     if (stream.useKeyRelay) {
         m_keyRelay = new RtmpKeyRelay(this);
+        // Stopped before it is reported, as the pipeline's own errors are.
         connect(m_keyRelay, &RtmpKeyRelay::failed, this, [this](const QString& msg) {
-            emit errorOccurred(QStringLiteral("streaming"), msg);
             stopStreaming();
+            emit errorOccurred(QStringLiteral("streaming"), msg);
         });
         QString relayError;
         const QString relayUrl = m_keyRelay->start(url, &relayError);
@@ -178,10 +179,10 @@ bool MediaController::startStreaming(const StreamSettings& stream,
         QTimer::singleShot(kRelayCheckMs, this, [this, relay] {
             if (!relay || !isStreaming()) return;
             if (relay->substitutions() > 0) return;
+            stopStreaming();
             emit errorOccurred(QStringLiteral("streaming"),
                                tr("The stream key relay did not engage, so the stream was "
                                   "stopped rather than published under a placeholder."));
-            stopStreaming();
         });
     }
     return true;

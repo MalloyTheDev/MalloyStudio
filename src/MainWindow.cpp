@@ -832,13 +832,28 @@ void MainWindow::connectModelSignals() {
             summary = msg.left(sep);
             detail  = msg.mid(sep + 2);   // include "Last stderr:" header in details
         }
-        QMessageBox box(this);
-        box.setIcon(QMessageBox::Critical);
-        box.setWindowTitle(title);
-        box.setText(summary);
-        if (!detail.isEmpty()) box.setDetailedText(detail);
-        box.setStandardButtons(QMessageBox::Ok);
-        box.exec();
+        // Opened, not exec()'d, and one box per origin. exec() held this
+        // handler, and everything queued behind it, until the box was
+        // dismissed, and each further error stacked another box on top. The
+        // output has already stopped when this arrives. A further error from
+        // an origin whose box is still open replaces the text in that box.
+        const QString boxName = QStringLiteral("outputError-") + origin;
+        QMessageBox* box = nullptr;
+        for (QMessageBox* open : findChildren<QMessageBox*>(boxName, Qt::FindDirectChildrenOnly))
+            if (open->isVisible()) box = open;
+        const bool alreadyOpen = box != nullptr;
+        if (!alreadyOpen) {
+            box = new QMessageBox(this);
+            box->setObjectName(boxName);
+            box->setAttribute(Qt::WA_DeleteOnClose);
+            box->setIcon(QMessageBox::Critical);
+            box->setStandardButtons(QMessageBox::Ok);
+        }
+        box->setWindowTitle(title);
+        box->setText(summary);
+        box->setDetailedText(detail);
+        if (alreadyOpen) box->raise();
+        else box->open();
         if (recording)
             m_controlsBar->forceStopRecording();
         else if (streaming)

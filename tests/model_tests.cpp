@@ -239,6 +239,10 @@ private slots:
     void recorderConstructsRegardlessOfFfmpegPresence();
     void recorderCanRestartAfterFinalization();
     void controllerCanReplacePipelineFromFinishedSignal();
+    // An error is reported once the output it ended has stopped, so whatever
+    // shows it cannot hold a failed pipeline open.
+    void anEncoderErrorIsReportedAfterThePipelineStops();
+    void aRelayFailureIsReportedAfterTheStreamStops();
     void aRecordingOfAStillSceneKeepsItsLengthAndAudio();
     void aRecordingKeepsItsColours();
     void stoppingKeepsTheSoundAlreadyHandedOver();
@@ -1420,6 +1424,90 @@ void MalloyModelTests::controllerCanReplacePipelineFromFinishedSignal() {
     QCOMPARE(errors.size(), 0);
     QVERIFY(recordingDecodes(ffmpeg, dir.filePath(QStringLiteral("first.mp4"))));
     QVERIFY(recordingDecodes(ffmpeg, dir.filePath(QStringLiteral("second.mp4"))));
+}
+
+void MalloyModelTests::anEncoderErrorIsReportedAfterThePipelineStops() {
+    RecorderPipeline pipeline;
+    if (!pipeline.ffmpegAvailable()) QSKIP("Real encoder lifecycle requires ffmpeg in PATH");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    RecordingTestFrames frames;
+    RecordingTestAudio audio;
+    EncoderPipeline::Target target;
+    target.output = recordingTestSettings();
+    // A folder that does not exist: ffmpeg opens both inputs, cannot open the
+    // output, and exits with an error while the pipeline is running.
+    target.destination = dir.filePath(QStringLiteral("missing/out.mp4"));
+
+    QSignalSpy finished(&pipeline, &EncoderPipeline::finished);
+    int errors = 0;
+    bool runningAtError = true;
+    qsizetype finishedAtError = -1;
+    QString message;
+    connect(&pipeline, &EncoderPipeline::errorOccurred, &pipeline, [&](const QString& msg) {
+        ++errors;
+        runningAtError = pipeline.isRunning();
+        finishedAtError = finished.size();
+        message = msg;
+    });
+    QString error;
+    QVERIFY2(pipeline.start(target, &frames, &audio, &error), qPrintable(error));
+    QTRY_COMPARE_WITH_TIMEOUT(errors, 1, 20000);
+
+    // Already stopped when the error arrives. It used to arrive first, and
+    // MainWindow showed it in a modal box, so the failed pipeline stayed up
+    // until the box was dismissed.
+    QVERIFY(!runningAtError);
+    QCOMPARE(finishedAtError, 1);
+    // Still carrying ffmpeg's own account of the failure, although the
+    // process it came from has gone.
+    QVERIFY2(message.contains(QStringLiteral("\n\nLast stderr:\n"))
+                 && message.contains(QStringLiteral("out.mp4")),
+             qPrintable(message));
+    QTest::qWait(500);
+    QCOMPARE(errors, 1);
+    QVERIFY(!pipeline.isRunning());
+}
+
+void MalloyModelTests::aRelayFailureIsReportedAfterTheStreamStops() {
+    RecordingTestFrames frames;
+    RecordingTestAudio audio;
+    MediaController controller(&frames, &audio);
+    if (!controller.ffmpegAvailable()) QSKIP("Real encoder lifecycle requires ffmpeg in PATH");
+
+    // An ingest that refuses the connection: a local port that was listening
+    // a moment ago and is not now.
+    quint16 port = 0;
+    {
+        QTcpServer taken;
+        QVERIFY(taken.listen(QHostAddress::LocalHost));
+        port = taken.serverPort();
+    }
+    StreamSettings stream;
+    stream.service = StreamSettings::Service::Custom;
+    stream.customUrl = QStringLiteral("rtmp://127.0.0.1:%1/live/{key}").arg(port);
+    stream.streamKey = QStringLiteral("live_relay_test_key");
+    stream.useKeyRelay = true;
+
+    int errors = 0;
+    bool streamingAtError = true;
+    QString message;
+    connect(&controller, &MediaController::errorOccurred, &controller,
+            [&](const QString& origin, const QString& msg) {
+        if (origin != QStringLiteral("streaming") || ++errors > 1) return;
+        streamingAtError = controller.isStreaming();
+        message = msg;
+    });
+    QString error;
+    QVERIFY2(controller.startStreaming(stream, recordingTestSettings(), &error), qPrintable(error));
+    QTRY_VERIFY_WITH_TIMEOUT(errors > 0, 20000);
+
+    // The relay reported it, and the stream had stopped by then. Measured, the
+    // refusal arrives about four seconds in; on a slower run the relay's own
+    // five second check can report first, and both are relay errors.
+    QVERIFY2(message.contains(QStringLiteral("relay")), qPrintable(message));
+    QVERIFY(!streamingAtError);
+    QVERIFY(!controller.isStreaming());
 }
 
 void MalloyModelTests::audioControllerHasDefaultLoopbackInput() {

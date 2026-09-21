@@ -85,6 +85,10 @@ signals:
     // Error messages contain the short summary followed by "\n\nLast stderr:\n<tail>"
     // when ffmpeg's stderr tail is available. MainWindow splits this for
     // QMessageBox::setDetailedText so the wall of ffmpeg output is hidden by default.
+    //
+    // Emitted after the pipeline has stopped: by then isRunning() is false and
+    // finished() has been emitted, so a handler that takes its time, such as
+    // one showing a message, holds up nothing.
     void errorOccurred(QString message);
     // Live progress emitted from ffmpeg's stderr progress lines (~1 Hz while
     // running). droppedFrames is 0 if ffmpeg's line omits a `drop=` token, and
@@ -229,6 +233,9 @@ private:
     static constexpr int kStopDrainMs = 1000;
 
     void cleanup();
+    // Where every failure of a running pipeline ends: stops, then emits
+    // errorOccurred with the summary and ffmpeg's stderr tail.
+    void stopWithError(const QString& summary);
     // Arms the video timer for the next deadline on the sink's clock.
     void armVideoClock();
     void retirePipeWorkers();

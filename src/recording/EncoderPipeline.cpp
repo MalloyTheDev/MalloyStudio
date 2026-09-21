@@ -910,9 +910,8 @@ bool EncoderPipeline::start(const Target& target,
     m_pipeWatchdog->setInterval(5000);
     connect(m_pipeWatchdog, &QTimer::timeout, this, [this] {
         if (m_running && !m_pipeReady) {
-            emit errorOccurred(QStringLiteral(
+            stopWithError(QStringLiteral(
                 "Audio pipe did not connect within 5 s — ffmpeg may have failed to start"));
-            stop();
         }
     });
     m_pipeWatchdog->start();
@@ -1370,32 +1369,38 @@ void EncoderPipeline::onPipeConnected() {
     }
 }
 
-void EncoderPipeline::onPipeConnectFailed(const QString& pipeName) {
-    if (!m_running) return;
-    QString msg = QStringLiteral("%1 pipe did not connect to ffmpeg").arg(pipeName);
+void EncoderPipeline::stopWithError(const QString& summary) {
+    // The message is complete before the stop, because the stop tears down
+    // the process whose stderr it quotes.
+    QString msg = summary;
     if (!m_stderrTail.isEmpty())
         msg += QStringLiteral("\n\nLast stderr:\n") + m_stderrTail;
-    emit errorOccurred(msg);
+
+    // Stopped first, reported after. Reporting first left a failed pipeline
+    // running for as long as whoever handled the error took, which was as long
+    // as a modal error box stayed open. A slot on finished() may delete this
+    // object, which stop() allows by emitting it last, so it is checked for.
+    const QPointer<EncoderPipeline> self(this);
     stop();
+    if (self) emit errorOccurred(msg);
+}
+
+void EncoderPipeline::onPipeConnectFailed(const QString& pipeName) {
+    if (!m_running) return;
+    stopWithError(QStringLiteral("%1 pipe did not connect to ffmpeg").arg(pipeName));
 }
 
 void EncoderPipeline::onFfmpegError() {
     if (!m_running) return;
     const QString detail = m_ffmpeg ? m_ffmpeg->errorString() : QStringLiteral("ffmpeg error");
-    QString msg = QStringLiteral("ffmpeg: ") + detail;
-    if (!m_stderrTail.isEmpty())
-        msg += QStringLiteral("\n\nLast stderr:\n") + m_stderrTail;
-    emit errorOccurred(msg);
-    stop();
+    stopWithError(QStringLiteral("ffmpeg: ") + detail);
 }
 
 void EncoderPipeline::onFfmpegFinished(int exitCode) {
     if (!m_running) return; // expected — our stop() triggered it
     if (exitCode != 0) {
-        QString msg = QStringLiteral("ffmpeg exited unexpectedly with code %1").arg(exitCode);
-        if (!m_stderrTail.isEmpty())
-            msg += QStringLiteral("\n\nLast stderr:\n") + m_stderrTail;
-        emit errorOccurred(msg);
+        stopWithError(QStringLiteral("ffmpeg exited unexpectedly with code %1").arg(exitCode));
+        return;
     }
     stop();
 }
