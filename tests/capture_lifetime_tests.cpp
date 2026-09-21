@@ -4,6 +4,7 @@
 #include <chrono>
 #include <future>
 #include <iostream>
+#include <latch>
 #include <memory>
 #include <stdexcept>
 #include <thread>
@@ -101,20 +102,92 @@ void oldSessionCannotEnterRestart() {
     require(target.calls == 2, "An event from the retired session entered its replacement");
 }
 
-void frameAndClosedSinksShareSerialization() {
-    Target target;
-    auto gate = std::make_shared<Gate>(&target);
-    std::vector<std::thread> events;
-    for (int i = 0; i < 4; ++i) {
-        events.emplace_back([sinkGate = gate] {
-            for (int call = 0; call < 1000; ++call) {
-                sinkGate->invoke([](Target& owner) { ++owner.calls; });
-            }
-        });
+// Keeps a callback inside the gate long enough for an unserialised delivery to
+// arrive while it is still running. A spin, because a sleep or a yield can last
+// a whole scheduler tick on Windows, and with the gate working every hold runs
+// one after another inside the executable's time limit.
+void holdInsideCallback() {
+    const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(20);
+    while (std::chrono::steady_clock::now() < until) {
     }
-    for (auto& event : events) event.join();
-    gate->close();
-    require(target.calls == 4000, "Concurrent sinks did not serialize owner access");
+}
+
+void frameAndClosedSinksShareSerialization() {
+    // Several sinks deliver at once, as the frame and closed callbacks of
+    // separate capture threads do, and close() arrives while they are live.
+    // The threads start together and keep delivering until the gate closes,
+    // and every callback holds itself open, so a delivery that is not
+    // serialised lands inside another rather than between two. Threads that
+    // each ran a short loop to completion before the next was even created
+    // never overlapped, and the test passed with the gate's mutex removed.
+    constexpr int kSinks = 4;
+    constexpr int kRounds = 20;
+    constexpr int kDeliveriesBeforeClose = 200;
+
+    for (int round = 0; round < kRounds; ++round) {
+        Target target;
+        auto gate = std::make_shared<Gate>(&target);
+        std::atomic<int> inside{0};
+        std::atomic<int> deliveries{0};
+        std::atomic<bool> overlapped{false};
+        std::atomic<bool> closeReturned{false};
+        std::atomic<bool> ranAfterClose{false};
+        std::atomic<bool> wrongOwner{false};
+        std::atomic<bool> stop{false};
+        std::latch start(kSinks);
+
+        const auto deliver = [&](Target& owner) {
+            // Compared rather than used: a close() that does not wait for
+            // callbacks can clear the target while one is being admitted.
+            if (&owner != &target) {
+                wrongOwner.store(true);
+                return;
+            }
+            if (inside.fetch_add(1) != 0) overlapped.store(true);
+            if (closeReturned.load()) ranAfterClose.store(true);
+            // Read before the hold and written after it, so an overlap also
+            // loses an update, which is what it would do to a real owner.
+            const int calls = owner.calls;
+            holdInsideCallback();
+            owner.calls = calls + 1;
+            if (closeReturned.load()) ranAfterClose.store(true);
+            deliveries.fetch_add(1);
+            inside.fetch_sub(1);
+        };
+
+        std::vector<std::thread> sinks;
+        for (int i = 0; i < kSinks; ++i) {
+            sinks.emplace_back([sinkGate = gate, &start, &stop, &deliver] {
+                start.arrive_and_wait();
+                while (!stop.load()) sinkGate->invoke(deliver);
+            });
+        }
+
+        // Closed once the sinks are delivering, and while a callback is
+        // inside, so close() races one that is running and others waiting to
+        // be admitted. Waiting on the delivery count alone woke this thread
+        // just as a callback finished, and close() then landed in the gap
+        // before the next one far more often than chance.
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while ((deliveries.load() < kDeliveriesBeforeClose || inside.load() == 0)
+               && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::yield();
+        }
+        const bool live = deliveries.load() >= kDeliveriesBeforeClose;
+        gate->close();
+        closeReturned.store(true);
+        const int deliveredByClose = deliveries.load();
+        stop.store(true);
+        for (auto& sink : sinks) sink.join();
+
+        require(live, "The sinks never started delivering");
+        require(!wrongOwner.load(), "A callback was handed something other than its owner");
+        require(!overlapped.load(), "Two sinks were inside the owner at the same time");
+        require(!ranAfterClose.load(), "A callback was still running after close() returned");
+        require(deliveries.load() == deliveredByClose,
+                "A delivery completed after close() returned");
+        require(target.calls == deliveredByClose, "Concurrent sinks lost an update to the owner");
+    }
 }
 
 }  // namespace
