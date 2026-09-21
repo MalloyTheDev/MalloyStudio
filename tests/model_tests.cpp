@@ -44,6 +44,7 @@
 #include "ui/workspaces/EditorWorkspace.h"
 #include "ui/workspaces/TimelineEdits.h"
 #include "ui/workspaces/StreamingWorkspace.h"
+#include "ui/workspaces/LibraryWorkspaces.h"
 #include "ui/shell/EditingFocus.h"
 #include "ui/OutputSettingsDialog.h"
 #include "ui/StreamSettingsDialog.h"
@@ -318,6 +319,9 @@ private slots:
     void projectRegistryScansMalloyFiles();
     // Media registry: classifies files by extension and ignores non-media.
     void mediaRegistryClassifiesByExtension();
+    // The Clips and Media sidebars count what their registries hold now, not
+    // what they held when the workspace was built.
+    void librarySidebarsFollowTheirRegistries();
     // Render queue: promotes, progresses, completes, persists.
     void renderQueueProcessesAndPersists();
     // Render queue control surface: retry (Failed→Pending), cancel (drops
@@ -2769,6 +2773,65 @@ void MalloyModelTests::mediaRegistryClassifiesByExtension() {
     QCOMPARE(reg.countOfKind(MediaInfo::Video), 1);
     QCOMPARE(reg.countOfKind(MediaInfo::Audio), 1);
     QCOMPARE(reg.countOfKind(MediaInfo::Image), 1);
+}
+
+void MalloyModelTests::librarySidebarsFollowTheirRegistries() {
+    // The Clips and Media sidebars counted once, when the workspace was built,
+    // while the list beside them followed the registry. A clip saved or starred
+    // later, or media found by a later scan, left the two disagreeing.
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    // The number at the end of the sidebar row that carries this label.
+    const auto countBeside = [](const QWidget* view, const QString& label) {
+        for (const QLabel* name : view->findChildren<QLabel*>()) {
+            if (name->text() != label) continue;
+            const QList<QLabel*> row =
+                name->parentWidget()->findChildren<QLabel*>(Qt::FindDirectChildrenOnly);
+            return row.last()->text();
+        }
+        return QString();
+    };
+
+    ClipsRegistry clips;
+    clips.setStorePath(dir.filePath(QStringLiteral("clips.json")));
+    ClipsWorkspace clipsView(&clips);
+    QCOMPARE(countBeside(&clipsView, QStringLiteral("All clips")), QStringLiteral("0"));
+    ClipInfo saved;
+    saved.name = QStringLiteral("Saved replay");
+    clips.addClip(saved);
+    ClipInfo putAway;
+    putAway.name = QStringLiteral("Put away");
+    putAway.archived = true;
+    clips.addClip(putAway);
+    QCOMPARE(countBeside(&clipsView, QStringLiteral("All clips")), QStringLiteral("2"));
+    QCOMPARE(countBeside(&clipsView, QStringLiteral("Favorites")), QStringLiteral("0"));
+    QCOMPARE(countBeside(&clipsView, QStringLiteral("Archived")), QStringLiteral("1"));
+    clips.setFavorite(clips.clips().last().id, true);
+    QCOMPARE(countBeside(&clipsView, QStringLiteral("Favorites")), QStringLiteral("1"));
+
+    const QString movies = dir.filePath(QStringLiteral("movies"));
+    const QString recordings = dir.filePath(QStringLiteral("recordings"));
+    QVERIFY(QDir().mkpath(movies) && QDir().mkpath(recordings));
+    for (const char* name : {"trailer.mp4", "theme.wav", "poster.png"})
+        QVERIFY(!makeMediaFile(QDir(movies).filePath(QString::fromLatin1(name))).isEmpty());
+    QVERIFY(!makeMediaFile(QDir(recordings).filePath(QStringLiteral("session.mp4"))).isEmpty());
+
+    // A prober that cannot start, so no process is run for the files found.
+    MediaRegistry media;
+    media.setProbeCachePathForTesting(dir.filePath(QStringLiteral("probe-cache.json")));
+    media.setProbeCommandForTesting(dir.filePath(QStringLiteral("no-such-prober.exe")), {}, 10000);
+    MediaWorkspace mediaView(&media);
+    QCOMPARE(countBeside(&mediaView, QStringLiteral("All media")), QStringLiteral("0"));
+    media.setSearchDirs({movies});
+    QCOMPARE(countBeside(&mediaView, QStringLiteral("All media")), QStringLiteral("3"));
+    QCOMPARE(countBeside(&mediaView, QStringLiteral("Video")), QStringLiteral("1"));
+    QCOMPARE(countBeside(&mediaView, QStringLiteral("Audio")), QStringLiteral("1"));
+    QCOMPARE(countBeside(&mediaView, QStringLiteral("Image")), QStringLiteral("1"));
+    // A finished recording adds its folder.
+    media.addSearchDir(recordings);
+    QCOMPARE(countBeside(&mediaView, QStringLiteral("All media")), QStringLiteral("4"));
+    QCOMPARE(countBeside(&mediaView, QStringLiteral("Video")), QStringLiteral("2"));
+    QTRY_VERIFY(!media.probing());
 }
 
 void MalloyModelTests::renderQueueProcessesAndPersists() {

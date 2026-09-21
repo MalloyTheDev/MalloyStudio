@@ -266,6 +266,9 @@ qt_add_executable(MalloyStudioTests
     src/ui/VuMeter.h
     src/ui/workspaces/StreamingWorkspace.cpp
     src/ui/workspaces/StreamingWorkspace.h
+    # The library workspaces, whose sidebar counts must follow their registries.
+    src/ui/workspaces/LibraryWorkspaces.cpp
+    src/ui/workspaces/LibraryWorkspaces.h
 )
 
 # Force console subsystem so CTest captures stdout test output

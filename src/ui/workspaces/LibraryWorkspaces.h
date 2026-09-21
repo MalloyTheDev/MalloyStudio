@@ -25,6 +25,10 @@ private:
     ClipsRegistry* m_registry = nullptr;
     QScrollArea* m_scroll = nullptr;
     QLabel* m_countLabel = nullptr;
+    // Sidebar counts, set by rebuild().
+    QLabel* m_allCount = nullptr;
+    QLabel* m_favoriteCount = nullptr;
+    QLabel* m_archivedCount = nullptr;
 };
 
 class MediaWorkspace : public QWidget {
@@ -38,6 +42,11 @@ private:
     MediaRegistry* m_registry = nullptr;
     QScrollArea* m_scroll = nullptr;
     QLabel* m_countLabel = nullptr;
+    // Sidebar counts, set by rebuild().
+    QLabel* m_allCount = nullptr;
+    QLabel* m_videoCount = nullptr;
+    QLabel* m_audioCount = nullptr;
+    QLabel* m_imageCount = nullptr;
 };
 
 class ProjectsWorkspace : public QWidget {

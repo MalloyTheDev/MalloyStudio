@@ -33,7 +33,10 @@ QLineEdit* search(const QString& ph, int w = 320) {
     return e;
 }
 
-QWidget* filterRow(const QString& icon, const QString& label, int count, bool active = false) {
+// countOut, when given, receives the count label so the caller can keep it
+// up to date as its registry changes.
+QWidget* filterRow(const QString& icon, const QString& label, int count, bool active = false,
+                   QLabel** countOut = nullptr) {
     auto* w = new QWidget;
     w->setObjectName(QStringLiteral("row"));
     if (active) w->setProperty("active", true);
@@ -45,7 +48,11 @@ QWidget* filterRow(const QString& icon, const QString& label, int count, bool ac
     h->addWidget(i);
     h->addWidget(lbl(label, QStringLiteral("dim"), 12));
     h->addStretch();
-    if (count >= 0) h->addWidget(lbl(QString::number(count), QStringLiteral("mute"), 11, false, true));
+    if (count >= 0) {
+        auto* number = lbl(QString::number(count), QStringLiteral("mute"), 11, false, true);
+        h->addWidget(number);
+        if (countOut) *countOut = number;
+    }
     return w;
 }
 
@@ -73,11 +80,8 @@ ClipsWorkspace::ClipsWorkspace(ClipsRegistry* registry, QWidget* parent)
     row->setContentsMargins(0, 0, 0, 0);
     row->setSpacing(0);
 
-    int total = registry ? registry->count() : 0;
-    int favCount = 0;
-    if (registry) for (const ClipInfo& c : registry->clips()) if (c.favorite) ++favCount;
-
-    // Left filters
+    // Left filters. The counts are filled in by rebuild(), which runs on every
+    // change to the registry, so they stay in step with the grid.
     auto* aside = new QWidget(this);
     aside->setObjectName(QStringLiteral("recSideCol"));
     aside->setFixedWidth(240);
@@ -85,9 +89,9 @@ ClipsWorkspace::ClipsWorkspace(ClipsRegistry* registry, QWidget* parent)
     av->setContentsMargins(6, 8, 6, 8);
     av->setSpacing(2);
     av->addWidget(Theme::makeSectionHeader(tr("Smart filters")));
-    av->addWidget(filterRow(QStringLiteral("clips"), tr("All clips"), total, true));
-    av->addWidget(filterRow(QStringLiteral("star"), tr("Favorites"), favCount));
-    av->addWidget(filterRow(QStringLiteral("folder"), tr("Archived"), 0));
+    av->addWidget(filterRow(QStringLiteral("clips"), tr("All clips"), 0, true, &m_allCount));
+    av->addWidget(filterRow(QStringLiteral("star"), tr("Favorites"), 0, false, &m_favoriteCount));
+    av->addWidget(filterRow(QStringLiteral("folder"), tr("Archived"), 0, false, &m_archivedCount));
     av->addWidget(Theme::makeSectionHeader(tr("Tags")));
     auto* tagWrap = new QWidget;
     auto* tg = new QGridLayout(tagWrap);
@@ -142,7 +146,15 @@ ClipsWorkspace::ClipsWorkspace(ClipsRegistry* registry, QWidget* parent)
 void ClipsWorkspace::rebuild() {
     const QVector<ClipInfo> clips = m_registry ? m_registry->clips() : QVector<ClipInfo>{};
     qint64 totalBytes = 0;
-    for (const ClipInfo& c : clips) totalBytes += c.sizeBytes;
+    int favorites = 0, archived = 0;
+    for (const ClipInfo& c : clips) {
+        totalBytes += c.sizeBytes;
+        if (c.favorite) ++favorites;
+        if (c.archived) ++archived;
+    }
+    if (m_allCount) m_allCount->setText(QString::number(clips.size()));
+    if (m_favoriteCount) m_favoriteCount->setText(QString::number(favorites));
+    if (m_archivedCount) m_archivedCount->setText(QString::number(archived));
     if (m_countLabel) {
         const double mb = totalBytes / (1024.0 * 1024.0);
         const QString sz = mb >= 1024.0 ? QStringLiteral("%1 GB").arg(mb / 1024.0, 0, 'f', 1)
@@ -220,16 +232,14 @@ MediaWorkspace::MediaWorkspace(MediaRegistry* registry, QWidget* parent)
     auto* av = new QVBoxLayout(aside);
     av->setContentsMargins(6, 8, 6, 8);
     av->setSpacing(2);
+    // The counts are filled in by rebuild(), which runs on every change to the
+    // registry, so a later scan or a newly saved recording shows up here too.
     av->addWidget(Theme::makeSectionHeader(tr("Library")));
-    av->addWidget(filterRow(QStringLiteral("media"), tr("All media"),
-                            registry ? registry->count() : 0, true));
+    av->addWidget(filterRow(QStringLiteral("media"), tr("All media"), 0, true, &m_allCount));
     av->addWidget(Theme::makeSectionHeader(tr("File types")));
-    av->addWidget(filterRow(QStringLiteral("editor"), tr("Video"),
-                            registry ? registry->countOfKind(MediaInfo::Video) : 0));
-    av->addWidget(filterRow(QStringLiteral("speaker"), tr("Audio"),
-                            registry ? registry->countOfKind(MediaInfo::Audio) : 0));
-    av->addWidget(filterRow(QStringLiteral("image"), tr("Image"),
-                            registry ? registry->countOfKind(MediaInfo::Image) : 0));
+    av->addWidget(filterRow(QStringLiteral("editor"), tr("Video"), 0, false, &m_videoCount));
+    av->addWidget(filterRow(QStringLiteral("speaker"), tr("Audio"), 0, false, &m_audioCount));
+    av->addWidget(filterRow(QStringLiteral("image"), tr("Image"), 0, false, &m_imageCount));
     av->addStretch();
     row->addWidget(aside);
 
@@ -264,7 +274,17 @@ MediaWorkspace::MediaWorkspace(MediaRegistry* registry, QWidget* parent)
 void MediaWorkspace::rebuild() {
     const QVector<MediaInfo> media = m_registry ? m_registry->media() : QVector<MediaInfo>{};
     qint64 totalBytes = 0;
-    for (const MediaInfo& m : media) totalBytes += m.sizeBytes;
+    int videos = 0, audio = 0, images = 0;
+    for (const MediaInfo& m : media) {
+        totalBytes += m.sizeBytes;
+        if (m.kind == MediaInfo::Video) ++videos;
+        else if (m.kind == MediaInfo::Audio) ++audio;
+        else if (m.kind == MediaInfo::Image) ++images;
+    }
+    if (m_allCount) m_allCount->setText(QString::number(media.size()));
+    if (m_videoCount) m_videoCount->setText(QString::number(videos));
+    if (m_audioCount) m_audioCount->setText(QString::number(audio));
+    if (m_imageCount) m_imageCount->setText(QString::number(images));
     if (m_countLabel) {
         const double mb = totalBytes / (1024.0 * 1024.0);
         const QString sz = mb >= 1024.0 ? QStringLiteral("%1 GB").arg(mb / 1024.0, 0, 'f', 1)
