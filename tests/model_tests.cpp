@@ -242,6 +242,7 @@ private slots:
     void audioControllerPersistsVolumeAndMute();
     void audioControlsRefuseValuesThatAreNotNumbers();
     void aMicrophoneThatFailsIsStartedAgain();
+    void desktopAudioFollowsTheDefaultPlaybackDevice();
     void audioFromARemovedInputIsNotKept();
     // Both mixers show the level that is stored, rounded, wherever it was set.
     void aMixerSliderStaysWhereItWasSet();
@@ -6935,6 +6936,72 @@ void MalloyModelTests::aMicrophoneThatFailsIsStartedAgain() {
     c.reconcileInputs({});
     QTest::qWait(1200);
     QCOMPARE(workers.size(), 2);
+}
+
+void MalloyModelTests::desktopAudioFollowsTheDefaultPlaybackDevice() {
+    struct Made {
+        QPointer<FakeWasapiWorker> worker;
+        QString deviceId;
+        bool loopback = false;
+    };
+    QList<Made> made;
+    AudioController::DefaultDeviceNotification notify;
+
+    // Windows calls from a thread of its own, never the controller's.
+    const auto fromWindows = [&notify](bool render, bool console, const QString& device) {
+        std::thread windows([&] { notify(render, console, device); });
+        windows.join();
+    };
+
+    {
+        AudioController c;
+        // Registered with Windows. Without that, nothing below is ever called
+        // outside a test.
+        QVERIFY(c.followsDefaultPlaybackDeviceForTesting());
+        c.setWorkerFactoryForTesting([&made](const QString& deviceId, bool loopback) {
+            auto* w = new FakeWasapiWorker(deviceId, loopback);
+            made.append({w, deviceId, loopback});
+            return w;
+        });
+        notify = c.defaultDeviceNotificationForTesting();
+        QVERIFY(notify);
+
+        c.reconcileInputs({QStringLiteral("{test-mic}")});
+        QCOMPARE(made.size(), 1);
+        QVERIFY(!made[0].loopback);
+
+        // Speakers to headphones. Desktop audio is started again, opening
+        // whatever is now the default; it used to go on recording the speakers.
+        fromWindows(true, true, QStringLiteral("{headphones}"));
+        QTRY_COMPARE(made.size(), 2);
+        QVERIFY(made[1].loopback);
+        QVERIFY(made[1].deviceId.isEmpty());
+        // A microphone is its own device, and is left alone.
+        QVERIFY(made[0].worker);
+
+        // Not the device desktop audio opens: a new default microphone, and
+        // the multimedia role, which Windows announces separately. Nor a
+        // second announcement of the same change.
+        fromWindows(false, true, QStringLiteral("{new-mic}"));
+        fromWindows(true, false, QStringLiteral("{headset}"));
+        fromWindows(true, true, QStringLiteral("{headphones}"));
+        // Back to the speakers: one restart, and the headphones' worker is
+        // stopped and gone rather than left capturing beside the new one.
+        fromWindows(true, true, QStringLiteral("{speakers}"));
+        QTRY_COMPARE(made.size(), 3);
+        QTest::qWait(100);
+        QCOMPARE(made.size(), 3);
+        QVERIFY(made[2].loopback);
+        QVERIFY(made[2].deviceId.isEmpty());
+        QVERIFY(!made[1].worker);
+        QVERIFY(made[0].worker);
+    }
+
+    // Windows can still hold the watcher, and be part way through a call, when
+    // the controller goes. Nothing it says afterwards reaches anything.
+    fromWindows(true, true, QStringLiteral("{headphones}"));
+    QCoreApplication::processEvents();
+    QCOMPARE(made.size(), 3);
 }
 
 void MalloyModelTests::aFadeStartsFromTheComposedCanvas() {

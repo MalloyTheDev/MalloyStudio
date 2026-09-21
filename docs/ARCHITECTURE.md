@@ -231,7 +231,16 @@ that one.
 
 **Device loss**: an input whose worker reports an error is marked disconnected and
 restarted after a delay, from half a second doubling to ten seconds; audio arriving marks
-it connected again. Following a change of the default playback device is not implemented.
+it connected again.
+
+**Default playback device**: the controller registers an `IMMNotificationClient` with
+Windows for as long as it exists. When the console default of the render flow changes,
+the notification is posted from Windows's thread to the controller's, and the
+`loopback:default` worker is restarted so it opens the new default; a restart already
+waiting out a failure is superseded. Other roles, capture devices and a repeat of the
+same device are ignored, and microphones are untouched. The registration is withdrawn
+first thing in the destructor, and a notification Windows delivers after that reaches
+nothing.
 
 **Program bus**: each worker's `samplesReady` goes into a per-input byte FIFO. A 50 Hz
 timer (`mixAndEmit`) emits one 20 ms tick for every 20 ms of elapsed time since the mixer

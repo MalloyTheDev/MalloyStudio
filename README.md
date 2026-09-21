@@ -176,7 +176,6 @@ hardware. Tests that run a real encode skip themselves when ffmpeg is not on `PA
 - **Browser source** is a placeholder (renders a grey box); WebEngineView integration is still deferred.
 - **Desktop Audio as a scene source** is not yet available — `AudioController` auto-creates a `loopback:default` mixer strip so desktop audio always reaches recordings, but adding it as a scene-level source needs a JSON schema bump (deferred to v8).
 - **Push-to-talk** for microphones requires a low-level keyboard hook (out of scope).
-- Desktop audio keeps capturing the playback device that was the default when its capture started; changing the default device while running is not followed yet.
 
 ---
 

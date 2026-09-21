@@ -11,9 +11,11 @@
 #include <QTimer>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <vector>
 
 #define WIN32_LEAN_AND_MEAN
@@ -21,6 +23,74 @@
 #include <mmdeviceapi.h>
 #include <propsys.h>
 #include <functiondiscoverykeys_devpkey.h>
+
+// ---------------------------------------------------------------------------
+// Default playback device
+// ---------------------------------------------------------------------------
+
+// Receives Windows's endpoint notifications. They arrive on a thread of the
+// audio service's, so nothing here touches the controller directly: the one
+// notification that matters is posted to the controller's thread.
+//
+// Windows holds a reference of its own and can be part way through a call
+// while the controller is destroyed, so the watcher is reference counted and
+// outlives the controller when it has to. detach() is what makes that safe:
+// once it returns, nothing more is posted to the controller, and anything
+// already posted is discarded with the controller's pending events.
+class DefaultPlaybackWatcher final : public IMMNotificationClient {
+public:
+    explicit DefaultPlaybackWatcher(AudioController* controller) : m_controller(controller) {}
+
+    void detach() {
+        QMutexLocker lock(&m_mutex);
+        m_controller = nullptr;
+    }
+
+    HRESULT STDMETHODCALLTYPE OnDefaultDeviceChanged(EDataFlow flow, ERole role,
+                                                     LPCWSTR deviceId) override {
+        // The loopback worker opens the console default of the render flow.
+        // Windows announces the multimedia and communications defaults, and
+        // those of capture devices, separately; none of them is what it opens.
+        if (flow != eRender || role != eConsole) return S_OK;
+        const QString id = deviceId ? QString::fromWCharArray(deviceId) : QString();
+        QMutexLocker lock(&m_mutex);
+        if (AudioController* c = m_controller) {
+            QMetaObject::invokeMethod(c, [c, id] { c->followDefaultPlaybackDevice(id); },
+                                      Qt::QueuedConnection);
+        }
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE OnDeviceStateChanged(LPCWSTR, DWORD) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnDeviceAdded(LPCWSTR) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnDeviceRemoved(LPCWSTR) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnPropertyValueChanged(LPCWSTR, const PROPERTYKEY) override {
+        return S_OK;
+    }
+
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++m_refs; }
+    ULONG STDMETHODCALLTYPE Release() override {
+        const ULONG refs = --m_refs;
+        if (refs == 0) delete this;
+        return refs;
+    }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
+        if (!out) return E_POINTER;
+        if (IsEqualIID(iid, __uuidof(IUnknown)) || IsEqualIID(iid, __uuidof(IMMNotificationClient))) {
+            *out = static_cast<IMMNotificationClient*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *out = nullptr;
+        return E_NOINTERFACE;
+    }
+
+private:
+    ~DefaultPlaybackWatcher() = default;   // only Release() ends it
+
+    std::atomic<ULONG> m_refs{1};
+    QMutex             m_mutex;
+    AudioController*   m_controller;   // guarded by m_mutex
+};
 
 // ---------------------------------------------------------------------------
 // Mixer constants
@@ -55,6 +125,9 @@ AudioController::AudioController(QObject* parent) : TimedPcmSource(parent) {
     m_mixClock.start();
     m_mixerTimer->start();
 
+    // Before the loopback worker starts, so no change can fall between the
+    // default it opens and the first notification.
+    startFollowingDefaultPlayback();
     addLoopbackDefault();
 
     // Each time a PCM chunk reaches the program bus, also push it to the replay ring.
@@ -72,6 +145,8 @@ AudioController::AudioController(QObject* parent) : TimedPcmSource(parent) {
 }
 
 AudioController::~AudioController() {
+    // First, so that no notification reaches a controller being taken apart.
+    stopFollowingDefaultPlayback();
     m_mixerTimer->stop();
     for (WasapiCapture* w : std::as_const(m_workers))
         retireWorker(w, 4000);
@@ -321,6 +396,72 @@ void AudioController::stopWorkerAt(int index) {
     // it is cut loose then rather than destroyed while running.
     retireWorker(w, 4000);
     m_workers[index] = nullptr;
+}
+
+void AudioController::startFollowingDefaultPlayback() {
+    m_playbackWatcher = new DefaultPlaybackWatcher(this);
+    // COM on this thread is the GUI thread's, which Qt initialises, as
+    // enumerateInputDevices() also relies on.
+    IMMDeviceEnumerator* enumerator = nullptr;
+    HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                                  __uuidof(IMMDeviceEnumerator),
+                                  reinterpret_cast<void**>(&enumerator));
+    if (SUCCEEDED(hr) && enumerator)
+        hr = enumerator->RegisterEndpointNotificationCallback(m_playbackWatcher);
+    if (FAILED(hr) || !enumerator) {
+        if (enumerator) enumerator->Release();
+        qWarning("Audio: desktop audio will not follow a change of the default playback "
+                 "device (0x%08lx)", static_cast<unsigned long>(hr));
+        return;
+    }
+    m_deviceEnumerator = enumerator;
+}
+
+void AudioController::stopFollowingDefaultPlayback() {
+    if (!m_playbackWatcher) return;
+    // Detached before the registration goes, so a call Windows is already
+    // making posts nothing once this returns.
+    m_playbackWatcher->detach();
+    if (m_deviceEnumerator) {
+        m_deviceEnumerator->UnregisterEndpointNotificationCallback(m_playbackWatcher);
+        m_deviceEnumerator->Release();
+        m_deviceEnumerator = nullptr;
+    }
+    m_playbackWatcher->Release();
+    m_playbackWatcher = nullptr;
+}
+
+void AudioController::followDefaultPlaybackDevice(const QString& deviceId) {
+    // Windows can announce one change more than once; each device is
+    // followed once.
+    if (m_followedPlaybackDevice == deviceId) return;
+    m_followedPlaybackDevice = deviceId;
+
+    for (int i = 0; i < m_inputs.size(); ++i) {
+        const AudioInput& in = m_inputs[i];
+        // Only an input that opens the default; one given a device stays on it.
+        if (!in.loopback || !in.deviceId.isEmpty()) continue;
+        // Now, rather than after a restart already waiting out a failure: that
+        // wait was for a device that is no longer the one wanted. A default
+        // with nothing behind it fails, and backs off, as any device does.
+        m_restartTokens.remove(in.id);
+        m_restartDelayMs.remove(in.id);
+        stopWorkerAt(i);
+        startWorker(i);
+    }
+}
+
+AudioController::DefaultDeviceNotification
+AudioController::defaultDeviceNotificationForTesting() const {
+    if (!m_playbackWatcher) return {};
+    m_playbackWatcher->AddRef();
+    const std::shared_ptr<DefaultPlaybackWatcher> watcher(
+        m_playbackWatcher, [](DefaultPlaybackWatcher* w) { w->Release(); });
+    return [watcher](bool render, bool console, const QString& deviceId) {
+        watcher->OnDefaultDeviceChanged(render ? eRender : eCapture,
+                                        console ? eConsole : eMultimedia,
+                                        reinterpret_cast<LPCWSTR>(deviceId.utf16()));
+    };
 }
 
 void AudioController::reconcileInputs(const QStringList& activeDeviceIds) {

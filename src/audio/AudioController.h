@@ -7,6 +7,7 @@
 #include <QHash>
 
 #include <functional>
+#include <optional>
 #include <QList>
 #include <QMutex>
 #include <QQueue>
@@ -14,6 +15,8 @@
 
 class WasapiCapture;
 class QTimer;
+class DefaultPlaybackWatcher;
+struct IMMDeviceEnumerator;
 
 // Owns all WASAPI capture workers, exposes a single "program bus" that the
 // EncoderPipeline consumes via the TimedPcmSource interface, and forwards
@@ -65,6 +68,17 @@ public:
     // For tests, so none opens a real device.
     using WorkerFactory = std::function<WasapiCapture*(const QString& deviceId, bool loopback)>;
     void setWorkerFactoryForTesting(WorkerFactory factory) { m_workerFactory = std::move(factory); }
+    // The notification Windows delivers when a default audio device changes,
+    // so a test can exercise the reaction without changing the machine's real
+    // default. It runs on the calling thread and takes the same path as
+    // Windows's own call, and like Windows's reference it can outlive the
+    // controller. Empty when there is nothing to notify.
+    using DefaultDeviceNotification =
+        std::function<void(bool render, bool console, const QString& deviceId)>;
+    DefaultDeviceNotification defaultDeviceNotificationForTesting() const;
+    // Whether Windows accepted the registration, without which desktop audio
+    // does not follow the default playback device. For tests.
+    bool followsDefaultPlaybackDeviceForTesting() const { return m_deviceEnumerator != nullptr; }
     // Bytes waiting in an input's buffer, or -1 when it has none. For tests.
     int bufferedBytesForTesting(const QString& id) const {
         const auto it = m_rings.constFind(id);
@@ -114,6 +128,21 @@ private:
     QHash<QString, quint64> m_restartTokens;    // the pending restart per id
     quint64                 m_restartSerial = 0;
     void scheduleRestart(const QString& id);
+
+    // Desktop audio follows the default playback device. Its worker opens
+    // whichever device is the default when it starts, and nothing used to
+    // move it: switching Windows from speakers to headphones left it
+    // recording the speakers. Windows announces the change on a thread of its
+    // own; the watcher posts it here, and the loopback worker is started again
+    // so that it opens the new default. Registered before the loopback worker
+    // first starts, and unregistered before anything else is taken down.
+    friend class DefaultPlaybackWatcher;
+    void startFollowingDefaultPlayback();
+    void stopFollowingDefaultPlayback();
+    void followDefaultPlaybackDevice(const QString& deviceId);
+    IMMDeviceEnumerator*    m_deviceEnumerator = nullptr;   // holds the registration
+    DefaultPlaybackWatcher* m_playbackWatcher  = nullptr;   // reference counted, never deleted here
+    std::optional<QString>  m_followedPlaybackDevice;       // the default last followed
 
     // Per-input PCM buffers: samplesReady pushes here; mixAndEmit() drains
     // exactly one tick per tick. Bounded by bytes rather than by chunk count,
