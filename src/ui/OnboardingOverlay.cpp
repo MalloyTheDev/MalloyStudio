@@ -1,9 +1,18 @@
 #include "ui/OnboardingOverlay.h"
+#include "audio/AudioController.h"
+#include "capture/CameraCapture.h"
+#include "capture/MonitorInfo.h"
+#include "project/ByteSize.h"
+#include "project/RecentRecordings.h"
+#include "recording/OutputSettings.h"
 #include "ui/components/Placeholder.h"
 #include "ui/IconFactory.h"
 #include "ui/Theme.h"
 
 #include <QButtonGroup>
+#include <QDir>
+#include <QFileDialog>
+#include <QFileInfo>
 #include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
@@ -12,8 +21,9 @@
 #include <QPainter>
 #include <QProgressBar>
 #include <QPushButton>
-#include <QRadioButton>
+#include <QSettings>
 #include <QStackedWidget>
+#include <QStorageInfo>
 #include <QVBoxLayout>
 
 namespace {
@@ -53,13 +63,78 @@ QPushButton* optionCard(const QString& icon, const QString& title, const QString
     // when stacked spacing-0 inside this button, so turn it off here.
     auto* tl = lbl(title, QString(), 13, true);          tl->setWordWrap(false);
     auto* sl = lbl(sub, QStringLiteral("mute"), 11);     sl->setWordWrap(false);
+    sl->setObjectName(QStringLiteral("optionSub"));
     tv->addWidget(tl);
     tv->addWidget(sl);
     h->addLayout(tv); h->addStretch();
     return b;
 }
 
+// The two fields a quality choice sets, named as Settings > Recording names them.
+QString qualitySummary(int fps, int crf) {
+    return QObject::tr("%1 fps · CRF %2").arg(fps).arg(crf);
+}
+
+// One line of the devices step. The mark says what was found: a check when
+// something was, a warning when nothing was, and a neutral mark when nobody
+// has looked yet, so a machine that was not checked is not reported as empty.
+enum class Found { Yes, No, NotChecked };
+
+QWidget* deviceRow(const QString& kind, const QString& detail, Found found,
+                   const QString& objectName) {
+    auto* r = new QWidget;
+    auto* h = new QHBoxLayout(r); h->setContentsMargins(16, 12, 16, 12); h->setSpacing(12);
+    auto* mark = new QLabel;
+    const QString icon = found == Found::Yes ? QStringLiteral("check")
+                       : found == Found::No  ? QStringLiteral("alert")
+                                             : QStringLiteral("info");
+    const QColor tint = found == Found::Yes ? Theme::Success
+                      : found == Found::No  ? Theme::Warn
+                                            : Theme::TextMute;
+    mark->setPixmap(Icons::pixmap(icon, tint, 14));
+    h->addWidget(mark);
+    auto* tv = new QVBoxLayout; tv->setSpacing(0);
+    tv->addWidget(lbl(kind, QString(), 13, true));
+    auto* nm = lbl(detail, QStringLiteral("mute"), 11); nm->setProperty("mono", true);
+    nm->setObjectName(objectName);
+    tv->addWidget(nm);
+    h->addLayout(tv, 1);
+    return r;
+}
+
 } // namespace
+
+OnboardingOverlay::Devices OnboardingOverlay::detectDevices(AudioController* audio) {
+    Devices d;
+    if (audio) {
+        d.audioChecked = true;
+        for (const auto& device : audio->enumerateInputDevices())
+            d.microphones << device.second;
+        for (const AudioInput& in : audio->inputs()) {
+            if (in.loopback && in.connected) { d.desktopAudio = in.name; break; }
+        }
+    }
+    // The cache only: enumerating here would block for seconds on a machine
+    // with no camera. openWizard() fills it in the background when nothing
+    // has looked yet.
+    d.camerasChecked = CameraCapture::hasEnumerated();
+    for (const CameraCapture::Device& c : CameraCapture::cachedDevices())
+        d.cameras << c.name;
+    for (const MonitorInfo& m : enumerateMonitors())
+        d.displays << QStringLiteral("%1 × %2").arg(m.geometry.width()).arg(m.geometry.height());
+    return d;
+}
+
+OutputSettings OnboardingOverlay::withQuality(const OutputSettings& current, Quality quality) {
+    OutputSettings o = current;
+    switch (quality) {
+    case Quality::Keep:        break;
+    case Quality::Standard:    o.fps = 60; o.crf = 23; break;
+    case Quality::Archival:    o.fps = 60; o.crf = 18; break;
+    case Quality::Lightweight: o.fps = 30; o.crf = 28; break;
+    }
+    return o;
+}
 
 OnboardingOverlay::OnboardingOverlay(QWidget* parent) : QWidget(parent) {
     setObjectName(QStringLiteral("paletteOverlay"));
@@ -84,7 +159,7 @@ OnboardingOverlay::OnboardingOverlay(QWidget* parent) : QWidget(parent) {
     auto* brand = new QLabel; brand->setPixmap(Icons::renderSvg(brandSvg(), 22));
     hh->addWidget(brand);
     hh->addWidget(lbl(tr("Setup"), QString(), 13, true));
-    m_stepCount = lbl(QStringLiteral("1 / 7"), QStringLiteral("mute"), 11);
+    m_stepCount = lbl(QString(), QStringLiteral("mute"), 11);   // set by goToStep()
     m_stepCount->setProperty("mono", true);
     hh->addWidget(m_stepCount);
     hh->addStretch();
@@ -130,123 +205,72 @@ OnboardingOverlay::OnboardingOverlay(QWidget* parent) : QWidget(parent) {
         h->addLayout(tv, 1);
         m_steps->addWidget(w);
     }
-    // Step 1 — usage
+    // Step 1: the recording folder, read from the setting when the wizard
+    // opens, with the free space on its drive.
     {
-        auto* w = new QWidget; auto* g = new QGridLayout(w); g->setContentsMargins(0,0,0,0); g->setSpacing(12);
-        auto* grp = new QButtonGroup(w); grp->setExclusive(true);
-        struct O { QString icon, label, sub; };
-        const QVector<O> opts = {
-            {QStringLiteral("record"), tr("Record"), tr("Sessions, replays, raw footage")},
-            {QStringLiteral("stream"), tr("Stream"), tr("Twitch · YouTube · TikTok")},
-            {QStringLiteral("editor"), tr("Edit"),   tr("Timeline, clips, render")},
-            {QStringLiteral("layers"), tr("All-in-one"), tr("I do everything")},
+        auto* w = new QWidget; auto* v = new QVBoxLayout(w); v->setContentsMargins(0,0,0,0); v->setSpacing(10);
+        auto* c = new QFrame; c->setObjectName(QStringLiteral("card"));
+        auto* h = new QHBoxLayout(c); h->setContentsMargins(12, 12, 12, 12); h->setSpacing(12);
+        auto* fi = new QLabel; fi->setPixmap(Icons::pixmap(QStringLiteral("folder"), Theme::TextMute, 16));
+        h->addWidget(fi);
+        auto* tv = new QVBoxLayout; tv->setSpacing(0);
+        m_folderPath = lbl(QString(), QString(), 13, true); m_folderPath->setProperty("mono", true);
+        m_folderPath->setObjectName(QStringLiteral("folderPath"));
+        tv->addWidget(m_folderPath);
+        m_folderSpace = lbl(QString(), QStringLiteral("mute"), 11);
+        m_folderSpace->setObjectName(QStringLiteral("folderSpace"));
+        tv->addWidget(m_folderSpace);
+        h->addLayout(tv, 1);
+        auto* choose = new QPushButton(tr("Choose…")); Theme::setVariant(choose, QStringLiteral("ghost"));
+        connect(choose, &QPushButton::clicked, this, [this] {
+            const QString dir = QFileDialog::getExistingDirectory(this, tr("Recording folder"), m_folder);
+            if (!dir.isEmpty()) setRecordingFolder(dir);
+        });
+        h->addWidget(choose);
+        v->addWidget(c);
+        v->addStretch();
+        m_steps->addWidget(w);
+    }
+    // Step 2: devices, filled by showDevices().
+    {
+        auto* card = new QFrame; card->setObjectName(QStringLiteral("card"));
+        m_deviceRows = new QVBoxLayout(card); m_deviceRows->setContentsMargins(0,0,0,0); m_deviceRows->setSpacing(0);
+        m_steps->addWidget(card);
+    }
+    // Step 3: quality. Each card says exactly what it changes, and nothing
+    // else is touched, so resolution and encoder stay as the user had them.
+    {
+        auto* w = new QWidget; auto* g = new QGridLayout(w); g->setContentsMargins(0,0,0,0); g->setSpacing(10);
+        struct Q { Quality quality; QString id, name, sub; };
+        const auto summary = [](Quality q) {
+            const OutputSettings o = withQuality(OutputSettings{}, q);
+            return qualitySummary(o.fps, o.crf);
         };
-        int i = 0;
-        for (const O& o : opts) {
-            auto* c = optionCard(o.icon, o.label, o.sub);
-            grp->addButton(c);
-            if (i == 3) c->setChecked(true);
+        const QVector<Q> qs = {
+            {Quality::Keep,        QStringLiteral("quality.keep"),        tr("Keep current"), QString()},
+            {Quality::Standard,    QStringLiteral("quality.standard"),    tr("Standard"),
+             summary(Quality::Standard)},
+            {Quality::Archival,    QStringLiteral("quality.archival"),    tr("Archival"),
+             tr("%1 · larger files").arg(summary(Quality::Archival))},
+            {Quality::Lightweight, QStringLiteral("quality.lightweight"), tr("Lightweight"),
+             tr("%1 · smaller files").arg(summary(Quality::Lightweight))},
+        };
+        m_quality = new QButtonGroup(w);
+        m_quality->setExclusive(true);
+        for (int i = 0; i < qs.size(); ++i) {
+            auto* c = optionCard(QString(), qs[i].name, qs[i].sub);
+            c->setObjectName(qs[i].id);
+            m_quality->addButton(c, static_cast<int>(qs[i].quality));
+            if (qs[i].quality == Quality::Keep) {
+                c->setChecked(true);
+                m_keepSummary = c->findChild<QLabel*>(QStringLiteral("optionSub"));
+            }
             g->addWidget(c, i / 2, i % 2);
-            ++i;
         }
         g->setRowStretch(2, 1);   // anchor the 2x2 grid to the top
         m_steps->addWidget(w);
     }
-    // Step 2 — folder
-    {
-        auto* w = new QWidget; auto* v = new QVBoxLayout(w); v->setContentsMargins(0,0,0,0); v->setSpacing(10);
-        struct F { QString name, free, tag; };
-        const QVector<F> folders = {
-            {QStringLiteral("D:\\Renders"), tr("412 GB free of 2 TB"), tr("fastest")},
-            {QStringLiteral("E:\\Footage Archive"), tr("8 TB free of 16 TB"), tr("archive")},
-            {QStringLiteral("C:\\Users\\jess\\Videos"), tr("64 GB free of 1 TB"), tr("system")},
-        };
-        auto* grp = new QButtonGroup(w);
-        int i = 0;
-        for (const F& f : folders) {
-            auto* c = new QFrame; c->setObjectName(QStringLiteral("card"));
-            auto* h = new QHBoxLayout(c); h->setContentsMargins(12, 12, 12, 12); h->setSpacing(12);
-            auto* radio = new QRadioButton; grp->addButton(radio); if (i == 0) radio->setChecked(true);
-            h->addWidget(radio);
-            auto* fi = new QLabel; fi->setPixmap(Icons::pixmap(QStringLiteral("folder"), Theme::TextMute, 16));
-            h->addWidget(fi);
-            auto* tv = new QVBoxLayout; tv->setSpacing(0);
-            auto* nm = lbl(f.name, QString(), 13, true); nm->setProperty("mono", true);
-            tv->addWidget(nm);
-            tv->addWidget(lbl(f.free, QStringLiteral("mute"), 11));
-            h->addLayout(tv, 1);
-            h->addWidget(Theme::makeTag(f.tag));
-            v->addWidget(c);
-            ++i;
-        }
-        v->addStretch();
-        m_steps->addWidget(w);
-    }
-    // Step 3 — devices
-    {
-        auto* card = new QFrame; card->setObjectName(QStringLiteral("card"));
-        auto* v = new QVBoxLayout(card); v->setContentsMargins(0,0,0,0); v->setSpacing(0);
-        struct D { QString kind, name; };
-        const QVector<D> devs = {
-            {tr("Microphone"), tr("Shure SM7B (USB)")},
-            {tr("Webcam"), tr("Sony α7C · 1080p60")},
-            {tr("Display capture"), tr("DXGI ready · 2 monitors")},
-            {tr("Desktop audio"), tr("WASAPI loopback · 48 kHz")},
-            {tr("Window capture"), tr("Spire of the Hollow Sun · detected")},
-        };
-        for (int i = 0; i < devs.size(); ++i) {
-            if (i) { auto* d = new QFrame; d->setObjectName(QStringLiteral("divider")); d->setFixedHeight(1); v->addWidget(d); }
-            auto* r = new QWidget; auto* h = new QHBoxLayout(r); h->setContentsMargins(16, 12, 16, 12); h->setSpacing(12);
-            auto* ck = new QLabel; ck->setPixmap(Icons::pixmap(QStringLiteral("check"), Theme::Success, 14));
-            h->addWidget(ck);
-            auto* tv = new QVBoxLayout; tv->setSpacing(0);
-            tv->addWidget(lbl(devs[i].kind, QString(), 13, true));
-            auto* nm = lbl(devs[i].name, QStringLiteral("mute"), 11); nm->setProperty("mono", true);
-            tv->addWidget(nm);
-            h->addLayout(tv, 1);
-            auto* test = new QPushButton(tr("Test")); Theme::setVariant(test, QStringLiteral("ghost"));
-            h->addWidget(test);
-            v->addWidget(r);
-        }
-        m_steps->addWidget(card);
-    }
-    // Step 4 — quality
-    {
-        auto* w = new QWidget; auto* g = new QGridLayout(w); g->setContentsMargins(0,0,0,0); g->setSpacing(10);
-        struct Q { QString name, sub; };
-        const QVector<Q> qs = {
-            {tr("Standard"), tr("1080p60 · 8 Mb/s · NVENC")},
-            {tr("Archival"), tr("1080p60 · CRF 18 · big files")},
-            {tr("Lightweight"), tr("1080p30 · 6 Mb/s · low CPU")},
-        };
-        auto* grp = new QButtonGroup(w);
-        for (int i = 0; i < qs.size(); ++i) {
-            auto* c = optionCard(QString(), qs[i].name, qs[i].sub);
-            grp->addButton(c); if (i == 0) c->setChecked(true);
-            g->addWidget(c, 0, i);
-        }
-        g->setRowStretch(1, 1);   // anchor the card row to the top
-        m_steps->addWidget(w);
-    }
-    // Step 5 — density
-    {
-        auto* w = new QWidget; auto* g = new QGridLayout(w); g->setContentsMargins(0,0,0,0); g->setSpacing(10);
-        struct Dn { QString name, sub; };
-        const QVector<Dn> ds = {
-            {tr("Comfortable"), tr("Negative space, bigger targets")},
-            {tr("Compact"), tr("Default · Linear-style density")},
-            {tr("Dense"), tr("For pros · maximum surface area")},
-        };
-        auto* grp = new QButtonGroup(w);
-        for (int i = 0; i < ds.size(); ++i) {
-            auto* c = optionCard(QString(), ds[i].name, ds[i].sub);
-            grp->addButton(c); if (i == 1) c->setChecked(true);
-            g->addWidget(c, 0, i);
-        }
-        g->setRowStretch(1, 1);   // anchor the card row to the top
-        m_steps->addWidget(w);
-    }
-    // Step 6 — done
+    // Step 4: done
     {
         auto* w = new QWidget; auto* v = new QVBoxLayout(w);
         v->setAlignment(Qt::AlignCenter); v->setSpacing(12);
@@ -280,21 +304,118 @@ OnboardingOverlay::OnboardingOverlay(QWidget* parent) : QWidget(parent) {
     fh->addWidget(skip);
     fh->addStretch();
     m_next = new QPushButton(tr("Continue")); Theme::setVariant(m_next, QStringLiteral("primary"));
+    m_next->setObjectName(QStringLiteral("onboardingNext"));
     connect(m_next, &QPushButton::clicked, this, [this] {
         if (m_step < m_count - 1) goToStep(m_step + 1);
-        else hide();
+        else finishWizard();
     });
     fh->addWidget(m_next);
     cv->addWidget(footer);
 
     outer->addWidget(m_card);
+
+    loadChoices();
+    goToStep(0);
 }
 
 void OnboardingOverlay::openWizard() {
+    loadChoices();
+    showDevices(detectDevices(m_audio));
+    // Nothing has enumerated cameras yet, so ask for it off the UI thread and
+    // update the list when it lands. It lists devices; it opens none.
+    if (!CameraCapture::hasEnumerated()) {
+        CameraCapture::refreshDevicesAsync(this, [this](const QList<CameraCapture::Device>&) {
+            showDevices(detectDevices(m_audio));
+        });
+    }
     if (parentWidget()) setGeometry(parentWidget()->rect());
     goToStep(0);
     show();
     raise();
+}
+
+void OnboardingOverlay::loadChoices() {
+    const QString folder = RecentRecordings::outputDir();
+    m_folderAtOpen = folder;
+    setRecordingFolder(folder);
+
+    const OutputSettings current = OutputSettings::load();
+    if (m_keepSummary) m_keepSummary->setText(qualitySummary(current.fps, current.crf));
+    if (QAbstractButton* keep = m_quality->button(static_cast<int>(Quality::Keep)))
+        keep->setChecked(true);
+}
+
+void OnboardingOverlay::setRecordingFolder(const QString& path) {
+    m_folder = path;
+    m_folderPath->setText(QDir::toNativeSeparators(path));
+    const QStorageInfo storage(path);
+    if (!QFileInfo(path).isDir() || !storage.isValid() || !storage.isReady()) {
+        m_folderSpace->setText(tr("This folder does not exist on this computer yet."));
+        return;
+    }
+    m_folderSpace->setText(tr("%1 free of %2")
+                               .arg(formatByteSize(storage.bytesAvailable()),
+                                    formatByteSize(storage.bytesTotal())));
+}
+
+void OnboardingOverlay::showDevices(const Devices& devices) {
+    while (QLayoutItem* item = m_deviceRows->takeAt(0)) {
+        delete item->widget();
+        delete item;
+    }
+
+    const auto listed = [](const QStringList& names) {
+        return names.join(QStringLiteral(", "));
+    };
+    struct Row { QString kind, detail; Found found; QString name; };
+    QVector<Row> rows;
+
+    if (!devices.audioChecked) {
+        rows.append({tr("Microphones"), tr("Not checked"), Found::NotChecked,
+                     QStringLiteral("deviceMicrophones")});
+        rows.append({tr("Desktop audio"), tr("Not checked"), Found::NotChecked,
+                     QStringLiteral("deviceDesktopAudio")});
+    } else {
+        rows.append(devices.microphones.isEmpty()
+            ? Row{tr("Microphones"), tr("None found"), Found::No, QStringLiteral("deviceMicrophones")}
+            : Row{tr("Microphones"), listed(devices.microphones), Found::Yes,
+                  QStringLiteral("deviceMicrophones")});
+        rows.append(devices.desktopAudio.isEmpty()
+            ? Row{tr("Desktop audio"), tr("No playback device found"), Found::No,
+                  QStringLiteral("deviceDesktopAudio")}
+            : Row{tr("Desktop audio"), devices.desktopAudio, Found::Yes,
+                  QStringLiteral("deviceDesktopAudio")});
+    }
+    if (!devices.camerasChecked)
+        rows.append({tr("Cameras"), tr("Still looking"), Found::NotChecked,
+                     QStringLiteral("deviceCameras")});
+    else
+        rows.append(devices.cameras.isEmpty()
+            ? Row{tr("Cameras"), tr("None found"), Found::No, QStringLiteral("deviceCameras")}
+            : Row{tr("Cameras"), listed(devices.cameras), Found::Yes, QStringLiteral("deviceCameras")});
+    rows.append(devices.displays.isEmpty()
+        ? Row{tr("Displays"), tr("None found"), Found::No, QStringLiteral("deviceDisplays")}
+        : Row{tr("Displays"), listed(devices.displays), Found::Yes, QStringLiteral("deviceDisplays")});
+
+    for (int i = 0; i < rows.size(); ++i) {
+        if (i) {
+            auto* d = new QFrame; d->setObjectName(QStringLiteral("divider")); d->setFixedHeight(1);
+            m_deviceRows->addWidget(d);
+        }
+        m_deviceRows->addWidget(deviceRow(rows[i].kind, rows[i].detail, rows[i].found, rows[i].name));
+    }
+}
+
+void OnboardingOverlay::finishWizard() {
+    // Only what was changed is written, so pressing straight through leaves
+    // the settings exactly as they were.
+    if (m_folder != m_folderAtOpen)
+        QSettings().setValue(QStringLiteral("recording/lastDir"), m_folder);
+    const int chosen = m_quality->checkedId();
+    if (chosen >= 0 && chosen != static_cast<int>(Quality::Keep))
+        withQuality(OutputSettings::load(), static_cast<Quality>(chosen)).save();
+    hide();
+    emit finished();
 }
 
 void OnboardingOverlay::showEvent(QShowEvent* event) {
@@ -309,18 +430,17 @@ void OnboardingOverlay::goToStep(int step) {
     m_stepCount->setText(QStringLiteral("%1 / %2").arg(m_step + 1).arg(m_count));
 
     static const char* titles[] = {
-        "Welcome to MalloyStudio", "How will you mostly use the app?",
-        "Where should your work live?", "Let's find your devices",
-        "Pick a recording quality", "Choose a density", "You're ready",
+        "Welcome to MalloyStudio",
+        "Where should recordings go?", "Let's find your devices",
+        "Pick a recording quality", "You're ready",
     };
     static const char* subs[] = {
         "Record, stream, clip, and edit — in one workstation.",
-        "You can change this any time.",
         "Pick a fast NVMe if you can — recordings get large.",
         "We'll detect what you've got plugged in.",
-        "You can tweak this per project later.",
-        "How compact should the UI feel?",
-        "Drop into the dashboard — or jump straight into recording.",
+        "Sets the frame rate and quality in Settings > Recording. "
+        "Resolution and encoder stay as they are.",
+        "Your choices are saved when you open the dashboard.",
     };
     m_title->setText(tr(titles[m_step]));
     m_subtitle->setText(tr(subs[m_step]));

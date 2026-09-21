@@ -341,6 +341,13 @@ void MainWindow::setupUi() {
     });
 
     m_onboarding = new OnboardingOverlay(m_shell);
+    m_onboarding->setAudioController(m_audio);
+    // The wizard's last button says it opens the dashboard. The quality it
+    // saved has to reach the copy of the settings recordings start from.
+    connect(m_onboarding, &OnboardingOverlay::finished, this, [this] {
+        m_outputSettings = OutputSettings::load();
+        m_shell->setCurrentWorkspace(QStringLiteral("dashboard"));
+    });
 
     // Command palette (Ctrl+K) overlaying the shell.
     m_palette = new CommandPalette(m_shell);

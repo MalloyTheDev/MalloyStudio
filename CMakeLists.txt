@@ -296,6 +296,10 @@ qt_add_executable(MalloyStudioTests
     src/ui/HotkeysDialog.h
     src/ui/HotkeyBindingEdit.cpp
     src/ui/HotkeyBindingEdit.h
+    # The first-run wizard, which must show only what it detected and save
+    # what was chosen.
+    src/ui/OnboardingOverlay.cpp
+    src/ui/OnboardingOverlay.h
 )
 
 # Force console subsystem so CTest captures stdout test output

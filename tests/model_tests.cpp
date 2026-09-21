@@ -16,6 +16,8 @@
 #include "ui/AudioMixerPanel.h"
 #include "ui/HotkeyBindingEdit.h"
 #include "ui/HotkeysDialog.h"
+#include "ui/OnboardingOverlay.h"
+#include "project/ByteSize.h"
 #include "input/HotkeyManager.h"
 #include "model/Canvas.h"
 #include "model/FilterEffect.h"
@@ -91,6 +93,7 @@
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QSpinBox>
+#include <QStorageInfo>
 #include <limits>
 #include <QTimer>
 #include <QTreeWidget>
@@ -517,6 +520,10 @@ private slots:
     void aPreviewDragEndsWhenStudioModeMovesItsScene();
     void theOutputDialogHandsBackWhatItWasGiven();
     void theStreamDialogRefusesAnUnusableCustomUrl();
+    // The first-run wizard shows only what it found on this machine, and the
+    // choices it offers are saved to the settings they name.
+    void theSetupWizardShowsOnlyWhatItFound();
+    void theSetupWizardSavesWhatWasChosen();
     void spinBoxesAndTextFieldsKeepTheirDigits();
     void editorClipRoundTripPreservesSourceReference();
     void editorLegacyClipLoadsAsUnlinked();
@@ -8685,6 +8692,170 @@ void MalloyModelTests::theStreamDialogRefusesAnUnusableCustomUrl() {
     QCOMPARE(otherSaved.size(), 1);
     QCOMPARE(otherSaved.first().service, StreamSettings::Service::Twitch);
     QCOMPARE(otherSaved.first().customUrl, current.customUrl);
+}
+
+namespace {
+QString labelText(const QWidget& parent, const QString& objectName) {
+    const auto* label = parent.findChild<QLabel*>(objectName);
+    return label ? label->text() : QStringLiteral("<no label %1>").arg(objectName);
+}
+
+// Puts the settings a test writes back as they were, including absent ones.
+class SettingsRestorer {
+public:
+    explicit SettingsRestorer(const QStringList& groups, const QStringList& keys) {
+        QSettings s;
+        for (const QString& group : groups) {
+            s.beginGroup(group);
+            for (const QString& k : s.childKeys()) m_keys << group + QLatin1Char('/') + k;
+            s.endGroup();
+            m_groups << group;
+        }
+        m_keys << keys;
+        for (const QString& k : std::as_const(m_keys))
+            if (s.contains(k)) m_values.insert(k, s.value(k));
+    }
+    ~SettingsRestorer() {
+        QSettings s;
+        for (const QString& group : std::as_const(m_groups)) s.remove(group);
+        for (const QString& k : std::as_const(m_keys)) s.remove(k);
+        for (auto it = m_values.cbegin(); it != m_values.cend(); ++it) s.setValue(it.key(), it.value());
+    }
+
+private:
+    QStringList m_groups;
+    QStringList m_keys;
+    QHash<QString, QVariant> m_values;
+};
+}  // namespace
+
+void MalloyModelTests::theSetupWizardShowsOnlyWhatItFound() {
+    QWidget host;   // never shown
+    OnboardingOverlay wizard(&host);
+
+    OnboardingOverlay::Devices found;
+    found.audioChecked = true;
+    found.microphones = {QStringLiteral("Test Mic A"), QStringLiteral("Test Mic B")};
+    found.desktopAudio = QStringLiteral("Desktop Audio");
+    found.camerasChecked = true;   // and none were found
+    found.displays = {QStringLiteral("2560 × 1440")};
+    wizard.showDevices(found);
+
+    QCOMPARE(labelText(wizard, QStringLiteral("deviceMicrophones")),
+             QStringLiteral("Test Mic A, Test Mic B"));
+    QCOMPARE(labelText(wizard, QStringLiteral("deviceDesktopAudio")), QStringLiteral("Desktop Audio"));
+    QCOMPARE(labelText(wizard, QStringLiteral("deviceCameras")), QStringLiteral("None found"));
+    QCOMPARE(labelText(wizard, QStringLiteral("deviceDisplays")), QStringLiteral("2560 × 1440"));
+
+    // Nobody having looked is said as such, not reported as nothing present.
+    wizard.showDevices(OnboardingOverlay::Devices{});
+    QCOMPARE(labelText(wizard, QStringLiteral("deviceMicrophones")), QStringLiteral("Not checked"));
+    QCOMPARE(labelText(wizard, QStringLiteral("deviceCameras")), QStringLiteral("Still looking"));
+    QCOMPARE(labelText(wizard, QStringLiteral("deviceDisplays")), QStringLiteral("None found"));
+
+    // The folder is the one given, with the free space on its drive.
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    wizard.setRecordingFolder(dir.path());
+    QCOMPARE(labelText(wizard, QStringLiteral("folderPath")), QDir::toNativeSeparators(dir.path()));
+    QVERIFY2(labelText(wizard, QStringLiteral("folderSpace"))
+                 .endsWith(QStringLiteral(" free of ")
+                           + formatByteSize(QStorageInfo(dir.path()).bytesTotal())),
+             qPrintable(labelText(wizard, QStringLiteral("folderSpace"))));
+    wizard.setRecordingFolder(dir.filePath(QStringLiteral("missing")));
+    QVERIFY(!labelText(wizard, QStringLiteral("folderSpace")).contains(QStringLiteral("free")));
+
+    // Nothing invented is left anywhere in it, and no button that does nothing.
+    const QStringList invented = {
+        QStringLiteral("Shure"), QStringLiteral("Sony"), QStringLiteral("Hollow Sun"),
+        QStringLiteral("Renders"), QStringLiteral("Footage Archive"), QStringLiteral("jess"),
+        QStringLiteral("2 monitors"), QStringLiteral("NVENC"),
+    };
+    for (const QLabel* label : wizard.findChildren<QLabel*>())
+        for (const QString& word : invented)
+            QVERIFY2(!label->text().contains(word), qPrintable(label->text()));
+    for (const QPushButton* button : wizard.findChildren<QPushButton*>())
+        QVERIFY2(button->text() != QStringLiteral("Test"), "a Test button with nothing behind it");
+}
+
+void MalloyModelTests::theSetupWizardSavesWhatWasChosen() {
+    const SettingsRestorer restore({QStringLiteral("output")}, {QStringLiteral("recording/lastDir")});
+
+    // Each quality choice changes only what its card says.
+    OutputSettings current;
+    current.width = 2560;
+    current.height = 1440;
+    current.fps = 144;
+    current.crf = 30;
+    current.videoCodec = QStringLiteral("h264_nvenc");
+    current.preset = QStringLiteral("p5");
+    using Quality = OnboardingOverlay::Quality;
+    QCOMPARE(OnboardingOverlay::withQuality(current, Quality::Keep).toJson(), current.toJson());
+    for (const Quality q : {Quality::Standard, Quality::Archival, Quality::Lightweight}) {
+        OutputSettings rest = OnboardingOverlay::withQuality(current, q);
+        rest.fps = current.fps;
+        rest.crf = current.crf;
+        QCOMPARE(rest.toJson(), current.toJson());
+    }
+    QCOMPARE(OnboardingOverlay::withQuality(current, Quality::Archival).fps, 60);
+    QCOMPARE(OnboardingOverlay::withQuality(current, Quality::Archival).crf, 18);
+    QCOMPARE(OnboardingOverlay::withQuality(current, Quality::Lightweight).fps, 30);
+
+    {
+        QSettings s;
+        s.remove(QStringLiteral("output"));
+        s.remove(QStringLiteral("recording/lastDir"));
+    }
+    current.save();
+    const QString before = RecentRecordings::outputDir();
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    QWidget host;   // never shown
+    OnboardingOverlay wizard(&host);
+    QSignalSpy finished(&wizard, &OnboardingOverlay::finished);
+    auto* next = wizard.findChild<QPushButton*>(QStringLiteral("onboardingNext"));
+    auto* archival = wizard.findChild<QPushButton*>(QStringLiteral("quality.archival"));
+    QVERIFY(next && archival);
+
+    // Skipping saves nothing.
+    wizard.setRecordingFolder(dir.path());
+    archival->click();
+    const auto buttons = wizard.findChildren<QPushButton*>();
+    const auto skip = std::find_if(buttons.begin(), buttons.end(), [](const QPushButton* b) {
+        return b->text() == QStringLiteral("Skip setup");
+    });
+    QVERIFY(skip != buttons.end());
+    (*skip)->click();
+    QCOMPARE(finished.count(), 0);
+    QCOMPARE(OutputSettings::load().toJson(), current.toJson());
+    QCOMPARE(RecentRecordings::outputDir(), before);
+
+    // Pressing straight through changes nothing either.
+    OnboardingOverlay untouched(&host);
+    QSignalSpy untouchedFinished(&untouched, &OnboardingOverlay::finished);
+    auto* untouchedNext = untouched.findChild<QPushButton*>(QStringLiteral("onboardingNext"));
+    for (int i = 0; i < 5; ++i) untouchedNext->click();
+    QCOMPARE(untouchedFinished.count(), 1);
+    QCOMPARE(OutputSettings::load().toJson(), current.toJson());
+    QVERIFY(!QSettings().contains(QStringLiteral("recording/lastDir")));
+
+    // Finishing saves the folder and the quality, and says it is done so the
+    // dashboard can be shown.
+    wizard.setRecordingFolder(dir.path());
+    archival->click();
+    for (int i = 0; i < 4; ++i) next->click();
+    QCOMPARE(next->text(), QStringLiteral("Open dashboard"));
+    QCOMPARE(finished.count(), 0);
+    next->click();
+    QCOMPARE(finished.count(), 1);
+    QVERIFY(wizard.isHidden());
+    QCOMPARE(RecentRecordings::outputDir(), dir.path());
+    const OutputSettings saved = OutputSettings::load();
+    QCOMPARE(saved.fps, 60);
+    QCOMPARE(saved.crf, 18);
+    QCOMPARE(saved.width, 2560);
+    QCOMPARE(saved.videoCodec, QStringLiteral("h264_nvenc"));
 }
 
 void MalloyModelTests::audioFromARemovedInputIsNotKept() {
