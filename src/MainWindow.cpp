@@ -859,6 +859,29 @@ bool MainWindow::maybeSave() {
     return box.standardButton(box.clickedButton()) != QMessageBox::Cancel;
 }
 
+// Closing the window used to end a recording or a live stream without a word.
+bool MainWindow::confirmEndingOutputs() {
+    const bool recording = m_media && m_media->isRecording();
+    const bool streaming = m_media && m_media->isStreaming();
+    if (!recording && !streaming) return true;
+
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Warning);
+    box.setWindowTitle(tr("Quit MalloyStudio"));
+    box.setText(recording && streaming ? tr("You are recording and streaming.")
+                : recording            ? tr("A recording is in progress.")
+                                       : tr("You are streaming live."));
+    box.setInformativeText(recording && streaming
+        ? tr("Quitting ends the stream and stops the recording. The recording is saved.")
+        : recording ? tr("Quitting stops the recording. What has been recorded is saved.")
+                    : tr("Quitting ends the stream."));
+    auto* quit = box.addButton(tr("Stop and Quit"), QMessageBox::DestructiveRole);
+    box.addButton(QMessageBox::Cancel);
+    box.setDefaultButton(QMessageBox::Cancel);
+    box.exec();
+    return box.clickedButton() == static_cast<QAbstractButton*>(quit);
+}
+
 void MainWindow::newProject() {
     if (!maybeSave()) return;
     m_captureController->stopAll();
@@ -1095,9 +1118,18 @@ void MainWindow::updatePreviewLabel() {
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
-    if (!maybeSave()) {
+    if (!confirmEndingOutputs() || !maybeSave()) {
         event->ignore();
         return;
+    }
+    // Recording and streaming end here, while the sources they record are
+    // still running and the event loop is still there to finish the file.
+    // Left to the destructor, they ran on after the captures below had
+    // stopped and were finalised only once the application's event loop had
+    // already returned.
+    if (m_media) {
+        if (m_media->isRecording()) m_media->stopRecording();
+        if (m_media->isStreaming()) m_media->stopStreaming();
     }
     m_captureController->stopAll();
     QSettings settings;

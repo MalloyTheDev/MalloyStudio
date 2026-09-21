@@ -49,6 +49,7 @@ private:
     void setupMenus();
     void connectModelSignals();
     bool maybeSave();
+    bool confirmEndingOutputs();
     void newProject();
     void openProject();
     bool saveProject();
