@@ -41,4 +41,5 @@ private:
     MediaRegistry* m_media          = nullptr;
     QLabel*        m_saveDot        = nullptr;   // toolbar state indicator
     QLabel*        m_saveLabel      = nullptr;
+    QLabel*        m_timelineNotice = nullptr;   // says when a dropped clip was shortened
 };

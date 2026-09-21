@@ -4,6 +4,7 @@
 #include "ui/IconFactory.h"
 #include "ui/Theme.h"
 #include "project/MediaRegistry.h"
+#include "recording/TimelineGraphBuilder.h"
 #include "ui/workspaces/TimelineEdits.h"
 
 #include <QButtonGroup>
@@ -43,9 +44,13 @@ namespace {
 constexpr int kRulerH      = 26;
 constexpr int kTrackH      = 44;
 constexpr int kHeaderW     = 200;
-constexpr int kTimelineLen = 360;     // seconds
 constexpr int kEdgePx      = 6;       // clip trim grip width
 constexpr double kFps      = 60.0;    // playback ticker FPS
+
+// The furthest a clip may reach on the timeline, in seconds: the longest a
+// render accepts, so a clip placed whole here also renders whole. The length
+// the timeline is drawn at follows its clips (timelineLengthFor).
+constexpr double kMaxTimelineLen = TimelineGraphBuilder::kMaxClipSeconds;
 
 // Private MIME used by the Media Bin → TimelineCanvas drag.
 const char* const kMediaPathMime = "application/x-malloy-mediapath";
@@ -254,12 +259,19 @@ public:
     void   skipForward();
     void   frameStep(int frames);   // frames at kFps; negative steps back
     void   splitAtPlayhead();
+    // Where playback stops: the end of the last clip.
+    double timelineEnd() const;
 
 signals:
     void selectionChanged(int idx);
     void playheadChanged(double t);
     void playingChanged(bool playing);
     void clipsChanged();
+    // The end of the last clip may have moved; `seconds` is timelineEnd().
+    void endChanged(double seconds);
+    // A dropped clip was longer than a timeline can hold and only its first
+    // `placed` seconds went on.
+    void clipShortened(const QString& label, double requested, double placed);
 
 protected:
     QSize sizeHint() const override { return minimumSize(); }
@@ -279,7 +291,7 @@ private:
     void   updateHoverCursor(const QPointF& pos);
     double snapTime(double t, int ignoreClip) const;
     void   splitClip(int i, double t);
-    double timelineEnd() const;
+    double timelineLength() const;  // how far the timeline is drawn, in seconds
     void   tickPlayhead();
     void   setSelected(int idx);
 
@@ -330,6 +342,8 @@ TimelineCanvas::TimelineCanvas(QWidget* parent) : QWidget(parent) {
     // demo rows would be permanently unrenderable. setClips() fills this in
     // when a project is opened; the bin fills it by drag and drop.
     updateSize();
+    // The timeline is as long as its clips need, so any edit can change it.
+    connect(this, &TimelineCanvas::clipsChanged, this, &TimelineCanvas::updateSize);
     m_playTimer = new QTimer(this);
     m_playTimer->setInterval(int(1000.0 / kFps));
     connect(m_playTimer, &QTimer::timeout, this, &TimelineCanvas::tickPlayhead);
@@ -356,6 +370,7 @@ void TimelineCanvas::setClips(const QJsonArray& arr) {
     for (const auto& v : arr) m_clips.push_back(clipFromJson(v.toObject()));
     m_selected = -1;
     m_drag = -1;
+    updateSize();
     update();
     emit selectionChanged(-1);
 }
@@ -419,8 +434,14 @@ void TimelineCanvas::splitAtPlayhead() {
 double TimelineCanvas::timelineEnd() const {
     double end = 0;
     for (const Clip& c : m_clips) end = std::max(end, c.start + c.dur);
-    if (end <= 0) end = double(kTimelineLen);
+    if (end <= 0) end = kMinTimelineSeconds;
     return end;
+}
+
+double TimelineCanvas::timelineLength() const {
+    double end = 0;
+    for (const Clip& c : m_clips) end = std::max(end, c.start + c.dur);
+    return timelineLengthFor(end, kMaxTimelineLen);
 }
 
 void TimelineCanvas::tickPlayhead() {
@@ -445,19 +466,27 @@ void TimelineCanvas::setSelected(int idx) {
     emit selectionChanged(m_selected);
 }
 
-void TimelineCanvas::paintEvent(QPaintEvent*) {
+void TimelineCanvas::paintEvent(QPaintEvent* e) {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing, true);
     p.fillRect(rect(), Theme::Surface0);
 
-    const int contentW = int(kTimelineLen * m_zoom);
+    const int len = int(std::ceil(timelineLength()));
+    const int contentW = width();
+    // Only the exposed seconds are drawn. A timeline can be a day long, and
+    // every gridline, ruler label and waveform bar of it on each repaint
+    // would stall the UI thread. One second of slack on either side keeps a
+    // label that starts just off the exposed area whole.
+    const QRect exposed = e->rect();
+    const int firstSec = std::max(0, int(exposed.left() / m_zoom) - 1);
+    const int lastSec  = std::min(len, int(exposed.right() / m_zoom) + 1);
 
     // Tracks background + gridlines
     for (int ti = 0; ti < tracks().size(); ++ti) {
         const int y = kRulerH + ti * kTrackH;
         p.fillRect(QRect(0, y, contentW, kTrackH),
                    tracks()[ti].audio ? QColor(0x20, 0x21, 0x24) : Theme::Surface0);
-        for (int s = 0; s <= kTimelineLen; s += 10) {
+        for (int s = firstSec - firstSec % 10; s <= lastSec; s += 10) {
             const int x = int(s * m_zoom);
             p.setPen(QPen(s % 60 == 0 ? QColor(0x2d, 0x2f, 0x33) : QColor(0x22, 0x23, 0x26),
                           1, s % 60 == 0 ? Qt::SolidLine : Qt::DotLine));
@@ -479,6 +508,7 @@ void TimelineCanvas::paintEvent(QPaintEvent*) {
         const Clip& c = cs[i];
         const QRectF r(c.start * m_zoom + 1, kRulerH + c.track * kTrackH + 3,
                        c.dur * m_zoom - 2, kTrackH - 6);
+        if (r.right() < exposed.left() || r.left() > exposed.right()) continue;
         QPainterPath path; path.addRoundedRect(r, 3, 3);
         p.fillPath(path, c.color);
         if (i == m_selected) {
@@ -508,7 +538,10 @@ void TimelineCanvas::paintEvent(QPaintEvent*) {
             p.setBrush(QColor(0, 0, 0, 130));
             const int bars = int(r.width() / 3);
             const double cy = r.center().y() + 4;
-            for (int b = 0; b < bars; ++b) {
+            // Bar b sits at r.left() + 4 + b * 3; only the exposed ones are drawn.
+            const int firstBar = std::max(0, int((exposed.left() - r.left() - 4) / 3) - 1);
+            const int lastBar  = std::min(bars, int((exposed.right() - r.left() - 4) / 3) + 2);
+            for (int b = firstBar; b < lastBar; ++b) {
                 const double h = 2 + std::abs(std::sin(b * 0.7) * 0.7 + std::sin(b * 0.13) * 0.4) * 10;
                 p.drawRect(QRectF(r.left() + 4 + b * 3, cy - h / 2, 2, h));
             }
@@ -521,7 +554,7 @@ void TimelineCanvas::paintEvent(QPaintEvent*) {
     p.drawLine(0, kRulerH, contentW, kRulerH);
     const int major = m_zoom > 100 ? 1 : m_zoom > 50 ? 2 : m_zoom > 25 ? 5 : 10;
     QFont rf = p.font(); rf.setPixelSize(10); rf.setWeight(QFont::Normal); p.setFont(rf);
-    for (int s = 0; s <= kTimelineLen; s += major) {
+    for (int s = firstSec - firstSec % major; s <= lastSec; s += major) {
         const int x = int(s * m_zoom);
         p.setPen(Theme::Border);
         p.drawLine(x, 0, x, kRulerH);
@@ -538,8 +571,9 @@ void TimelineCanvas::paintEvent(QPaintEvent*) {
     }
 
     // Empty state: a new project has no clips until media is dropped in. The
-    // canvas is kTimelineLen * zoom wide inside a scroll area, so the hint is
-    // centred on the visible portion rather than on the full virtual width.
+    // canvas is the timeline's length times the zoom wide inside a scroll
+    // area, so the hint is centred on the visible portion rather than on the
+    // full virtual width.
     if (m_clips.isEmpty()) {
         QRect hint = visibleRegion().boundingRect();
         if (hint.isEmpty()) hint = rect();
@@ -565,7 +599,7 @@ void TimelineCanvas::mousePressEvent(QMouseEvent* e) {
     if (pos.y() < kRulerH) {                        // ruler → scrub playhead
         if (m_playing) pause();                     // scrubbing implicitly stops play
         m_scrubbing = true;
-        m_playhead = qBound(0.0, pos.x() / m_zoom, double(kTimelineLen));
+        m_playhead = qBound(0.0, pos.x() / m_zoom, timelineLength());
         update();
         emit playheadChanged(m_playhead);
         return;
@@ -598,7 +632,7 @@ void TimelineCanvas::mousePressEvent(QMouseEvent* e) {
 void TimelineCanvas::mouseMoveEvent(QMouseEvent* e) {
     const QPointF pos = e->position();
     if (m_scrubbing) {
-        m_playhead = qBound(0.0, pos.x() / m_zoom, double(kTimelineLen));
+        m_playhead = qBound(0.0, pos.x() / m_zoom, timelineLength());
         update();
         emit playheadChanged(m_playhead);
         return;
@@ -608,9 +642,10 @@ void TimelineCanvas::mouseMoveEvent(QMouseEvent* e) {
         const double t = pos.x() / m_zoom;
         constexpr double minDur = 0.25;
         if (m_dragZone == Zone::Body) {
-            // Moving a clip changes where it starts, never how long it is.
+            // Moving a clip changes where it starts, never how long it is. The
+            // timeline grows to follow a clip moved past its end.
             c.start = placeClip(snapTime(t - m_grabOffset, m_drag), c.dur,
-                                double(kTimelineLen)).start;
+                                kMaxTimelineLen).start;
             const int ty = qBound(0, (int(pos.y()) - kRulerH) / kTrackH,
                                   int(tracks().size()) - 1);
             if (tracks()[ty].audio == c.audio) c.track = ty;
@@ -625,7 +660,7 @@ void TimelineCanvas::mouseMoveEvent(QMouseEvent* e) {
             c.sourceIn = tl.sourceIn;
         } else if (m_dragZone == Zone::RightEdge) {
             const TimelineTrim tr = trimRightEdge(c.start, c.sourceIn, snapTime(t, m_drag),
-                                                  minDur, double(kTimelineLen));
+                                                  minDur, kMaxTimelineLen);
             c.dur = tr.dur;
         }
         update();
@@ -684,13 +719,12 @@ void TimelineCanvas::dropEvent(QDropEvent* e) {
             if (tracks()[i].audio == isAudio) { track = i; break; }
         }
     }
-    const double t = qBound(0.0, e->position().x() / m_zoom, double(kTimelineLen));
-    // The timeline is a fixed kTimelineLen long, so placeClip shortens longer
-    // media to fit. That shortening is a known limitation of the fixed-length
-    // timeline and is tracked on its own.
-    const TimelinePlacement placed = placeClip(snapTime(t, -1),
-                                               (durSecs > 0) ? double(durSecs) : 4.0,
-                                               double(kTimelineLen));
+    const double t = qBound(0.0, e->position().x() / m_zoom, kMaxTimelineLen);
+    // The timeline grows to fit what is dropped on it, up to the longest a
+    // render accepts. Only media longer than that is shortened, and the user
+    // is told (clipShortened below).
+    const double wanted = (durSecs > 0) ? double(durSecs) : 4.0;
+    const TimelinePlacement placed = placeClip(snapTime(t, -1), wanted, kMaxTimelineLen);
 
     Clip nc;
     nc.sourcePath = path;      // ADR-0001: what makes the clip renderable
@@ -711,10 +745,19 @@ void TimelineCanvas::dropEvent(QDropEvent* e) {
     e->acceptProposedAction();
     update();
     emit clipsChanged();
+    if (placed.shortened) emit clipShortened(name, wanted, placed.dur);
 }
 
 void TimelineCanvas::updateSize() {
-    setMinimumSize(int(kTimelineLen * m_zoom), kRulerH + tracks().size() * kTrackH);
+    // Held to the largest size a widget may have: a day of timeline at the
+    // highest zoom is wider than that.
+    const int w = int(std::min(timelineLength() * m_zoom, double(QWIDGETSIZE_MAX)));
+    const QSize size(w, kRulerH + int(tracks().size()) * kTrackH);
+    setMinimumSize(size);
+    // The scroll area does not resize its widget, so a timeline that got
+    // shorter, or a zoom out, would otherwise leave the old width behind.
+    resize(size);
+    emit endChanged(timelineEnd());
 }
 
 int TimelineCanvas::clipAt(const QPointF& pos, Zone* zone) const {
@@ -1108,6 +1151,10 @@ EditorWorkspace::EditorWorkspace(MediaRegistry* media, QWidget* parent)
     snapBtn->setChecked(true);
     snapBtn->setToolTip(tr("Snap to clip edges, playhead, and the second grid"));
     tb->addWidget(snapBtn);
+    m_timelineNotice = lbl(QString(), QStringLiteral("warn"), 11);
+    m_timelineNotice->setObjectName(QStringLiteral("timelineNotice"));
+    m_timelineNotice->hide();
+    tb->addWidget(m_timelineNotice);
     tb->addStretch();
     tb->addWidget(lbl(tr("ZOOM"), QStringLiteral("mute"), 11));
     auto* zoom = new QSlider(Qt::Horizontal); zoom->setRange(10, 200); zoom->setValue(60);
@@ -1191,6 +1238,20 @@ EditorWorkspace::EditorWorkspace(MediaRegistry* media, QWidget* parent)
     // Timeline edits are document changes: without this the project could be
     // closed after an edit with no prompt, because nothing else marks it dirty.
     connect(canvas, &TimelineCanvas::clipsChanged, this, &EditorWorkspace::timelineChanged);
+
+    // The total follows the clips now that the timeline is not a fixed length.
+    connect(canvas, &TimelineCanvas::endChanged, tcTotal, [tcTotal](double end) {
+        tcTotal->setText(QStringLiteral("/ ") + formatTimecode(end));
+    });
+    // A shortened drop is said once, and the next edit clears it.
+    QLabel* notice = m_timelineNotice;
+    connect(canvas, &TimelineCanvas::clipsChanged, notice, &QLabel::hide);
+    connect(canvas, &TimelineCanvas::clipShortened, notice,
+            [notice](const QString& label, double requested, double placed) {
+        notice->setText(tr("\"%1\" was shortened from %2 to %3, the longest a timeline holds.")
+                            .arg(label, formatTimecode(requested), formatTimecode(placed)));
+        notice->show();
+    });
 
     connect(canvas, &TimelineCanvas::playingChanged, play, [play](bool playing) {
         play->setIcon(Icons::icon(playing ? QStringLiteral("pause") : QStringLiteral("play"),
@@ -1311,6 +1372,7 @@ QJsonArray EditorWorkspace::timelineJson() const {
 }
 
 void EditorWorkspace::setTimelineJson(const QJsonArray& timeline) {
+    if (m_timelineNotice) m_timelineNotice->hide();   // it spoke of the old timeline
     if (m_timelineCanvas)
         static_cast<TimelineCanvas*>(m_timelineCanvas)->setClips(timeline);
 }

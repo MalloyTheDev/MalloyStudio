@@ -11,23 +11,40 @@
 #include <algorithm>
 
 // Where a clip of a given length may sit. A clip longer than the timeline is
-// shortened to fit, and the start is then bounded so the clip ends within the
-// timeline. The bounds are ordered by construction: the placement code used to
-// hand qBound a maximum below its minimum whenever a clip was longer than the
-// timeline, and qBound asserts on that, which aborted the application when a
-// long recording was dropped onto a track.
+// shortened to fit, and says so, and the start is then bounded so the clip
+// ends within the timeline. The bounds are ordered by construction: the
+// placement code used to hand qBound a maximum below its minimum whenever a
+// clip was longer than the timeline, and qBound asserts on that, which aborted
+// the application when a long recording was dropped onto a track.
 struct TimelinePlacement {
     double start = 0.0;
     double dur   = 0.0;
+    bool   shortened = false;   // dur is less than the clip asked for
 };
 
 inline TimelinePlacement placeClip(double requestedStart, double dur, double timelineLen) {
     const double len = std::max(0.0, timelineLen);
+    const double wanted = std::max(dur, 0.0);
     TimelinePlacement out;
-    out.dur = std::min(std::max(dur, 0.0), len);
+    out.dur = std::min(wanted, len);
+    out.shortened = out.dur < wanted;
     const double latestStart = len - out.dur;          // never negative
     out.start = std::min(std::max(requestedStart, 0.0), latestStart);
     return out;
+}
+
+// How long the editor's timeline is drawn: to the end of its last clip plus
+// room to drop the next one after it, never shorter than the six minutes an
+// empty timeline shows, and never longer than `limit`, the longest timeline a
+// render accepts. A clip that ends past the limit (a malformed project) does
+// not stretch it further.
+constexpr double kMinTimelineSeconds  = 360.0;
+constexpr double kTimelineTailSeconds = 60.0;
+
+inline double timelineLengthFor(double lastClipEnd, double limit) {
+    // std::max keeps its first argument when the second is NaN.
+    const double wanted = std::max(kMinTimelineSeconds, lastClipEnd + kTimelineTailSeconds);
+    return std::min(wanted, limit);
 }
 
 struct TimelineTrim {

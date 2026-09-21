@@ -51,6 +51,11 @@ namespace TimelineGraphBuilder {
 // is better than emitting something ffmpeg will reject obscurely.
 constexpr int kMaxInputs = 32;
 
+// The longest a clip may be, and the latest it may start, in seconds: a day.
+// The editor's timeline is no longer than this, so a clip it places whole can
+// also be rendered whole.
+constexpr double kMaxClipSeconds = 86400.0;
+
 // Builds the graph for `timeline` at `output` settings. Returns a RenderGraph
 // with ok=false and a human-readable error when the timeline cannot be rendered:
 // an unlinked clip, a source file that is gone, an unsupported per-clip

@@ -72,6 +72,8 @@
 #include <QScrollArea>
 #include <QSlider>
 #include <QStackedWidget>
+#include <QDropEvent>
+#include <QMimeData>
 #include <QWidget>
 #include <QBuffer>
 #include <QTemporaryDir>
@@ -457,6 +459,8 @@ private slots:
     void restoredRenderJobsAreValidatedLikeEnqueuedOnes();
     void restoredRenderJobsMustWriteToALocalDrive();
     void clipsLongerThanTheTimelineArePlacedNotAborted();
+    // The editor's timeline grows with its clips instead of being six minutes.
+    void longClipsArePlacedWholeOnTheTimeline();
     void undoKeepsTheLiveCaptureFrameOnAir();
     void aSavedReplayPlaysInRealTime();
     void aWorkerThatWillNotStopIsCutLooseNotDestroyed();
@@ -3774,16 +3778,19 @@ void MalloyModelTests::clipsLongerThanTheTimelineArePlacedNotAborted() {
     QCOMPARE(p.dur, len);
     QCOMPARE(p.start, 0.0);
     QVERIFY(p.start + p.dur <= len);
+    QVERIFY2(p.shortened, "a clip cut to fit must say so");
 
     // Exactly the timeline's length fits only at the start.
     p = placeClip(50.0, len, len);
     QCOMPARE(p.start, 0.0);
     QCOMPARE(p.dur, len);
+    QVERIFY(!p.shortened);
 
     // An ordinary clip keeps its length and is kept inside the timeline.
     p = placeClip(350.0, 30.0, len);
     QCOMPARE(p.dur, 30.0);
     QCOMPARE(p.start, 330.0);
+    QVERIFY(!p.shortened);
     p = placeClip(-5.0, 30.0, len);
     QCOMPARE(p.start, 0.0);
     p = placeClip(100.0, 30.0, len);
@@ -3793,6 +3800,77 @@ void MalloyModelTests::clipsLongerThanTheTimelineArePlacedNotAborted() {
     p = placeClip(10.0, -4.0, len);
     QCOMPARE(p.dur, 0.0);
     QVERIFY(p.start >= 0.0 && p.start <= len);
+}
+
+void MalloyModelTests::longClipsArePlacedWholeOnTheTimeline() {
+    constexpr double limit = TimelineGraphBuilder::kMaxClipSeconds;
+
+    // Half an hour, which the old six minute timeline cut to six minutes.
+    TimelinePlacement p = placeClip(120.0, 1800.0, limit);
+    QCOMPARE(p.start, 120.0);
+    QCOMPARE(p.dur, 1800.0);
+    QVERIFY(!p.shortened);
+    // A whole day fits, from the head of the timeline.
+    p = placeClip(500.0, limit, limit);
+    QCOMPARE(p.start, 0.0);
+    QCOMPARE(p.dur, limit);
+    QVERIFY(!p.shortened);
+    // Anything longer is cut to the day, and says so.
+    p = placeClip(0.0, limit + 3600.0, limit);
+    QCOMPARE(p.dur, limit);
+    QVERIFY(p.shortened);
+
+    // The timeline is drawn to its last clip and a minute beyond, never
+    // shorter than six minutes and never longer than a render accepts.
+    QCOMPARE(timelineLengthFor(0.0, limit), 360.0);
+    QCOMPARE(timelineLengthFor(100.0, limit), 360.0);
+    QCOMPARE(timelineLengthFor(1920.0, limit), 1980.0);
+    QCOMPARE(timelineLengthFor(limit - 10.0, limit), limit);
+    QCOMPARE(timelineLengthFor(1e12, limit), limit);
+    QCOMPARE(timelineLengthFor(std::numeric_limits<double>::quiet_NaN(), limit), 360.0);
+
+    // Through the editor: media dragged from the bin onto a track.
+    EditorWorkspace editor(nullptr);
+    QWidget* canvas = nullptr;
+    for (QWidget* w : editor.findChildren<QWidget*>())
+        if (qstrcmp(w->metaObject()->className(), "TimelineCanvas") == 0) canvas = w;
+    QVERIFY(canvas);
+    const int emptyWidth = canvas->width();
+    const auto drop = [&](const QString& name, int seconds) {
+        QMimeData mime;
+        mime.setData(QStringLiteral("application/x-malloy-mediapath"),
+                     QStringLiteral("C:/media/%1\n0\n%2\n%1").arg(name).arg(seconds).toUtf8());
+        // At the head of the V1 track: below the 26 px ruler and two 44 px tracks.
+        QDropEvent event(QPointF(0.0, 26 + 2 * 44 + 10), Qt::CopyAction, &mime,
+                         Qt::LeftButton, Qt::NoModifier);
+        // Straight to the widget: the application routes a drop only to the
+        // target of a drag in progress, and a test has none.
+        static_cast<QObject*>(canvas)->event(&event);
+    };
+    const auto clipAt = [&](int i) { return editor.timelineJson().at(i).toObject(); };
+
+    drop(QStringLiteral("half-hour.mkv"), 1800);
+    QCOMPARE(editor.timelineJson().size(), 1);
+    QCOMPARE(clipAt(0).value(QStringLiteral("start")).toDouble(), 0.0);
+    QCOMPARE(clipAt(0).value(QStringLiteral("dur")).toDouble(), 1800.0);
+    // The timeline grew to hold it: a minute past its end at 60 px a second.
+    QVERIFY(canvas->width() > emptyWidth);
+    QCOMPARE(canvas->width(), (1800 + 60) * 60);
+    auto* notice = editor.findChild<QLabel*>(QStringLiteral("timelineNotice"));
+    QVERIFY(notice);
+    QVERIFY(notice->isHidden());
+
+    // Longer than a day: cut to the day, and the user is told which clip.
+    drop(QStringLiteral("marathon.mkv"), 90000);
+    QCOMPARE(editor.timelineJson().size(), 2);
+    QCOMPARE(clipAt(1).value(QStringLiteral("dur")).toDouble(), limit);
+    QVERIFY(!notice->isHidden());
+    QVERIFY2(notice->text().contains(QStringLiteral("marathon.mkv")), qPrintable(notice->text()));
+
+    // Opening another timeline clears what was said about this one.
+    editor.setTimelineJson(QJsonArray{});
+    QVERIFY(notice->isHidden());
+    QCOMPARE(canvas->width(), emptyWidth);
 }
 
 void MalloyModelTests::spinBoxesAndTextFieldsKeepTheirDigits() {

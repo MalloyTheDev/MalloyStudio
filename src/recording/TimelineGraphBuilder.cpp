@@ -32,9 +32,9 @@ struct Clip {
 };
 
 // Ranges for values a project file supplies. They exist to keep the arithmetic
-// below defined, so they are deliberately generous: a day of timeline, a
+// below defined, so they are deliberately generous: a day of timeline
+// (kMaxClipSeconds, in the header, because the editor holds to it too), a
 // hundredfold scale, and the decibel range a mixer offers.
-constexpr double kMaxClipSeconds  = 86400.0;
 constexpr double kMinScalePercent = 1.0;
 constexpr double kMaxScalePercent = 10000.0;
 constexpr int    kMinGainDb       = -60;
