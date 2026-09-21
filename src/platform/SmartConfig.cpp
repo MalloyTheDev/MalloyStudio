@@ -157,10 +157,27 @@ Recommendation SettingsRecommender::recommend(const SystemProfile& profile,
                         "everything else using the connection.")
                 .arg(int(kUploadHeadroom * 100)).arg(describeKbps(profile.uploadKbps))});
     } else {
+        // Held to the streaming range even when unmeasured, so the note has to
+        // say whether the current value survived it. Claiming it was kept
+        // beside a different number misled anyone set outside that range.
         bitrate = std::clamp(bitrate > 0 ? bitrate : 4500, kMinStreamKbps, kMaxStreamKbps);
-        rec.notes.push_back({QObject::tr("Bitrate"), describeKbps(bitrate),
-            QObject::tr("Upload speed has not been measured, so this keeps your current value. "
-                        "Measure it to get a figure based on your connection.")});
+        QString why;
+        if (bitrate == current.bitrateKbps) {
+            why = QObject::tr("Upload speed has not been measured, so this keeps your current "
+                              "value. Measure it to get a figure based on your connection.");
+        } else if (current.bitrateKbps > 0) {
+            why = QObject::tr("Upload speed has not been measured. Your current %1 is outside "
+                              "the %2 to %3 range recommended for a stream, so this changes "
+                              "it to %4. Recordings do not use this figure. Measure your "
+                              "upload to get one based on your connection.")
+                      .arg(describeKbps(current.bitrateKbps), QString::number(kMinStreamKbps),
+                           describeKbps(kMaxStreamKbps), describeKbps(bitrate));
+        } else {
+            why = QObject::tr("Upload speed has not been measured and no bitrate is set, so "
+                              "this starts from %1. Measure it to get a figure based on your "
+                              "connection.").arg(describeKbps(bitrate));
+        }
+        rec.notes.push_back({QObject::tr("Bitrate"), describeKbps(bitrate), why});
         rec.warnings << QObject::tr("Upload speed was not measured, so the bitrate is a "
                                     "starting point rather than a recommendation.");
     }

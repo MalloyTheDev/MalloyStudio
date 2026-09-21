@@ -5377,6 +5377,38 @@ void MalloyModelTests::smartConfigWarnsRatherThanGuessing() {
         QVERIFY(!r.warnings.filter(QStringLiteral("not measured")).isEmpty());
     }
 
+    // A current value outside the streaming range is still brought into it,
+    // and the note says so rather than claiming the value was kept.
+    {
+        SystemProfile p = makeStrongProfile();
+        p.uploadKbps = 0;
+        struct Case { int current; int proposed; };
+        const QVector<Case> cases = {
+            {5200,  5200},
+            {20000, SettingsRecommender::kMaxStreamKbps},
+            {800,   SettingsRecommender::kMinStreamKbps},
+        };
+        for (const Case& c : cases) {
+            OutputSettings mine;
+            mine.bitrateKbps = c.current;
+            const Recommendation r = SettingsRecommender::recommend(p, mine);
+            QCOMPARE(r.output.bitrateKbps, c.proposed);
+            const auto note = std::find_if(r.notes.begin(), r.notes.end(), [](const auto& n) {
+                return n.field == QStringLiteral("Bitrate");
+            });
+            QVERIFY(note != r.notes.end());
+            QCOMPARE(note->value, QStringLiteral("%1 kbps").arg(c.proposed));
+            const bool saysKept = note->why.contains(QStringLiteral("keeps your current value"));
+            QCOMPARE(saysKept, c.current == c.proposed);
+            if (!saysKept) {
+                QVERIFY2(note->why.contains(QStringLiteral("%1 kbps").arg(c.current)),
+                         qPrintable(note->why));
+                QVERIFY2(note->why.contains(QStringLiteral("%1 kbps").arg(c.proposed)),
+                         qPrintable(note->why));
+            }
+        }
+    }
+
     // No microphone, no hardware encoder and a nearly full disk are all things
     // to say out loud rather than silently encode around.
     {
