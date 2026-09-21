@@ -4,7 +4,96 @@ All notable changes to MalloyStudio are documented here.
 
 ---
 
-## v7 (current)
+## Unreleased
+
+Everything since v7, grouped by area. Commit ids are given where one change is worth
+finding again.
+
+### Interface
+
+- The native Qt interface replaces the prototype layout: an icon rail and workspaces
+  (Dashboard, Recording, Streaming, Editor, Media, Clips, Projects, Render, Settings),
+  a Ctrl+K command palette, a first-run onboarding wizard, a bundled icon set and a dark
+  theme.
+- The Dashboard, status bar and Smart Config report measured state rather than
+  placeholder figures, and Smart Config recommends encoder settings from the detected
+  hardware (b186382).
+- Settings pages are backed by the real settings, including hotkeys, and a frame rate
+  that is configured is shown as configured (06a5f5d).
+- The Dashboard's record and live quick actions say Stop Recording and End Stream while
+  those are running (1d7fb14).
+
+### Sources and capture
+
+- Camera source through Media Foundation, choosing the camera's highest-rate native
+  format up to 1080p (a27c962, 3628eaa, 83c143a).
+- A Windows.Graphics.Capture backend beside DXGI for display and window capture, chosen
+  by the `capture/backend` setting (174613c).
+- Capture stops producing when nothing consumes frames (9239817), bounds the frames in
+  flight to the compositor (47dec02, b594ab9), and outlives late callbacks.
+- A display, camera or microphone that fails is tried again with a backoff instead of
+  staying off: after a UAC prompt, the lock screen or an unplugged device (9d6685d,
+  55c39bf, f7e842c).
+- A capture thread that will not stop is detached rather than destroyed, which Qt
+  treats as fatal (bfc8a7c); a hung captured window is skipped.
+
+### Audio
+
+- Every input is mixed on a 50 Hz program bus, byte-accurately and in stereo (6013ef8,
+  64d9cd7), with capture resampled to 48 kHz (3d211f2).
+- Volume, pan and the limiter threshold refuse values that are not numbers (eeb2cc7).
+
+### Recording and streaming
+
+- Video reaches ffmpeg over its own named pipe and thread, as audio does, with the pipes
+  restricted to this user and to local clients (1ef24c9, 8b97d77, 3efa8e1).
+- Frames carry wall-clock timestamps, so a dropped frame leaves a gap instead of
+  shortening the file (bbfa085, da26718); a file follows its source while a stream holds
+  its own cadence (e065892, cd3a3ae).
+- Per-stage frame telemetry for diagnosing throughput (0bcdf7c, 25fb138).
+- Software streams are capped at the configured bitrate (cc98877).
+- Replay saves play in real time, keep their first audio, and finish before their
+  sources when the app closes (61a9abc, 9112313); the replay buffer counts as a consumer
+  (18dee41).
+- Fades start from the composed canvas rather than a screenshot of the preview
+  (ebaa167).
+
+### Twitch
+
+- Device-code sign-in fetches the stream key and pushes title and category (95a4fec).
+- An opt-in local relay keeps the stream key out of ffmpeg's command line, carries
+  rtmps over TLS, and applies backpressure (1ae226c, d4c00ba, 3cbcd06); the key is
+  removed from ffmpeg output (69e66b9).
+- Sign-out is final even with a refresh in flight, a network failure no longer signs
+  the user out, and a cancelled sign-in stays cancelled (1b8a66b, 6227246).
+
+### Editor and render
+
+- The editor timeline is persisted in the project and its clips reference their source
+  media (ADR-0001, 7fe0923); render jobs carry their settings and a timeline snapshot
+  (ADR-0002, b506592); the timeline is rendered for real (ADR-0003, d2717d2).
+- The media library remembers probe results instead of probing every file again at each
+  launch, and never opens cloud-only files (3ae6cb1).
+
+### Projects and trust
+
+- Devices named by an opened project are held until the user allows them, per source,
+  and the hold survives undo and redo (ad90551, 0a46032, 7e6b395, cd57095).
+- Project media paths must be local drive-absolute paths (a60fec6); the numbers and
+  addresses a project supplies are bounded before use (bd75eb0, c50879d); restored
+  render jobs are validated like new ones (f0e7a7a, 7574924).
+- What is on air stays stable through undo, scene removal and staging (83f6df7, 18dee41),
+  and an edit session ends with the state it edits (3d9224c).
+
+### Documentation
+
+- README, ARCHITECTURE and PROJECT_FORMAT describe the current code, including the
+  project format's trust rules and the corrected layer order (3bfb243, c258ba9,
+  60dc5b3).
+
+---
+
+## v7
 
 ### Streaming + ffmpeg bug fixes (Tier 1)
 
