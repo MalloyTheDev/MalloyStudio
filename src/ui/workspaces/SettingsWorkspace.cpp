@@ -560,10 +560,14 @@ void SettingsWorkspace::beginTwitchConnect() {
     QString* uri = new QString;
     connect(dialog, &QDialog::destroyed, [uri] { delete uri; });
 
-    connect(buttons, &QDialogButtonBox::rejected, dialog, [this, dialog] {
-        m_twitchAuth->cancelDeviceFlow();
-        dialog->close();
-    });
+    // However the dialog goes, the sign-in goes with it. Cancel was the only
+    // route that stopped it: Esc and the title bar close the dialog without
+    // the button box saying so, and the flow went on polling unseen. A late
+    // approval then connected the account with nothing left to fetch the
+    // stream key, which is the whole point of connecting. After a success or
+    // a failure the flow is already over, and cancelling it again is harmless.
+    connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+    connect(dialog, &QDialog::finished, this, [this] { m_twitchAuth->cancelDeviceFlow(); });
     connect(openButton, &QPushButton::clicked, dialog, [uri] {
         // The address arrives in a response, so it is checked rather than
         // handed to the shell as given. openUrl dispatches by scheme, and the
