@@ -40,6 +40,7 @@ private slots:
     void onFilterEnabledToggled(bool enabled);
 
 private:
+    void showNoLayer(const QString& title);
     void setControlsEnabled(bool enabled);
     void rebuildFilterProps();
 

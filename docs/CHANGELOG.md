@@ -24,6 +24,9 @@ finding again.
   those are running (1d7fb14).
 - Closing the window while recording or streaming asks first, and stops them before the
   captures rather than after the event loop has gone (f01d158).
+- The inspector empties its fields when its layer is deleted or deselected, the Recording
+  header's source count follows a removed layer, and the Dashboard's recent recordings
+  update when a recording or replay is saved.
 
 ### Sources and capture
 

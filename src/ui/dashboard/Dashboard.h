@@ -44,6 +44,12 @@ public:
     void setRecording(bool on);
     void setStreaming(bool on);
 
+public slots:
+    // Re-reads the recording folder. The panel is otherwise read when the
+    // dashboard is shown, so one that stayed on screen while a recording
+    // finished went on listing the files from before it.
+    void refreshRecordings();
+
 signals:
     void navigateTo(const QString& workspaceId);
     void recordRequested();
@@ -60,7 +66,6 @@ protected:
 private slots:
     void rebuildMeterRows();                                   // mixer inputs changed
     void onLevels(const QString& id, float peakL, float peakR);
-    void refreshRecordings();
     void refreshProjects();
     void refreshClips();
     void refreshRenderQueue();

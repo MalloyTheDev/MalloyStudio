@@ -244,6 +244,14 @@ qt_add_executable(MalloyStudioTests
     # The output dialog, whose settings() must hand back what it was given.
     src/ui/OutputSettingsDialog.cpp
     src/ui/OutputSettingsDialog.h
+    # The inspector, which must not go on showing a layer that has gone, and
+    # the pickers it opens.
+    src/ui/InspectorPanel.cpp
+    src/ui/InspectorPanel.h
+    src/ui/MonitorPickerDialog.cpp
+    src/ui/MonitorPickerDialog.h
+    src/ui/WindowPickerDialog.cpp
+    src/ui/WindowPickerDialog.h
 )
 
 # Force console subsystem so CTest captures stdout test output

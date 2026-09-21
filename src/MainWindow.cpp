@@ -223,6 +223,10 @@ void MainWindow::setupUi() {
     connect(m_dashboard, &Dashboard::openProjectRequested, this, [this](const QString& path) {
         if (maybeSave()) loadProject(path);
     });
+    connect(m_media, &MediaController::recordingFinished,
+            m_dashboard, [this](const QString&, qint64) { m_dashboard->refreshRecordings(); });
+    connect(m_media, &MediaController::replaySaved,
+            m_dashboard, [this](const QString&) { m_dashboard->refreshRecordings(); });
     m_shell->addWorkspace(QStringLiteral("dashboard"), m_dashboard);
     m_shell->addWorkspace(QStringLiteral("record"), recording);
     m_streamStudio = new StreamingWorkspace(m_audio, this);
@@ -481,6 +485,9 @@ void MainWindow::connectModelSignals() {
     connect(m_scenes, &SceneCollection::sceneRemoved, this, refresh);
     connect(m_scenes, &SceneCollection::sceneRenamed, this, refresh);
     connect(m_scenes, &SceneCollection::itemsChanged, this, refresh);
+    // Removing a layer announces the item first and prunes its source after,
+    // announcing only that, so the source count was read before it changed.
+    connect(m_scenes, &SceneCollection::sourcesChanged, this, refresh);
     connect(m_scenes, &SceneCollection::collectionReset, this, refresh);
     connect(m_undoStack, &QUndoStack::cleanChanged, this, [this](bool){ updateWindowTitle(); });
 

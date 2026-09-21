@@ -509,20 +509,14 @@ void InspectorPanel::rebuild() {
     m_updating = true;
     SceneItem* item = m_scenes->currentItem();
     if (!item) {
-        m_title->setText(tr("No layer selected"));
-        m_type->clear();
-        setControlsEnabled(false);
-        m_filtersGroup->setVisible(false);
+        showNoLayer(tr("No layer selected"));
         m_updating = false;
         return;
     }
 
     Source* source = m_scenes->sourceForItem(item);
     if (!source) {
-        m_title->setText(tr("Missing source"));
-        m_type->clear();
-        setControlsEnabled(false);
-        m_filtersGroup->setVisible(false);
+        showNoLayer(tr("Missing source"));
         m_updating = false;
         return;
     }
@@ -908,6 +902,35 @@ void InspectorPanel::chooseColor() {
 
     const QColor color = QColorDialog::getColor(source->color(), this, tr("Choose Color"));
     if (color.isValid()) m_scenes->setCurrentSourceColor(m_scenes->currentItemIndex(), color);
+}
+
+// The fields are emptied and the type-specific ones hidden. Left disabled but
+// holding the last layer's position, text, window or file, they read as that
+// layer still being there after it had been deleted or deselected.
+void InspectorPanel::showNoLayer(const QString& title) {
+    m_title->setText(title);
+    m_type->clear();
+    m_visible->setChecked(false);
+    m_locked->setChecked(false);
+    for (QDoubleSpinBox* box : {m_x, m_y, m_w, m_h}) box->setValue(0);
+    m_text->clear();
+    m_imagePath->clear();
+    m_imagePath->setToolTip(QString());
+    m_windowLabel->clear();
+    m_monitor->clear();
+    m_browserUrlEdit->clear();
+    for (QWidget* w : {static_cast<QWidget*>(m_text),        static_cast<QWidget*>(m_color),
+                       static_cast<QWidget*>(m_monitor),     static_cast<QWidget*>(m_pickMonitor),
+                       static_cast<QWidget*>(m_imagePath),   static_cast<QWidget*>(m_browseImage),
+                       static_cast<QWidget*>(m_windowLabel), static_cast<QWidget*>(m_pickWindow),
+                       static_cast<QWidget*>(m_audioLabel),  static_cast<QWidget*>(m_audioDevice),
+                       static_cast<QWidget*>(m_cameraLabel), static_cast<QWidget*>(m_cameraDevice),
+                       static_cast<QWidget*>(m_browserUrlLabel), static_cast<QWidget*>(m_browserUrlEdit),
+                       static_cast<QWidget*>(m_browserHzLabel),  static_cast<QWidget*>(m_browserRefreshHz)}) {
+        w->setVisible(false);
+    }
+    setControlsEnabled(false);
+    m_filtersGroup->setVisible(false);
 }
 
 void InspectorPanel::setControlsEnabled(bool enabled) {

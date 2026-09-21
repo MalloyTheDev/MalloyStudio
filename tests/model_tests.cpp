@@ -9,6 +9,7 @@
 #include "capture/WorkerRetirement.h"
 #include "platform/FrameProfile.h"
 #include "ui/PreviewWidget.h"
+#include "ui/InspectorPanel.h"
 #include "input/HotkeyManager.h"
 #include "model/Canvas.h"
 #include "model/FilterEffect.h"
@@ -55,6 +56,8 @@
 #include <QProcess>
 #include <QSettings>
 #include <QSignalSpy>
+#include <QLabel>
+#include <QLineEdit>
 #include <QWidget>
 #include <QBuffer>
 #include <QTemporaryDir>
@@ -395,6 +398,7 @@ private slots:
     void aCameraThatStopsIsTriedAgain();
     void aCameraWaitingToRetryIsLeftToItsBackoff();
     void aWindowCaptureThatFailsIsTriedAgain();
+    void theInspectorForgetsALayerThatIsGone();
     void projectMediaPathsMustBeLocalFiles();
     void encoderRedactsTheStreamKeyFromFfmpegOutput();
     void addingAConfiguredLayerIsOneUndoStep();
@@ -4620,6 +4624,41 @@ void MalloyModelTests::aWindowCaptureThatFailsIsTriedAgain() {
     controller.reconcile();
     QTest::qWait(1500);
     QCOMPARE(FakeCaptureSession::started.count(win), 2);
+}
+
+void MalloyModelTests::theInspectorForgetsALayerThatIsGone() {
+    SceneCollection scenes;
+    scenes.addScene(QStringLiteral("Scene"));
+    InspectorPanel inspector(&scenes, nullptr, nullptr);
+    const QString text = QStringLiteral("Lower third that was deleted");
+    QVERIFY(scenes.addNewSourceToCurrent(QStringLiteral("Caption"), Source::Type::Text, text)
+            != nullptr);
+    scenes.selectCurrentItemAt(0);
+
+    const auto showingText = [&] {
+        for (const QLineEdit* edit : inspector.findChildren<QLineEdit*>())
+            if (edit->text() == text && edit->isVisibleTo(&inspector)) return true;
+        return false;
+    };
+    // The transform fields, which are the spin boxes on show; the filter pages
+    // have their own, hidden with no layer.
+    const auto showingSize = [&] {
+        for (const QDoubleSpinBox* box : inspector.findChildren<QDoubleSpinBox*>())
+            if (box->isVisibleTo(&inspector) && box->value() != 0.0) return true;
+        return false;
+    };
+    QVERIFY(showingText());
+    QVERIFY(showingSize());
+
+    // Deleted: the text, the size and the rest of it used to stay in the
+    // fields, greyed out, as though the layer were still there.
+    scenes.removeCurrentItemAt(0);
+    QVERIFY(!showingText());
+    QVERIFY(!showingSize());
+    bool titled = false;
+    for (const QLabel* label : inspector.findChildren<QLabel*>())
+        titled = titled || label->text() == QObject::tr("No layer selected");
+    QVERIFY(titled);
 }
 
 void MalloyModelTests::everyMicChangeIsAnnouncedStructurally() {
