@@ -213,6 +213,7 @@ private slots:
     void controllerCanReplacePipelineFromFinishedSignal();
     void audioControllerHasDefaultLoopbackInput();
     void audioControllerPersistsVolumeAndMute();
+    void audioControlsRefuseValuesThatAreNotNumbers();
     // v5 new tests
     void windowCaptureKeyIsStable();
     void filterChainRoundTrips();
@@ -5585,6 +5586,52 @@ void MalloyModelTests::aRelayThatHeldBackStillDeliversEverything() {
     QTRY_COMPARE_WITH_TIMEOUT(received, kSent, 30000);
     relay.stop();
     publisher.abort();
+}
+
+void MalloyModelTests::audioControlsRefuseValuesThatAreNotNumbers() {
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+
+    // std::clamp returns NaN for NaN; the bound gives the fallback instead.
+    QCOMPARE(boundedControl(nan, 0.0f, 1.5f, 1.0f), 1.0f);
+    QCOMPARE(boundedControl(inf, 0.0f, 1.5f, 1.0f), 1.0f);
+    QCOMPARE(boundedControl(-inf, -1.0f, 1.0f, 0.0f), 0.0f);
+    QCOMPARE(boundedControl(7.0f, 0.0f, 1.5f, 1.0f), 1.5f);
+    QCOMPARE(boundedControl(0.25f, 0.0f, 1.5f, 1.0f), 0.25f);
+    float l = 0.0f, r = 0.0f;
+    balanceGains(nan, l, r);
+    QCOMPARE(l, 1.0f);
+    QCOMPARE(r, 1.0f);
+
+    const QString id = QStringLiteral("loopback:default");
+    {
+        // Values hand-edited into the settings file, as the controller reads
+        // them back at launch.
+        QSettings s;
+        s.setValue(QStringLiteral("audio/inputs/") + id + QStringLiteral("/volume"), QStringLiteral("nan"));
+        s.setValue(QStringLiteral("audio/inputs/") + id + QStringLiteral("/pan"), QStringLiteral("inf"));
+    }
+    AudioController c;
+    QCOMPARE(c.inputs().first().volume, 1.0f);
+    QCOMPARE(c.inputs().first().pan, 0.0f);
+
+    // A NaN from a caller leaves the control where it was.
+    c.setVolume(id, 0.5f);
+    c.setVolume(id, nan);
+    QCOMPARE(c.inputs().first().volume, 0.5f);
+    c.setPan(id, nan);
+    QCOMPARE(c.inputs().first().pan, 0.0f);
+
+    // The limiter threshold, which comes straight from the settings file.
+    c.setLimiterThresholdDb(nan);
+    QVERIFY(std::isfinite(c.limiterThresholdDb()));
+    c.setLimiterThresholdDb(-1000.0f);
+    QCOMPARE(c.limiterThresholdDb(), -24.0f);
+    c.setLimiterThresholdDb(40.0f);
+    QCOMPARE(c.limiterThresholdDb(), 0.0f);
+
+    c.setVolume(id, 1.0f);
+    QSettings().remove(QStringLiteral("audio/inputs/") + id + QStringLiteral("/pan"));
 }
 
 QTEST_MAIN(MalloyModelTests)

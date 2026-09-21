@@ -1,6 +1,7 @@
 #include "ui/workspaces/SettingsWorkspace.h"
 #include "platform/SmartConfig.h"
 #include "ui/SmartConfigDialog.h"
+#include <cmath>
 #include <QStyle>
 #include <QMessageBox>
 #include <QGuiApplication>
@@ -697,7 +698,8 @@ QWidget* SettingsWorkspace::buildAudioPage() {
     const OutputSettings o = OutputSettings::load();
     QSettings s;
     const bool   limOn = s.value(QStringLiteral("audio/limiterEnabled"), false).toBool();
-    const double limDb = s.value(QStringLiteral("audio/limiterThresholdDb"), -3.0).toDouble();
+    double limDb = s.value(QStringLiteral("audio/limiterThresholdDb"), -3.0).toDouble();
+    if (!std::isfinite(limDb)) limDb = -3.0;   // qRound of NaN below is undefined
 
     auto* sampleRate = combo({QStringLiteral("48 kHz")}, 140); sampleRate->setEnabled(false);
     auto* channels   = combo({tr("Stereo")}, 140);            channels->setEnabled(false);

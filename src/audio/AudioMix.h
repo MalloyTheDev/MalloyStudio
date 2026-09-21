@@ -7,6 +7,7 @@
 // the summing loop, not in the law.
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -79,8 +80,19 @@ private:
 // placed in the field, but every input on this bus is already stereo: desktop
 // audio and stereo microphones arrive with a left and a right that mean
 // something, and summing them to mono to re-spread them throws that away.
+// A control value bounded to its range, with `fallback` for one that is not a
+// number at all. Volume, pan and the limiter threshold are read back from the
+// settings file, where anything can be written, and std::clamp passes NaN
+// straight through: a NaN gain reaches the float to int conversion of every
+// sample, which is undefined, and in practice turns the mix into full-scale
+// noise or silence.
+inline float boundedControl(float value, float lo, float hi, float fallback) {
+    if (!std::isfinite(value)) return fallback;
+    return std::clamp(value, lo, hi);
+}
+
 inline void balanceGains(float pan, float& gainL, float& gainR) {
-    pan = std::clamp(pan, -1.0f, 1.0f);
+    pan = boundedControl(pan, -1.0f, 1.0f, 0.0f);
     gainL = pan <= 0.0f ? 1.0f : 1.0f - pan;
     gainR = pan >= 0.0f ? 1.0f : 1.0f + pan;
 }

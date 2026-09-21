@@ -223,7 +223,7 @@ void AudioController::startWorker(int index) {
 void AudioController::setVolume(const QString& id, float volume) {
     const int i = indexForId(id);
     if (i < 0) return;
-    volume = std::clamp(volume, 0.0f, 1.5f);
+    volume = boundedControl(volume, 0.0f, 1.5f, m_inputs[i].volume);
     if (m_inputs[i].volume == volume) return;
     m_inputs[i].volume = volume;
     persist(m_inputs[i]);
@@ -241,7 +241,7 @@ void AudioController::setMuted(const QString& id, bool muted) {
 void AudioController::setPan(const QString& id, float pan) {
     const int i = indexForId(id);
     if (i < 0) return;
-    pan = std::clamp(pan, -1.0f, 1.0f);
+    pan = boundedControl(pan, -1.0f, 1.0f, m_inputs[i].pan);
     if (m_inputs[i].pan == pan) return;
     m_inputs[i].pan = pan;
     persist(m_inputs[i]);
@@ -254,7 +254,10 @@ void AudioController::setLimiterEnabled(bool enabled) {
 }
 
 void AudioController::setLimiterThresholdDb(float db) {
-    m_limiterThresholdDb = db;
+    // The widest range any control offers. It arrives from the settings file
+    // at launch, and a NaN here made every comparison with the peak false, so
+    // the limiter silently stopped limiting.
+    m_limiterThresholdDb = boundedControl(db, -24.0f, 0.0f, -3.0f);
 }
 
 // ---------------------------------------------------------------------------
@@ -407,8 +410,8 @@ void AudioController::persist(const AudioInput& in) const {
 void AudioController::loadPersisted(AudioInput& in) const {
     QSettings s;
     s.beginGroup(QStringLiteral("audio/inputs/") + in.id);
-    in.volume = std::clamp(s.value(QStringLiteral("volume"), 1.0f).toFloat(), 0.0f, 1.5f);
-    in.pan    = std::clamp(s.value(QStringLiteral("pan"),    0.0f).toFloat(), -1.0f, 1.0f);
+    in.volume = boundedControl(s.value(QStringLiteral("volume"), 1.0f).toFloat(), 0.0f, 1.5f, 1.0f);
+    in.pan    = boundedControl(s.value(QStringLiteral("pan"),    0.0f).toFloat(), -1.0f, 1.0f, 0.0f);
     in.muted  = s.value(QStringLiteral("muted"),  false).toBool();
     s.endGroup();
 }
