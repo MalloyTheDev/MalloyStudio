@@ -115,7 +115,11 @@ SceneItem* SceneItem::duplicate(QObject* parent) const {
 }
 
 int SceneItem::nextId() {
-    return g_nextSceneItemId++;
+    // Item ids are only written out and read back, never looked up, so a
+    // repeat after wrapping is harmless where an overflow would not be.
+    const int id = g_nextSceneItemId;
+    g_nextSceneItemId = id < Source::MaxId ? id + 1 : 1;
+    return id;
 }
 
 void SceneItem::observeLoadedId(int id) {
@@ -123,7 +127,7 @@ void SceneItem::observeLoadedId(int id) {
 }
 
 void SceneItem::setIdForLoad(int id) {
-    if (id <= 0) return;
+    if (id <= 0 || id > Source::MaxId) return;   // keeps the id it was given
     m_id = id;
     observeLoadedId(id);
 }

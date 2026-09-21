@@ -360,6 +360,7 @@ private slots:
     void rtmpRelayTransportFollowsTheScheme();
     void loadedProjectHoldsItsDevicesUntilAllowed();
     void undoAndRedoKeepADeclinedDeviceHeld();
+    void sourceIdsNearTheTopDoNotOverflow();
     void fileDevicesAreHeldBeforeTheLoadIsAnnounced();
     void userChosenSharePathSurvivesUndo();
     void everyMicChangeIsAnnouncedStructurally();
@@ -5391,6 +5392,50 @@ void MalloyModelTests::closingDuringAReplaySaveFinishesItFirst() {
     QCOMPARE(order, QStringList({QStringLiteral("replay finished"),
                                  QStringLiteral("audio source gone")}));
     QVERIFY(recordingDecodes(ffmpeg, path));
+}
+
+namespace {
+QJsonObject projectWithSource(int sourceId) {
+    QJsonObject source{{QStringLiteral("id"), sourceId},
+                       {QStringLiteral("type"), QStringLiteral("text")},
+                       {QStringLiteral("name"), QStringLiteral("Title")}};
+    QJsonObject item{{QStringLiteral("sourceId"), sourceId}};
+    QJsonObject scene{{QStringLiteral("name"), QStringLiteral("Scene 1")},
+                      {QStringLiteral("items"), QJsonArray{item}}};
+    return QJsonObject{{QStringLiteral("app"), QStringLiteral("MalloyStudio")},
+                       {QStringLiteral("version"), 2},
+                       {QStringLiteral("currentScene"), 0},
+                       {QStringLiteral("sources"), QJsonArray{source}},
+                       {QStringLiteral("scenes"), QJsonArray{scene}}};
+}
+}
+
+void MalloyModelTests::sourceIdsNearTheTopDoNotOverflow() {
+    // INT_MAX is refused outright: the counter raised past it would wrap to a
+    // negative id, which the next load refuses, so the saved project would no
+    // longer open.
+    SceneCollection scenes;
+    QString error;
+    QVERIFY(!scenes.loadFromJson(projectWithSource(std::numeric_limits<int>::max()), &error));
+    QVERIFY(error.contains(QStringLiteral("id")));
+
+    // The largest id allowed loads, and a source added after it still gets a
+    // positive id that is not taken, and the result saves and opens again.
+    QVERIFY2(scenes.loadFromJson(projectWithSource(Source::MaxId), &error), qPrintable(error));
+    Source* added = scenes.sourceForItem(scenes.addNewSourceToCurrent(
+        QStringLiteral("Second"), Source::Type::Text, QStringLiteral("two")));
+    QVERIFY(added);
+    QVERIFY(added->id() > Source::InvalidId);
+    QVERIFY(added->id() != Source::MaxId);
+    Source* third = scenes.sourceForItem(scenes.addNewSourceToCurrent(
+        QStringLiteral("Third"), Source::Type::Text, QStringLiteral("three")));
+    QVERIFY(third);
+    QVERIFY(third->id() > Source::InvalidId);
+    QVERIFY(third->id() != added->id());
+
+    SceneCollection reopened;
+    QVERIFY2(reopened.loadFromJson(scenes.toJson(), &error), qPrintable(error));
+    QCOMPARE(reopened.sources().size(), 3);
 }
 
 QTEST_MAIN(MalloyModelTests)

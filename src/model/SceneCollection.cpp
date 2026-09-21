@@ -84,8 +84,9 @@ QJsonObject sourceToJson(const Source* source) {
 
 bool validateSourceObject(const QJsonObject& sourceObject, QString* error, bool requireId) {
     if (requireId) {
+        const int id = sourceObject.value(QStringLiteral("id")).toInt(Source::InvalidId);
         if (!sourceObject.contains(QStringLiteral("id"))
-            || sourceObject.value(QStringLiteral("id")).toInt(Source::InvalidId) <= Source::InvalidId) {
+            || id <= Source::InvalidId || id > Source::MaxId) {
             if (error) *error = QStringLiteral("Project contains a source without a valid id.");
             return false;
         }
@@ -180,8 +181,11 @@ QJsonObject SceneCollection::snapshot() const {
 }
 
 void SceneCollection::restoreSnapshot(const QJsonObject& snapshot) {
-    QString ignored;
-    loadFromJson(snapshot, &ignored);
+    // Snapshots are this collection's own output, so a failure here is a bug:
+    // the undo stack believes a step ran that did not. Say so.
+    QString error;
+    if (!loadFromJson(snapshot, &error))
+        qWarning("Undo could not restore the project: %s", qPrintable(error));
 }
 
 void SceneCollection::pushSnapshotCommand(const QString& text, const QJsonObject& before, const QJsonObject& after) {
@@ -1123,9 +1127,16 @@ int SceneCollection::allocateSourceId() {
     // source's id again. Held ids are skipped rather than released. Releasing
     // one would let a new source take the id, and undoing past the new source
     // would then bring the original back with its hold gone.
-    int id = m_nextSourceId++;
-    while (m_heldDeviceSources.contains(id)) id = m_nextSourceId++;
-    return id;
+    while (m_nextSourceId <= Source::MaxId) {
+        const int id = m_nextSourceId++;
+        if (!m_heldDeviceSources.contains(id)) return id;
+    }
+    // The counter has run past the largest id a project may carry, which only
+    // a project arriving with an id near it can cause. Take the lowest id that
+    // nothing uses instead: there are far fewer sources than ids.
+    for (int id = 1;; ++id) {
+        if (!sourceById(id) && !m_heldDeviceSources.contains(id)) return id;
+    }
 }
 
 void SceneCollection::observeLoadedSourceId(int sourceId) {

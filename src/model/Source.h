@@ -7,6 +7,11 @@ class Source : public QObject {
     Q_OBJECT
 public:
     static constexpr int InvalidId = 0;
+    // The largest id a project may carry, one short of INT_MAX so that the
+    // counter raised past a loaded id always fits in an int. A file naming a
+    // larger one is refused rather than overflowing the counter into negative
+    // ids that the next load would refuse instead, losing the work in between.
+    static constexpr int MaxId = 2147483646;
 
     enum class Type {
         DisplayCapture,

@@ -27,7 +27,7 @@ Every source in the library has a stable integer `id`. Items reference it via `s
 
 ```jsonc
 {
-  "id":   1,                      // positive integer, unique within the project
+  "id":   1,                      // 1 to 2147483646 and unique, or the project is refused
   "name": "Camera",               // user-visible label
   "type": "display_capture",      // one of the type IDs below
 
@@ -86,7 +86,7 @@ same `sourceId`.
 
 ```jsonc
 {
-  "id":       12,               // positive integer, unique within the project
+  "id":       12,               // 1 to 2147483646; anything else is replaced on load
   "sourceId": 1,                // references a source in "sources"
 
   "visible":  true,
