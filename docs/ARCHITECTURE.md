@@ -1733,8 +1733,10 @@ they affect.
 | Capture | #91 | Window capture allocates and copies three full frames per frame. |
 | Capture, audio | #96 | Error text discarded; permanent failures retried forever. |
 | Capture | #99 | Camera enumeration on the UI thread in one path; no COM initialisation on the worker; duplicate names in the Inspector. |
+| Capture | #109 | Stopping a camera joins its read thread on the GUI thread with no time limit. |
 | Composition | #89 | Replays are 5 fps JPEG stills encoded on the GUI thread. |
 | Composition | #102 | Lost mouse release continues a drag; a new preview over existing content shows nothing. |
+| Composition | #108 | Audio input layers are drawn into the composed frame, and so into recordings and streams. |
 | Encoding | #41 | Pipe connect race; the fix is an inherited handle instead of a named pipe. |
 | Encoding | #86 | A pipe writer failure is not surfaced while ffmpeg keeps running. |
 | Encoding | #87 | Streams inherit the recording's codec and frame rate. |
@@ -1744,9 +1746,12 @@ they affect.
 | Encoding | #26 | Stream latency has not been driven down. |
 | Encoders | #103, #106 | Container and codec follow-ups; encoder availability follow-ups. |
 | Rendering | #92, #93, #100 | Renders not BT.709; a failed render can delete another file; media lengths rounded and stills one frame long. |
+| Rendering | #110 | An unreadable render queue store is overwritten; failed jobs cannot be removed. |
+| Projects | #111 | Scroll speeds unbounded on load; a silent version 1 refusal; network images and window handles that do not survive a reopen. |
 | Settings | #65, #66, #95 | Several owners of settings; values persisted that nothing reads; unchecked stream URL and key writes. |
 | Threading | #70, #107 | Remaining GUI-thread storage queries and folder listing; ffprobe restarts and a 1 s wait on the GUI thread. |
 | UI | #22, #97, #101, #104, #105 | Editor program monitor and Effects tab; Inspector filter controls; status bar alternation; hotkey editing; Twitch messages. |
 | Platform | #19, #20, #24, #25 | Upload not measured; Twitch unverified against the real API; no chat, alerts or plugin host. |
 | Tests | #98 | Tests reach into real settings, devices and processes. |
 | Build | #59 | Deployment does not refresh non-Qt runtime DLLs after an MSYS2 upgrade. |
+| Code | #112 | Several code comments still describe removed designs. |

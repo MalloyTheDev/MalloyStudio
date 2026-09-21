@@ -145,6 +145,9 @@ Capture
 - There is no game capture, and window capture does not substitute for it
   ([#33](https://github.com/MalloyTheDev/MalloyStudio/issues/33)).
 - Window capture copies the client area only; DRM-protected content captures as black.
+- A microphone layer is drawn into the picture as a labelled box, including in recordings
+  and streams ([#108](https://github.com/MalloyTheDev/MalloyStudio/issues/108)). Hiding the
+  layer is not a workaround: a hidden microphone layer also stops that microphone.
 
 Recording and editing
 
