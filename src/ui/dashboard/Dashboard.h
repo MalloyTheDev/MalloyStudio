@@ -104,6 +104,12 @@ private:
     // buffer is not holding.
     QLabel*      m_clipTitle = nullptr;
     QLabel*      m_clipSub = nullptr;
+    // The quick actions that toggle, relabelled with the hero buttons so they
+    // never offer to start what is already running; see refreshState.
+    QLabel*      m_quickRecTitle = nullptr;
+    QLabel*      m_quickRecSub = nullptr;
+    QLabel*      m_quickLiveTitle = nullptr;
+    QLabel*      m_quickLiveSub = nullptr;
     bool m_recording = false;
     bool m_streaming = false;
 

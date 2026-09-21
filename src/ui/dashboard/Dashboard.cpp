@@ -249,6 +249,13 @@ void Dashboard::refreshState() {
         m_liveBtn->setText(m_streaming ? tr("  End Stream") : tr("  Go Live"));
         Theme::setVariant(m_liveBtn, m_streaming ? QStringLiteral("outlineRec") : QString());
     }
+    // The quick actions call the same toggles, so they must say the same
+    // thing. Captioned "Start Recording" and "Go Live" whatever the state,
+    // they stopped a recording or ended a broadcast when clicked during one.
+    if (m_quickRecTitle) m_quickRecTitle->setText(m_recording ? tr("Stop Recording") : tr("Start Recording"));
+    if (m_quickRecSub) m_quickRecSub->setText(m_recording ? tr("Recording now") : tr("Current output profile"));
+    if (m_quickLiveTitle) m_quickLiveTitle->setText(m_streaming ? tr("End Stream") : tr("Go Live"));
+    if (m_quickLiveSub) m_quickLiveSub->setText(m_streaming ? tr("Live now") : tr("Streaming studio"));
 }
 
 // ---------------------------------------------------------------------------
@@ -429,10 +436,10 @@ QWidget* Dashboard::buildQuickActions() {
     };
 
     connect(addAction(0, QStringLiteral("record"), tr("Start Recording"),
-                      tr("Current output profile"), Theme::RecHi, nullptr, nullptr),
+                      tr("Current output profile"), Theme::RecHi, &m_quickRecTitle, &m_quickRecSub),
             &QPushButton::clicked, this, &Dashboard::recordRequested);
     connect(addAction(1, QStringLiteral("stream"), tr("Go Live"),
-                      tr("Streaming studio"), Theme::AccentHi, nullptr, nullptr),
+                      tr("Streaming studio"), Theme::AccentHi, &m_quickLiveTitle, &m_quickLiveSub),
             &QPushButton::clicked, this, &Dashboard::streamRequested);
     connect(addAction(2, QStringLiteral("editor"), tr("Open Editor"),
                       tr("Project timeline"), Theme::TextDim, nullptr, nullptr),
