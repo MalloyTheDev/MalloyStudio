@@ -176,7 +176,8 @@ void AudioController::startWorker(int index) {
     if (index < 0 || index >= m_inputs.size()) return;
     const AudioInput& in = m_inputs[index];
 
-    auto* worker = new WasapiCapture(in.deviceId, in.loopback);
+    auto* worker = m_workerFactory ? m_workerFactory(in.deviceId, in.loopback)
+                                   : new WasapiCapture(in.deviceId, in.loopback);
     m_workers[index] = worker;
 
     const QString id = in.id;
@@ -198,6 +199,13 @@ void AudioController::startWorker(int index) {
 
     connect(worker, &WasapiCapture::samplesReady, this,
             [this, id](QByteArray pcm) {
+        // Audio arriving is the device working, including after a restart.
+        const int i = indexForId(id);
+        if (i >= 0 && !m_inputs[i].connected) {
+            m_inputs[i].connected = true;
+            m_restartDelayMs.remove(id);
+            emit inputConnectionChanged(id, true);
+        }
         // Push into the per-input buffer; the mixer timer drains it at 50 Hz.
         auto& fifo = m_rings[id];
         fifo.push(pcm.constData(), static_cast<int>(pcm.size()));
@@ -208,9 +216,12 @@ void AudioController::startWorker(int index) {
     connect(worker, &WasapiCapture::captureError, this,
             [this, id](const QString& /*msg*/) {
         const int i = indexForId(id);
-        if (i < 0 || !m_inputs[i].connected) return;
-        m_inputs[i].connected = false;
-        emit inputConnectionChanged(id, false);
+        if (i < 0) return;
+        if (m_inputs[i].connected) {
+            m_inputs[i].connected = false;
+            emit inputConnectionChanged(id, false);
+        }
+        scheduleRestart(id);
     });
 
     worker->start();
@@ -264,6 +275,21 @@ void AudioController::setLimiterThresholdDb(float db) {
 // Worker management
 // ---------------------------------------------------------------------------
 
+void AudioController::scheduleRestart(const QString& id) {
+    const int delay = m_restartDelayMs.value(id, kFirstRestartMs);
+    m_restartDelayMs.insert(id, std::min(delay * 2, kMaxRestartMs));
+    const quint64 token = ++m_restartSerial;
+    m_restartTokens.insert(id, token);
+    QTimer::singleShot(delay, this, [this, id, token] {
+        if (m_restartTokens.value(id) != token) return;   // superseded, or the input went
+        m_restartTokens.remove(id);
+        const int i = indexForId(id);
+        if (i < 0) return;
+        stopWorkerAt(i);   // the failed worker has ended; this reaps it
+        startWorker(i);
+    });
+}
+
 void AudioController::stopWorkerAt(int index) {
     if (index < 0 || index >= m_workers.size()) return;
     WasapiCapture* w = m_workers[index];
@@ -284,6 +310,8 @@ void AudioController::reconcileInputs(const QStringList& activeDeviceIds) {
         if (m_inputs[i].loopback) continue;                     // never remove loopback:default
         if (wanted.contains(m_inputs[i].deviceId)) continue;    // still needed
         m_rings.remove(m_inputs[i].id);
+        m_restartTokens.remove(m_inputs[i].id);
+        m_restartDelayMs.remove(m_inputs[i].id);
         stopWorkerAt(i);
         m_inputs.removeAt(i);
         m_workers.removeAt(i);

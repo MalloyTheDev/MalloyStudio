@@ -4,6 +4,8 @@
 #include "media/TimedSource.h"
 
 #include <QHash>
+
+#include <functional>
 #include <QList>
 #include <QMutex>
 #include <QQueue>
@@ -57,6 +59,11 @@ public:
 
     // Replay buffer: enable/disable and snapshot the PCM ring.
     void setReplayBufferSeconds(int seconds);   // 0 = disable
+
+    // Replaces how capture workers are made, for inputs started from now on.
+    // For tests, so none opens a real device.
+    using WorkerFactory = std::function<WasapiCapture*(const QString& deviceId, bool loopback)>;
+    void setWorkerFactoryForTesting(WorkerFactory factory) { m_workerFactory = std::move(factory); }
     QQueue<TimedPcm> snapshotReplayPcm() const; // thread-safe copy
 
 signals:
@@ -88,6 +95,19 @@ private:
 
     QList<AudioInput>     m_inputs;
     QList<WasapiCapture*> m_workers; // parallel to m_inputs, nullptr if not started
+    WorkerFactory         m_workerFactory;
+
+    // An input whose device fails is started again after a delay, doubling
+    // from half a second to ten while it keeps failing; audio arriving marks
+    // it connected again and resets the delay. A USB microphone unplugged and
+    // plugged back in, or a device whose format was changed in Sound
+    // settings, used to stay dead until the app restarted.
+    static constexpr int kFirstRestartMs = 500;
+    static constexpr int kMaxRestartMs   = 10000;
+    QHash<QString, int>     m_restartDelayMs;   // by AudioInput.id
+    QHash<QString, quint64> m_restartTokens;    // the pending restart per id
+    quint64                 m_restartSerial = 0;
+    void scheduleRestart(const QString& id);
 
     // Per-input PCM buffers: samplesReady pushes here; mixAndEmit() drains
     // exactly one tick per tick. Bounded by bytes rather than by chunk count,

@@ -186,13 +186,31 @@ void WasapiCapture::run() {
     std::vector<qint16> outBuf;
     outBuf.reserve(SampleRate / 50 * Channels); // ~20 ms
 
+    // Every way out of the loop other than a stop is said. Only a GetBuffer
+    // failure used to be, so a device unplugged or reconfigured between
+    // packets ended the worker in silence and the mixer went on showing the
+    // input as connected while it recorded nothing.
+    const auto lost = [&](const char* what, HRESULT h) {
+        m_running.store(false, std::memory_order_relaxed);
+        emit captureError(QStringLiteral("WASAPI: %1 (0x%2)")
+                              .arg(QLatin1String(what))
+                              .arg(static_cast<quint32>(h), 8, 16, QLatin1Char('0')));
+    };
+
     while (m_running.load(std::memory_order_relaxed)) {
         const DWORD waitRes = WaitForSingleObject(bufferReadyEvent, 200);
-        if (waitRes == WAIT_TIMEOUT) continue;
-        if (waitRes != WAIT_OBJECT_0) break;
-
         UINT32 packetFrames = 0;
-        if (FAILED(capture->GetNextPacketSize(&packetFrames))) break;
+        if (waitRes == WAIT_TIMEOUT) {
+            // An endpoint removed while it is silent signals nothing at all,
+            // so it is asked: an invalidated device answers with an error.
+            hr = capture->GetNextPacketSize(&packetFrames);
+            if (FAILED(hr)) { lost("device lost", hr); break; }
+            continue;
+        }
+        if (waitRes != WAIT_OBJECT_0) { lost("wait failed", HRESULT_FROM_WIN32(GetLastError())); break; }
+
+        hr = capture->GetNextPacketSize(&packetFrames);
+        if (FAILED(hr)) { lost("device lost", hr); break; }
 
         while (packetFrames > 0 && m_running.load(std::memory_order_relaxed)) {
             BYTE*  data    = nullptr;
@@ -201,9 +219,7 @@ void WasapiCapture::run() {
             hr = capture->GetBuffer(&data, &frames, &pktFlags, nullptr, nullptr);
             if (hr == AUDCLNT_S_BUFFER_EMPTY) break;
             if (FAILED(hr)) {
-                m_running.store(false, std::memory_order_relaxed);
-                if (hr == AUDCLNT_E_DEVICE_INVALIDATED)
-                    emit captureError(QStringLiteral("WASAPI: device invalidated"));
+                lost(hr == AUDCLNT_E_DEVICE_INVALIDATED ? "device invalidated" : "read failed", hr);
                 break;
             }
 
@@ -276,8 +292,9 @@ void WasapiCapture::run() {
                 emit samplesReady(std::move(chunk));
             }
 
-            if (FAILED(capture->GetNextPacketSize(&packetFrames))) {
-                m_running.store(false, std::memory_order_relaxed);
+            hr = capture->GetNextPacketSize(&packetFrames);
+            if (FAILED(hr)) {
+                lost("device lost", hr);
                 break;
             }
         }

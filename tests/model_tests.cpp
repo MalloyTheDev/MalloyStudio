@@ -5,6 +5,7 @@
 #include "capture/CaptureController.h"
 #include "capture/WgcCapture.h"
 #include "capture/WindowCapture.h"
+#include "capture/WasapiCapture.h"
 #include "capture/WorkerRetirement.h"
 #include "platform/FrameProfile.h"
 #include "ui/PreviewWidget.h"
@@ -214,6 +215,7 @@ private slots:
     void audioControllerHasDefaultLoopbackInput();
     void audioControllerPersistsVolumeAndMute();
     void audioControlsRefuseValuesThatAreNotNumbers();
+    void aMicrophoneThatFailsIsStartedAgain();
     void mediaProbesAreRememberedNotRepeated();
     void aHungOrMissingProberDoesNotStallTheScan();
     void cloudOnlyMediaIsListedButNeverOpened();
@@ -5812,6 +5814,53 @@ namespace {
 // nothing to parse, and `/c pause & rem` waits on its input forever. The rem
 // swallows the ffprobe arguments that follow.
 QString commandShell() { return QStandardPaths::findExecutable(QStringLiteral("cmd")); }
+}
+
+namespace {
+// A capture worker that opens nothing: its thread ends at once, and a test
+// drives it by emitting its signals.
+class FakeWasapiWorker final : public WasapiCapture {
+public:
+    using WasapiCapture::WasapiCapture;
+protected:
+    void run() override {}
+};
+}
+
+void MalloyModelTests::aMicrophoneThatFailsIsStartedAgain() {
+    AudioController c;
+    QList<QPointer<FakeWasapiWorker>> workers;
+    c.setWorkerFactoryForTesting([&workers](const QString& deviceId, bool loopback) {
+        auto* w = new FakeWasapiWorker(deviceId, loopback);
+        workers << w;
+        return w;
+    });
+    QSignalSpy connection(&c, &AudioController::inputConnectionChanged);
+
+    c.reconcileInputs({QStringLiteral("{test-mic}")});
+    QCOMPARE(workers.size(), 1);
+    const QString id = QStringLiteral("input:{test-mic}");
+
+    // Unplugged: reported, and the input shows as disconnected.
+    emit workers.last()->captureError(QStringLiteral("WASAPI: device lost (0x88890004)"));
+    QCOMPARE(connection.count(), 1);
+    QCOMPARE(connection.last().at(1).toBool(), false);
+
+    // Started again by itself. Before, it stayed dead until the app restarted.
+    QTRY_COMPARE_WITH_TIMEOUT(workers.size(), 2, 3000);
+
+    // Audio from the new worker is the device back: connected again.
+    emit workers.last()->samplesReady(QByteArray(3840, '\0'));
+    QCOMPARE(connection.count(), 2);
+    QCOMPARE(connection.last().at(1).toBool(), true);
+    for (const AudioInput& in : c.inputs())
+        if (in.id == id) QVERIFY(in.connected);
+
+    // Removed while a restart is pending: nothing is started for it.
+    emit workers.last()->captureError(QStringLiteral("WASAPI: device lost"));
+    c.reconcileInputs({});
+    QTest::qWait(1200);
+    QCOMPARE(workers.size(), 2);
 }
 
 void MalloyModelTests::mediaProbesAreRememberedNotRepeated() {
