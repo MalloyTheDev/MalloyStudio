@@ -4,6 +4,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <audioclient.h>
+#include <avrt.h>
 #include <mmdeviceapi.h>
 #include <functiondiscoverykeys_devpkey.h>
 #include <objbase.h>
@@ -182,6 +183,25 @@ void WasapiCapture::run() {
         return;
     }
 
+    // The loop below has to come back for each packet before the endpoint's
+    // buffer overruns, while the encoder and the compositor keep the cores
+    // busy. MMCSS schedules a thread registered for its "Audio" task ahead of
+    // ordinary work, which is what Windows expects of an audio client. Without
+    // it the capture is an ordinary thread competing with ffmpeg.
+    DWORD mmcssTask = 0;
+    const HANDLE mmcss = AvSetMmThreadCharacteristicsW(L"Audio", &mmcssTask);
+    if (!mmcss) {
+        qWarning("WASAPI: could not register the capture thread with MMCSS (error %lu)",
+                 GetLastError());
+    }
+
+    // Packets the device marked as not following on from the one before: the
+    // endpoint's buffer overran before this thread read it, and the sound in
+    // between is gone. The first packet of a stream can carry the flag
+    // without anything being lost, so it is not counted.
+    int discontinuities = 0;
+    bool firstPacket = true;
+
     // Output bus buffer reused per chunk.
     std::vector<qint16> outBuf;
     outBuf.reserve(SampleRate / 50 * Channels); // ~20 ms
@@ -222,6 +242,13 @@ void WasapiCapture::run() {
                 lost(hr == AUDCLNT_E_DEVICE_INVALIDATED ? "device invalidated" : "read failed", hr);
                 break;
             }
+
+            if ((pktFlags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) && !firstPacket
+                && discontinuities++ == 0) {
+                qWarning("WASAPI: %s capture lost sound; the device reported a discontinuity",
+                         m_loopback ? "loopback" : "input");
+            }
+            firstPacket = false;
 
             outBuf.clear();
             outBuf.resize(static_cast<size_t>(frames) * Channels);
@@ -299,6 +326,12 @@ void WasapiCapture::run() {
             }
         }
     }
+
+    if (discontinuities > 1) {
+        qWarning("WASAPI: %s capture lost sound %d times",
+                 m_loopback ? "loopback" : "input", discontinuities);
+    }
+    if (mmcss) AvRevertMmThreadCharacteristics(mmcss);
 
     client->Stop();
     capture->Release();
