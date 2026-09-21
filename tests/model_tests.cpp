@@ -72,6 +72,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <thread>
 
 class FakeCaptureSession final : public CaptureSession {
 public:
@@ -217,6 +218,7 @@ private slots:
     void audioControllerPersistsVolumeAndMute();
     void audioControlsRefuseValuesThatAreNotNumbers();
     void aMicrophoneThatFailsIsStartedAgain();
+    void audioFromARemovedInputIsNotKept();
     void mediaProbesAreRememberedNotRepeated();
     void aHungOrMissingProberDoesNotStallTheScan();
     void cloudOnlyMediaIsListedButNeverOpened();
@@ -5906,6 +5908,33 @@ void MalloyModelTests::theOutputDialogHandsBackWhatItWasGiven() {
     const OutputSettings odd = OutputSettingsDialog(in).settings();
     QCOMPARE(odd.width % 2, 0);
     QCOMPARE(odd.height % 2, 0);
+}
+
+void MalloyModelTests::audioFromARemovedInputIsNotKept() {
+    AudioController c;
+    QPointer<FakeWasapiWorker> worker;
+    c.setWorkerFactoryForTesting([&worker](const QString& deviceId, bool loopback) {
+        auto* w = new FakeWasapiWorker(deviceId, loopback);
+        worker = w;
+        return w;
+    });
+    const QString id = QStringLiteral("input:{test-mic}");
+    c.reconcileInputs({QStringLiteral("{test-mic}")});
+    QVERIFY(worker);
+
+    // A chunk emitted from the worker's own thread is queued for the
+    // controller, as a real capture thread's are.
+    std::thread capture([w = worker.data()] { emit w->samplesReady(QByteArray(3840, 'x')); });
+    capture.join();
+
+    // The input is removed before that chunk is delivered.
+    c.reconcileInputs({});
+    QCOMPARE(c.bufferedBytesForTesting(id), -1);
+    QCoreApplication::processEvents();
+
+    // It must not bring the removed input's buffer back. Added again, the
+    // microphone would otherwise start with that audio in hand.
+    QCOMPARE(c.bufferedBytesForTesting(id), -1);
 }
 
 void MalloyModelTests::mediaProbesAreRememberedNotRepeated() {

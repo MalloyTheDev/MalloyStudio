@@ -199,9 +199,14 @@ void AudioController::startWorker(int index) {
 
     connect(worker, &WasapiCapture::samplesReady, this,
             [this, id](QByteArray pcm) {
-        // Audio arriving is the device working, including after a restart.
+        // Chunks the worker queued before its input was removed still arrive
+        // after it. Buffering them would recreate the removed input's buffer,
+        // and a microphone added back later would start with that stale audio
+        // and keep it as a constant delay against the other inputs.
         const int i = indexForId(id);
-        if (i >= 0 && !m_inputs[i].connected) {
+        if (i < 0) return;
+        // Audio arriving is the device working, including after a restart.
+        if (!m_inputs[i].connected) {
             m_inputs[i].connected = true;
             m_restartDelayMs.remove(id);
             emit inputConnectionChanged(id, true);

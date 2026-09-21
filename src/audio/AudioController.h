@@ -64,6 +64,11 @@ public:
     // For tests, so none opens a real device.
     using WorkerFactory = std::function<WasapiCapture*(const QString& deviceId, bool loopback)>;
     void setWorkerFactoryForTesting(WorkerFactory factory) { m_workerFactory = std::move(factory); }
+    // Bytes waiting in an input's buffer, or -1 when it has none. For tests.
+    int bufferedBytesForTesting(const QString& id) const {
+        const auto it = m_rings.constFind(id);
+        return it == m_rings.constEnd() ? -1 : it->available();
+    }
     QQueue<TimedPcm> snapshotReplayPcm() const; // thread-safe copy
 
 signals:
