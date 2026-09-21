@@ -475,6 +475,14 @@ private slots:
     void closingDuringAReplaySaveFinishesItFirst();
     void theReplayBufferIsAFrameConsumer();
     void aFadeStartsFromTheComposedCanvas();
+    // A drag in the preview moves the layer it started on and nothing else:
+    // it follows that layer through a reorder, and ends when the current,
+    // staged or on-air scene changes, the collection is reset, or the layer
+    // is removed.
+    void aPreviewDragEndsWhenTheSceneIsSwitched();
+    void aPreviewDragEndsWhenTheCollectionIsReset();
+    void aPreviewDragFollowsItsLayerNotAnIndex();
+    void aPreviewDragEndsWhenStudioModeMovesItsScene();
     void theOutputDialogHandsBackWhatItWasGiven();
     void theStreamDialogRefusesAnUnusableCustomUrl();
     void spinBoxesAndTextFieldsKeepTheirDigits();
@@ -7778,6 +7786,185 @@ void MalloyModelTests::aFadeStartsFromTheComposedCanvas() {
     const QImage from = preview.renderCurrentScene();
     QCOMPARE(from.size(), QSize(MalloyCanvas::Width, MalloyCanvas::Height));
     QCOMPARE(from, preview.cachedComposedFrame());
+}
+
+namespace {
+// The middle of a never shown preview sized 640x360, which is the middle of
+// the canvas: inside a Color Block at its default transform and clear of its
+// resize handles, so pressing there starts a move.
+constexpr QPoint kPreviewCentre(320, 180);
+}
+
+void MalloyModelTests::aPreviewDragEndsWhenTheSceneIsSwitched() {
+    SceneCollection scenes;
+    QUndoStack undo;
+    scenes.setUndoStack(&undo);
+    scenes.addScene(QStringLiteral("One"));
+    SceneItem* dragged = scenes.addNewSourceToCurrent(QStringLiteral("Block"), Source::Type::ColorBlock,
+                                                      QString(), QColor(200, 30, 30));
+    scenes.addScene(QStringLiteral("Two"));
+    SceneItem* sameIndex = scenes.addNewSourceToCurrent(QStringLiteral("Block"), Source::Type::ColorBlock,
+                                                        QString(), QColor(30, 200, 30));
+    QVERIFY(dragged && sameIndex);
+    scenes.setCurrentIndex(0);
+    undo.clear();
+    const QRectF draggedStart = dragged->transform();
+    const QRectF otherStart = sameIndex->transform();
+
+    PreviewWidget preview(&scenes, PreviewWidget::Role::Program);
+    preview.resize(640, 360);
+    QTest::mousePress(&preview, Qt::LeftButton, {}, kPreviewCentre);
+    QTest::mouseMove(&preview, kPreviewCentre + QPoint(60, 0));
+    const QRectF moved = dragged->transform();
+    QVERIFY(moved != draggedStart);
+
+    // The scene 2 hotkey, pressed with the button still held. Layer 0 of
+    // scene 2 used to take over the drag and be committed on release.
+    scenes.setCurrentIndex(1);
+    QTest::mouseMove(&preview, kPreviewCentre + QPoint(120, 40));
+    QTest::mouseRelease(&preview, Qt::LeftButton, {}, kPreviewCentre + QPoint(120, 40));
+    QCOMPARE(sameIndex->transform(), otherStart);
+    QCOMPARE(dragged->transform(), moved);
+
+    // Scene 2 and straight back to scene 1, with no move in between. The drag
+    // ended at the first switch and is not picked up again on the way back.
+    scenes.setCurrentIndex(0);
+    QTest::mousePress(&preview, Qt::LeftButton, {}, kPreviewCentre);
+    QTest::mouseMove(&preview, kPreviewCentre + QPoint(60, 0));
+    const QRectF movedAgain = dragged->transform();
+    QVERIFY(movedAgain != moved);
+    scenes.setCurrentIndex(1);
+    scenes.setCurrentIndex(0);
+    QTest::mouseMove(&preview, kPreviewCentre + QPoint(120, 40));
+    QTest::mouseRelease(&preview, Qt::LeftButton, {}, kPreviewCentre + QPoint(120, 40));
+    QCOMPARE(dragged->transform(), movedAgain);
+
+    // What each drag did before its switch is one step, and undoing them puts
+    // the layer they were done to back where it started.
+    QCOMPARE(undo.count(), 2);
+    QCOMPARE(undo.text(0), QStringLiteral("Transform Layer"));
+    QCOMPARE(undo.text(1), QStringLiteral("Transform Layer"));
+    undo.undo();
+    undo.undo();
+    QCOMPARE(scenes.sceneAt(0)->itemAt(0)->transform(), draggedStart);
+    QCOMPARE(scenes.sceneAt(1)->itemAt(0)->transform(), otherStart);
+}
+
+void MalloyModelTests::aPreviewDragEndsWhenTheCollectionIsReset() {
+    SceneCollection scenes;
+    QUndoStack undo;
+    scenes.setUndoStack(&undo);
+    scenes.addScene(QStringLiteral("One"));
+    QVERIFY(scenes.addNewSourceToCurrent(QStringLiteral("Block"), Source::Type::ColorBlock,
+                                         QString(), QColor(200, 30, 30)) != nullptr);
+    undo.clear();
+    scenes.renameSceneAt(0, QStringLiteral("Renamed"));   // something for Ctrl+Z to undo
+    QCOMPARE(undo.count(), 1);
+
+    PreviewWidget preview(&scenes, PreviewWidget::Role::Program);
+    preview.resize(640, 360);
+    QTest::mousePress(&preview, Qt::LeftButton, {}, kPreviewCentre);
+    QTest::mouseMove(&preview, kPreviewCentre + QPoint(60, 0));
+
+    // Ctrl+Z with the button still held. The restore replaces every item and
+    // closes the edit session, so further moves used to reposition the new
+    // layer at the old index with nothing recording them.
+    undo.undo();
+    SceneItem* restored = scenes.currentScene()->itemAt(0);
+    QVERIFY(restored != nullptr);
+    const QRectF restoredAt = restored->transform();
+    // An edit session opened after the reset, as the inspector opens one, is
+    // not the drag's to commit.
+    scenes.beginEditSession();
+    QTest::mouseMove(&preview, kPreviewCentre + QPoint(120, 40));
+    QTest::mouseRelease(&preview, Qt::LeftButton, {}, kPreviewCentre + QPoint(120, 40));
+    QCOMPARE(restored->transform(), restoredAt);
+    QVERIFY(scenes.editSessionActive());
+
+    // Nor does the release record a step, which would discard the redo.
+    QCOMPARE(undo.index(), 0);
+    QVERIFY(undo.canRedo());
+}
+
+void MalloyModelTests::aPreviewDragFollowsItsLayerNotAnIndex() {
+    SceneCollection scenes;
+    QUndoStack undo;
+    scenes.setUndoStack(&undo);
+    scenes.addScene(QStringLiteral("One"));
+    SceneItem* below = scenes.addNewSourceToCurrent(QStringLiteral("Below"), Source::Type::ColorBlock,
+                                                    QString(), QColor(30, 200, 30));
+    // Added last, so it is layer 0 and on top: the one a press in the middle hits.
+    SceneItem* dragged = scenes.addNewSourceToCurrent(QStringLiteral("Top"), Source::Type::ColorBlock,
+                                                      QString(), QColor(200, 30, 30));
+    QVERIFY(below && dragged);
+    QCOMPARE(scenes.currentScene()->indexOf(dragged), 0);
+    const QRectF belowStart = below->transform();
+
+    PreviewWidget preview(&scenes, PreviewWidget::Role::Program);
+    preview.resize(640, 360);
+    QTest::mousePress(&preview, Qt::LeftButton, {}, kPreviewCentre);
+    QTest::mouseMove(&preview, kPreviewCentre + QPoint(60, 0));
+    const QRectF firstMove = dragged->transform();
+
+    // Reordered with the button held: the dragged layer is now layer 1, and
+    // the drag goes on moving it rather than the layer now at index 0.
+    scenes.moveCurrentItem(0, 1);
+    QTest::mouseMove(&preview, kPreviewCentre + QPoint(120, 0));
+    QCOMPARE(below->transform(), belowStart);
+    QVERIFY(dragged->transform().left() > firstMove.left());
+
+    // Removed with the button held: the drag ends there, and the layer left
+    // at index 0 is not picked up in its place.
+    scenes.removeCurrentItemAt(scenes.currentScene()->indexOf(dragged));
+    QTest::mouseMove(&preview, kPreviewCentre + QPoint(180, 40));
+    QTest::mouseRelease(&preview, Qt::LeftButton, {}, kPreviewCentre + QPoint(180, 40));
+    QCOMPARE(below->transform(), belowStart);
+}
+
+void MalloyModelTests::aPreviewDragEndsWhenStudioModeMovesItsScene() {
+    SceneCollection scenes;
+    QUndoStack undo;
+    scenes.setUndoStack(&undo);
+    scenes.addScene(QStringLiteral("One"));
+    SceneItem* first = scenes.addNewSourceToCurrent(QStringLiteral("Block"), Source::Type::ColorBlock,
+                                                    QString(), QColor(200, 30, 30));
+    scenes.addScene(QStringLiteral("Two"));
+    SceneItem* second = scenes.addNewSourceToCurrent(QStringLiteral("Block"), Source::Type::ColorBlock,
+                                                     QString(), QColor(30, 200, 30));
+    QVERIFY(first && second);
+
+    // Live mode: the program pane edits scene Two. Studio mode switched on
+    // with the button held stages the scene and makes that pane read only,
+    // so the drag ends rather than carrying on in a pane that no longer edits.
+    PreviewWidget program(&scenes, PreviewWidget::Role::Program);
+    program.resize(640, 360);
+    const QRectF secondStart = second->transform();
+    QTest::mousePress(&program, Qt::LeftButton, {}, kPreviewCentre);
+    QTest::mouseMove(&program, kPreviewCentre + QPoint(60, 0));
+    const QRectF secondMoved = second->transform();
+    QVERIFY(secondMoved != secondStart);
+    scenes.setStudioMode(true);
+    QTest::mouseMove(&program, kPreviewCentre + QPoint(120, 40));
+    QTest::mouseRelease(&program, Qt::LeftButton, {}, kPreviewCentre + QPoint(120, 40));
+    QCOMPARE(second->transform(), secondMoved);
+
+    // Studio mode: scene One staged while Two is on air. A transition taken
+    // with the button held puts One on air, and the drag ends there rather
+    // than moving a layer of the live picture.
+    scenes.setCurrentIndex(0);
+    QCOMPARE(scenes.programIndex(), 1);
+    PreviewWidget staged(&scenes, PreviewWidget::Role::Staged);
+    staged.resize(640, 360);
+    const QRectF firstStart = first->transform();
+    QTest::mousePress(&staged, Qt::LeftButton, {}, kPreviewCentre);
+    QTest::mouseMove(&staged, kPreviewCentre + QPoint(60, 0));
+    const QRectF firstMoved = first->transform();
+    QVERIFY(firstMoved != firstStart);
+    scenes.promotePreviewToProgram();
+    QCOMPARE(scenes.programIndex(), 0);
+    QTest::mouseMove(&staged, kPreviewCentre + QPoint(120, 40));
+    QTest::mouseRelease(&staged, Qt::LeftButton, {}, kPreviewCentre + QPoint(120, 40));
+    QCOMPARE(first->transform(), firstMoved);
 }
 
 void MalloyModelTests::theOutputDialogHandsBackWhatItWasGiven() {

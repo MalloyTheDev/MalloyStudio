@@ -365,7 +365,11 @@ painted at `1-factor` opacity followed by the new scene at `factor` opacity.
 **Drag-resize** — `mousePressEvent` determines `DragMode` based on proximity to item
 corners vs. interior. The 12-pixel corner handles are tested against canvas coordinates.
 `resizedRect()` computes the new transform during drag, clamped by `MalloyCanvas::clampRect()`
-and snapped by `MalloyCanvas::snapRect()`.
+and snapped by `MalloyCanvas::snapRect()`. The dragged item is held by identity, not
+by index. A drag ends when its item leaves the current scene, and when the current,
+program or preview scene changes. What it moved up to that point is kept as one undo
+step. A collection reset (undo, redo, a load) also ends it, and the reset has already
+discarded those moves.
 
 ### `InspectorPanel`
 

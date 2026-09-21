@@ -48,12 +48,19 @@ PreviewWidget::PreviewWidget(SceneCollection* scenes, Role role, QWidget* parent
     // reach the composed frame.
     connect(m_scenes, &SceneCollection::itemsChanged, this,
             [this]{ markContentChanged(); update(); });
+    // A drag belongs to the scene it started on, so it ends when the scene
+    // being edited or shown changes under it, a scene hotkey being the usual
+    // way while the button is held. What it moved so far is kept as one undo
+    // step, as if the button had been released just before. It is not rolled
+    // back: the edit session's snapshot also records which scene was current,
+    // so restoring it would switch straight back and undo the very switch
+    // that ended the drag.
     connect(m_scenes, &SceneCollection::currentChanged, this,
-            [this](int){ markContentChanged(); update(); });
+            [this](int){ endDrag(true); markContentChanged(); update(); });
     connect(m_scenes, &SceneCollection::programChanged, this,
-            [this](int){ markContentChanged(); update(); });
+            [this](int){ endDrag(true); markContentChanged(); update(); });
     connect(m_scenes, &SceneCollection::previewChanged, this,
-            [this](int){ markContentChanged(); update(); });
+            [this](int){ endDrag(true); markContentChanged(); update(); });
     connect(m_scenes, &SceneCollection::itemSelectionChanged, this, [this](int){ update(); });
     // A reset replaces the document; it does not stop capture. Undo, redo and a
     // cancelled edit all reset the collection, and clearing the capture frames
@@ -63,6 +70,9 @@ PreviewWidget::PreviewWidget(SceneCollection* scenes, Role role, QWidget* parent
     // itself when its session actually stops. Images are document state and
     // are dropped; the scene is recomposed either way.
     connect(m_scenes, &SceneCollection::collectionReset, this, [this]{
+        // The load has already closed the edit session and replaced every
+        // item, so a drag in progress has nothing left to commit.
+        endDrag(false);
         m_imageCache.clear();
         markContentChanged();
         update();
@@ -700,7 +710,7 @@ void PreviewWidget::mousePressEvent(QMouseEvent* event) {
         return;
     }
 
-    m_dragIndex = index;
+    m_dragItem = item;
     m_dragStartCanvas = canvasPoint;
     m_dragStartRect = item->transform();
     m_scenes->beginCurrentItemTransformEdit(index);
@@ -708,23 +718,38 @@ void PreviewWidget::mousePressEvent(QMouseEvent* event) {
 }
 
 void PreviewWidget::mouseMoveEvent(QMouseEvent* event) {
-    if (m_dragMode == DragMode::None || m_dragIndex < 0) return;
-    SceneItem* item = m_scenes->currentScene() ? m_scenes->currentScene()->itemAt(m_dragIndex) : nullptr;
-    if (!item || item->isLocked()) return;
+    if (m_dragMode == DragMode::None) return;
+    // Looked up by identity on every move, so a layer reordered mid drag is
+    // still the one moved, and one that has left the scene being edited ends
+    // the drag instead of handing it to whatever took its place.
+    Scene* scene = m_scenes->currentScene();
+    const int index = (scene && m_dragItem) ? scene->indexOf(m_dragItem) : -1;
+    if (index < 0) {
+        endDrag(true);
+        return;
+    }
+    if (m_dragItem->isLocked()) return;
 
     const QPointF canvasPoint = widgetToCanvas(event->pos());
     if (m_dragMode == DragMode::Move) {
         const QPointF delta = canvasPoint - m_dragStartCanvas;
-        m_scenes->updateCurrentItemTransformEdit(m_dragIndex, MalloyCanvas::snapRect(m_dragStartRect.translated(delta)));
+        m_scenes->updateCurrentItemTransformEdit(index, MalloyCanvas::snapRect(m_dragStartRect.translated(delta)));
     } else {
-        m_scenes->updateCurrentItemTransformEdit(m_dragIndex, resizedRect(canvasPoint));
+        m_scenes->updateCurrentItemTransformEdit(index, resizedRect(canvasPoint));
     }
 }
 
 void PreviewWidget::mouseReleaseEvent(QMouseEvent*) {
-    if (m_dragIndex >= 0) m_scenes->commitCurrentItemTransformEdit();
+    endDrag(true);
+}
+
+void PreviewWidget::endDrag(bool commitEdit) {
+    if (m_dragMode == DragMode::None) return;
+    // Cleared before committing, so anything the commit sets off finds no
+    // drag here to end a second time.
     m_dragMode = DragMode::None;
-    m_dragIndex = -1;
+    m_dragItem.clear();
+    if (commitEdit) m_scenes->commitCurrentItemTransformEdit();
 }
 
 void PreviewWidget::keyPressEvent(QKeyEvent* event) {

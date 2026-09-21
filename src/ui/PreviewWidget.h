@@ -7,6 +7,7 @@
 #include <QMutex>
 
 #include <atomic>
+#include <QPointer>
 #include <QQueue>
 #include <QRectF>
 #include <QString>
@@ -156,6 +157,10 @@ private:
     void drawSourceDirect(QPainter& painter, Source* source, const QRectF& rect);
     void drawSelection(QPainter& painter, const QRectF& rect, bool locked);
     QRectF resizedRect(const QPointF& canvasPoint) const;
+    // Ends a drag in progress. With commitEdit, what it has moved so far is
+    // committed as one undo step; without it the edit session is left alone,
+    // for when the collection has already closed it.
+    void endDrag(bool commitEdit);
     static QString frameKey(int adapterIndex, int outputIndex);
 
     Role             m_role = Role::Program;
@@ -166,7 +171,10 @@ private:
     QHash<QString, QImage> m_cameraFrames;  // Camera frames (keyed by MF device id)
     QMutex m_frameMutex;                   // Guards all frame caches
     DragMode m_dragMode = DragMode::None;
-    int m_dragIndex = -1;
+    // Held by identity. An index named whichever item had that position in
+    // whichever scene was current at the next mouse move, so a drag that
+    // outlived a scene switch or an undo moved a layer it never started on.
+    QPointer<SceneItem> m_dragItem;
     QPointF m_dragStartCanvas;
     QRectF m_dragStartRect;
 
