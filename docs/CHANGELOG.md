@@ -48,6 +48,10 @@ finding again.
 - Volume, pan and the limiter threshold refuse values that are not numbers (eeb2cc7).
 - The mixer emits audio by elapsed time rather than one tick per timer fire, which ran
   2% short and lost stalls, so recorded sound no longer drifts ahead of the picture.
+- Audio capture threads are scheduled through MMCSS, and sound a device reports lost
+  (a data discontinuity) is logged (1259f1b).
+- A test holds sound and picture within 60 ms of each other in a recording, measured
+  from a flash and a click made together (58ddc3c).
 
 ### Recording and streaming
 

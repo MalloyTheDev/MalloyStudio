@@ -1215,10 +1215,11 @@ void MalloyModelTests::soundAndPictureStayTogether() {
           flash, click, click - flash);
     QVERIFY(flash > 0);
     QVERIFY(click > 0);
-    // Measured on the development machine: the click 7 to 27 ms after the
-    // flash, which is a 20 ms audio chunk and part of a frame. The bound
-    // allows a chunk and a frame each way; a start-up offset between the two
-    // inputs, which is what this guards against, is hundreds of milliseconds.
+    // Measured on the development machine: the click within 7 to 27 ms of
+    // the flash, either side, which is a 20 ms audio chunk and part of a
+    // frame. The bound allows a chunk and a frame each way; a start-up offset
+    // between the two inputs, which is what this guards against, would be
+    // hundreds of milliseconds.
     QVERIFY2(std::abs(click - flash) < 0.06,
              qPrintable(QStringLiteral("click %1 s, flash %2 s").arg(click).arg(flash)));
 }
