@@ -877,8 +877,12 @@ void MalloyModelTests::aRecordingOfAStillSceneKeepsItsLengthAndAudio() {
     const double video = streamSeconds(ffprobe, target.destination, QStringLiteral("v:0"));
     const double sound = streamSeconds(ffprobe, target.destination, QStringLiteral("a:0"));
     qInfo("still scene: video %.2f s, audio %.2f s", video, sound);
-    QVERIFY2(sound > 2.4, qPrintable(QStringLiteral("audio %1 s").arg(sound)));
-    QVERIFY2(video > 2.4, qPrintable(QStringLiteral("video %1 s").arg(video)));
+    // Measured on the development machine: 2.4 to 2.7 s of audio here, and 2.7
+    // to 2.8 s for a scene that moves, the difference from 3 s being ffmpeg's
+    // start-up before it opens the audio pipe. Without the still floor it was
+    // 0.18 s. The bound sits well between the two so the test does not flake.
+    QVERIFY2(sound > 2.0, qPrintable(QStringLiteral("audio %1 s").arg(sound)));
+    QVERIFY2(video > 2.0, qPrintable(QStringLiteral("video %1 s").arg(video)));
 }
 
 void MalloyModelTests::controllerCanReplacePipelineFromFinishedSignal() {
